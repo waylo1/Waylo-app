@@ -1,0 +1,12 @@
+{
+  "name": "waylo-app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
