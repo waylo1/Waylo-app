@@ -1,122 +1,258 @@
 const express = require('express');
-const app = express();
+const jwt = require('jsonwebtoken');
 
+const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// "Base de données" temporaire (stockée dans la RAM du serveur)
-let projects = [
-  { id: 1, name: "Lancement Waylo", desc: "Phase de test bêta" },
-  { id: 2, name: "Design UI", desc: "Look moderne 2026" }
-];
+const SECRET = "dev";
 
-// ================= API SIMPLIFIÉE =================
+// ====== DB MEMORY ======
+let users = [];
+let missions = [];
 
-// Récupérer les projets
-app.get('/api/projects', (req, res) => {
-  res.json(projects);
-});
+let uid = 1;
+let mid = 1;
 
-// Ajouter un projet
-app.post('/api/projects', (req, res) => {
-  const { name, desc } = req.body;
-  const newProject = { id: Date.now(), name, desc };
-  projects.push(newProject);
-  res.status(201).json(newProject);
-});
+// ====== AUTH ======
+function auth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+  try {
+    req.user = jwt.verify(token, SECRET);
+    next();
+  } catch {
+    res.sendStatus(401);
+  }
+}
 
-// Supprimer un projet
-app.delete('/api/projects/:id', (req, res) => {
-  projects = projects.filter(p => p.id !== parseInt(req.params.id));
+// ====== AUTH API ======
+app.post('/api/register', (req, res) => {
+  const { email, password } = req.body;
+  users.push({ id: uid++, email, password });
   res.send("OK");
 });
 
-// ================= FRONTEND DYNAMIQUE =================
+app.post('/api/login', (req, res) => {
+  const user = users.find(u => u.email === req.body.email);
+  if (!user) return res.status(400).send("Invalid");
+
+  const token = jwt.sign({ id: user.id }, SECRET);
+  res.json({ token });
+});
+
+// ====== MISSIONS ======
+
+// create
+app.post('/api/missions', auth, (req, res) => {
+  const { item, city, budget } = req.body;
+
+  missions.push({
+    id: mid++,
+    item,
+    city,
+    budget,
+    owner: req.user.id,
+    status: "OPEN",
+    traveler: null,
+    proof: null
+  });
+
+  res.send("OK");
+});
+
+// list
+app.get('/api/missions', auth, (req, res) => {
+  res.json(missions.reverse());
+});
+
+// accept
+app.post('/api/missions/:id/accept', auth, (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
+  if (!m || m.status !== "OPEN") return res.sendStatus(400);
+
+  m.status = "IN_PROGRESS";
+  m.traveler = req.user.id;
+
+  res.send("OK");
+});
+
+// validate (PPR simulation)
+app.post('/api/missions/:id/validate', auth, (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
+  if (!m) return res.sendStatus(400);
+
+  m.status = "COMPLETED";
+  m.proof = {
+    time: new Date().toISOString(),
+    location: "GPS_OK",
+    otp: "VALID",
+    photo: "captured"
+  };
+
+  res.send("OK");
+});
+
+// ====== FRONT ======
 
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WAYLO | Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+<meta charset="UTF-8">
+<title>Waylo</title>
+<script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-[#020617] text-white font-sans min-h-screen">
-    <div class="max-w-4xl mx-auto p-6">
-        <div class="flex justify-between items-center mb-10">
-            <h1 class="text-3xl font-black tracking-tighter bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">WAYLO</h1>
-            <div class="flex items-center gap-2">
-                <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-                <span class="text-xs font-bold uppercase tracking-widest text-slate-400">Mode Live Gratuit</span>
-            </div>
-        </div>
 
-        <div class="bg-slate-900/50 border border-slate-800 p-6 rounded-3xl mb-10 backdrop-blur-md">
-            <h2 class="text-sm font-bold uppercase text-amber-500 mb-4">Ajouter un nouveau projet</h2>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input id="pName" type="text" placeholder="Nom du projet..." class="bg-slate-950 border border-slate-700 p-3 rounded-xl focus:outline-none focus:border-amber-500">
-                <input id="pDesc" type="text" placeholder="Description..." class="bg-slate-950 border border-slate-700 p-3 rounded-xl focus:outline-none focus:border-amber-500">
-            </div>
-            <button onclick="addProject()" class="w-full mt-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl transition-all">
-                + CRÉER
-            </button>
-        </div>
+<body class="bg-[#020617] text-white p-6">
 
-        <div id="projectList" class="grid gap-4">
-            </div>
+<div id="app"></div>
+
+<script>
+let token = localStorage.getItem('token');
+
+// ===== UI =====
+function set(html){
+  document.getElementById('app').innerHTML = html;
+}
+
+// ===== AUTH =====
+function authUI(){
+  set(\`
+    <div class="flex h-screen items-center justify-center">
+      <div class="bg-slate-900 p-6 rounded-xl w-80">
+        <h2 class="mb-4 text-lg">WAYLO</h2>
+        <input id="email" placeholder="email" class="w-full p-2 mb-2 bg-slate-800"/>
+        <input id="pass" type="password" placeholder="password" class="w-full p-2 mb-3 bg-slate-800"/>
+        <button onclick="login()" class="w-full bg-amber-500 text-black p-2 mb-2">Login</button>
+        <button onclick="register()" class="w-full bg-slate-700 p-2">Register</button>
+      </div>
     </div>
+  \`);
+}
 
-    <script>
-        async function fetchProjects() {
-            const res = await fetch('/api/projects');
-            const data = await res.json();
-            const list = document.getElementById('projectList');
-            list.innerHTML = '';
-            data.forEach(p => {
-                list.innerHTML += \`
-                    <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex justify-between items-center hover:border-slate-600 transition-all">
-                        <div>
-                            <h3 class="font-bold text-lg text-white">\${p.name}</h3>
-                            <p class="text-slate-400 text-sm">\${p.desc}</p>
-                        </div>
-                        <button onclick="deleteProject(\${p.id})" class="text-slate-500 hover:text-red-500 transition-colors">
-                           Effacer
-                        </button>
-                    </div>
-                \`;
-            });
-        }
+// ===== HOME =====
+function home(missions){
+  set(\`
+    <div class="max-w-3xl mx-auto">
 
-        async function addProject() {
-            const name = document.getElementById('pName').value;
-            const desc = document.getElementById('pDesc').value;
-            if(!name) return alert('Donne un nom !');
-            
-            await fetch('/api/projects', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name, desc })
-            });
-            
-            document.getElementById('pName').value = '';
-            document.getElementById('pDesc').value = '';
-            fetchProjects();
-        }
+      <h1 class="text-xl mb-4">WAYLO</h1>
 
-        async function deleteProject(id) {
-            await fetch('/api/projects/' + id, { method: 'DELETE' });
-            fetchProjects();
-        }
+      <div class="mb-6">
+        <input id="item" placeholder="Objet" class="p-2 bg-slate-800 w-full mb-2"/>
+        <input id="city" placeholder="Ville" class="p-2 bg-slate-800 w-full mb-2"/>
+        <input id="budget" placeholder="Budget" class="p-2 bg-slate-800 w-full mb-2"/>
+        <button onclick="create()" class="bg-amber-500 text-black px-4 py-2">Publier</button>
+      </div>
 
-        fetchProjects();
-    </script>
+      <div>
+        \${missions.map(m => \`
+          <div class="bg-slate-900 p-4 mb-3 rounded">
+            <div><b>\${m.item}</b> — \${m.city}</div>
+            <div>Budget: \${m.budget}</div>
+            <div>Status: \${m.status}</div>
+
+            \${m.status === 'OPEN' ? 
+              '<button onclick="accept('+m.id+')" class="mt-2 bg-green-500 px-2 py-1">Accepter</button>' 
+              : ''}
+
+            \${m.status === 'IN_PROGRESS' ? 
+              '<button onclick="validate('+m.id+')" class="mt-2 bg-amber-500 px-2 py-1">Remise</button>' 
+              : ''}
+
+            \${m.status === 'COMPLETED' ? 
+              '<div class="text-green-400 mt-2">✔ Remise confirmée</div>' 
+              : ''}
+
+          </div>
+        \`).join('')}
+      </div>
+
+    </div>
+  \`);
+}
+
+// ===== API =====
+
+async function login(){
+  const res = await fetch('/api/login',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      email: email.value,
+      password: pass.value
+    })
+  });
+
+  const data = await res.json();
+  token = data.token;
+  localStorage.setItem('token', token);
+  load();
+}
+
+async function register(){
+  await fetch('/api/register',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      email: email.value,
+      password: pass.value
+    })
+  });
+  alert("ok");
+}
+
+async function load(){
+  if(!token) return authUI();
+
+  const res = await fetch('/api/missions',{
+    headers:{ Authorization:'Bearer '+token }
+  });
+
+  const data = await res.json();
+  home(data);
+}
+
+async function create(){
+  await fetch('/api/missions',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      Authorization:'Bearer '+token
+    },
+    body: JSON.stringify({
+      item: item.value,
+      city: city.value,
+      budget: budget.value
+    })
+  });
+  load();
+}
+
+async function accept(id){
+  await fetch('/api/missions/'+id+'/accept',{
+    method:'POST',
+    headers:{ Authorization:'Bearer '+token }
+  });
+  load();
+}
+
+async function validate(id){
+  alert("Simulation PPR (GPS + Photo + OTP)");
+  await fetch('/api/missions/'+id+'/validate',{
+    method:'POST',
+    headers:{ Authorization:'Bearer '+token }
+  });
+  load();
+}
+
+load();
+</script>
+
 </body>
 </html>
   `);
 });
 
-app.listen(process.env.PORT || 3000, () => {
-    console.log("Waylo est prêt sur le port 3000");
-});
+app.listen(process.env.PORT || 3000);
