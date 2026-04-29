@@ -1,38 +1,22 @@
 const express = require('express');
-const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 
 const app = express();
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(helmet());
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 
-// ================= DB =================
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ================= IN-MEMORY DB =================
+let users = [];
+let projects = [];
 
-(async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE,
-      password TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS projects (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER,
-      name TEXT,
-      desc TEXT
-    );
-  `);
-})();
+let userId = 1;
+let projectId = 1;
 
 // ================= AUTH =================
 function auth(req, res, next) {
@@ -57,29 +41,25 @@ app.post('/api/register', async (req, res) => {
     return res.status(400).send("Invalid input");
   }
 
+  const exists = users.find(u => u.email === email);
+  if (exists) return res.status(400).send("User exists");
+
   const hash = await bcrypt.hash(password, 10);
 
-  try {
-    await pool.query(
-      'INSERT INTO users(email,password) VALUES($1,$2)',
-      [email, hash]
-    );
-    res.send("OK");
-  } catch {
-    res.status(400).send("User exists");
-  }
+  users.push({
+    id: userId++,
+    email,
+    password: hash
+  });
+
+  res.send("OK");
 });
 
 // LOGIN
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
 
-  const result = await pool.query(
-    'SELECT * FROM users WHERE email=$1',
-    [email]
-  );
-
-  const user = result.rows[0];
+  const user = users.find(u => u.email === email);
   if (!user) return res.status(400).send("Invalid");
 
   const valid = await bcrypt.compare(password, user.password);
@@ -91,32 +71,31 @@ app.post('/api/login', async (req, res) => {
 });
 
 // GET PROJECTS
-app.get('/api/projects', auth, async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM projects WHERE user_id=$1 ORDER BY id DESC',
-    [req.user.id]
-  );
-
-  res.json(result.rows);
+app.get('/api/projects', auth, (req, res) => {
+  const userProjects = projects.filter(p => p.user_id === req.user.id);
+  res.json(userProjects.reverse());
 });
 
 // ADD PROJECT
-app.post('/api/projects', auth, async (req, res) => {
+app.post('/api/projects', auth, (req, res) => {
   const { name, desc } = req.body;
 
-  await pool.query(
-    'INSERT INTO projects(user_id,name,desc) VALUES($1,$2,$3)',
-    [req.user.id, name, desc]
-  );
+  if (!name) return res.status(400).send("Missing name");
+
+  projects.push({
+    id: projectId++,
+    user_id: req.user.id,
+    name,
+    desc
+  });
 
   res.send("OK");
 });
 
 // DELETE PROJECT
-app.delete('/api/projects/:id', auth, async (req, res) => {
-  await pool.query(
-    'DELETE FROM projects WHERE id=$1 AND user_id=$2',
-    [req.params.id, req.user.id]
+app.delete('/api/projects/:id', auth, (req, res) => {
+  projects = projects.filter(
+    p => !(p.id == req.params.id && p.user_id === req.user.id)
   );
 
   res.send("OK");
@@ -183,21 +162,18 @@ function renderDashboard(projects){
         <button onclick="logout()" class="text-red-400">Logout</button>
       </div>
 
-      <!-- STATS -->
       <div class="grid grid-cols-3 gap-4 mb-8">
         <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl">Projets: \${projects.length}</div>
         <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl">Score: 98%</div>
         <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl">Status: OK</div>
       </div>
 
-      <!-- ADD -->
       <div class="flex gap-2 mb-6">
         <input id="name" placeholder="Projet" class="p-2 bg-slate-800 rounded w-full"/>
         <input id="desc" placeholder="Description" class="p-2 bg-slate-800 rounded w-full"/>
         <button onclick="add()" class="px-4 bg-amber-500 text-black rounded">+</button>
       </div>
 
-      <!-- LIST -->
       <div class="space-y-3">
         \${projects.map(p => \`
           <div class="flex justify-between items-center bg-slate-900 border border-slate-800 p-4 rounded-xl">
@@ -302,5 +278,5 @@ load();
 
 // ================= START =================
 app.listen(process.env.PORT || 3000, () => {
-  console.log("WAYLO LIVE 🚀");
+  console.log("WAYLO (NO DB) RUNNING 🚀");
 });
