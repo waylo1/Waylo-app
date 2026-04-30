@@ -1,167 +1,252 @@
-const express = require('express');
-const jwt = require('jsonwebtoken');
+const express = require("express");
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-const SECRET = "waylo_super_secret_2026";
+/* ======================
+   🧠 DATA (IN MEMORY)
+====================== */
 let users = [];
 let missions = [];
-let uid = 1;
-let mid = 1;
+let currentUser = null;
 
-// Middlewares
-function auth(req, res, next) {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.sendStatus(401);
-    try {
-        req.user = jwt.verify(token, SECRET);
-        next();
-    } catch { res.sendStatus(401); }
+/* ======================
+   🎨 HTML TEMPLATE
+====================== */
+function renderPage(content) {
+  return `
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WAYLO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+  </head>
+
+  <body class="bg-[#020617] text-white min-h-screen">
+
+    <div class="p-6 max-w-6xl mx-auto">
+
+      <h1 class="text-3xl font-bold mb-6 bg-gradient-to-r from-amber-400 to-yellow-600 bg-clip-text text-transparent">
+        WAYLO
+      </h1>
+
+      ${content}
+
+    </div>
+
+    <script>lucide.createIcons()</script>
+  </body>
+  </html>
+  `;
 }
 
-// API
-app.post('/api/register', (req, res) => {
-    const { email, password } = req.body;
-    if (users.find(u => u.email === email)) return res.status(400).send("Existe déjà");
-    users.push({ id: uid++, email, password });
-    res.send("OK");
+/* ======================
+   🔐 AUTH
+====================== */
+
+app.get("/", (req, res) => {
+  if (!currentUser) {
+    return res.send(renderPage(authPage()));
+  }
+  res.send(renderPage(dashboard()));
 });
 
-app.post('/api/login', (req, res) => {
-    const user = users.find(u => u.email === req.body.email && u.password === req.body.password);
-    if (!user) return res.status(400).send("Identifiants invalides");
-    const token = jwt.sign({ id: user.id, email: user.email }, SECRET);
-    res.json({ token });
+function authPage() {
+  return `
+  <div class="grid grid-cols-2 gap-6">
+
+    <form method="POST" action="/login" class="backdrop-blur bg-white/5 p-6 rounded-2xl border border-white/10">
+      <h2 class="text-xl mb-4">Login</h2>
+      <input name="email" placeholder="Email" class="w-full mb-3 p-2 bg-black/40 rounded" />
+      <input name="password" type="password" placeholder="Password" class="w-full mb-3 p-2 bg-black/40 rounded" />
+      <button class="w-full bg-amber-500 hover:bg-amber-600 p-2 rounded">Connexion</button>
+    </form>
+
+    <form method="POST" action="/register" class="backdrop-blur bg-white/5 p-6 rounded-2xl border border-white/10">
+      <h2 class="text-xl mb-4">Register</h2>
+      <input name="email" placeholder="Email" class="w-full mb-3 p-2 bg-black/40 rounded" />
+      <input name="password" type="password" placeholder="Password" class="w-full mb-3 p-2 bg-black/40 rounded" />
+      <button class="w-full bg-gradient-to-r from-amber-400 to-yellow-600 p-2 rounded">Créer compte</button>
+    </form>
+
+  </div>
+  `;
+}
+
+app.post("/register", (req, res) => {
+  const { email, password } = req.body;
+  users.push({ email, password });
+  currentUser = { email };
+  res.redirect("/");
 });
 
-app.get('/api/missions', auth, (req, res) => res.json(missions.slice().reverse()));
-
-app.post('/api/missions', auth, (req, res) => {
-    const { item, city, budget } = req.body;
-    missions.push({ id: mid++, item, city, budget, status: "OPEN", owner: req.user.email });
-    res.send("OK");
+app.post("/login", (req, res) => {
+  const { email, password } = req.body;
+  const user = users.find(u => u.email === email && u.password === password);
+  if (user) {
+    currentUser = user;
+  }
+  res.redirect("/");
 });
 
-app.post('/api/missions/:id/accept', auth, (req, res) => {
-    const m = missions.find(x => x.id == req.params.id);
-    if (m && m.status === "OPEN") { m.status = "IN_PROGRESS"; res.send("OK"); }
-    else res.sendStatus(400);
+app.get("/logout", (req, res) => {
+  currentUser = null;
+  res.redirect("/");
 });
 
-// Front-end HTML Unique
-app.get('/', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WAYLO | Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-[#020617] text-white min-h-screen font-sans">
-    <div id="app" class="max-w-md mx-auto p-6"></div>
+/* ======================
+   📦 MISSIONS
+====================== */
 
-    <script>
-        let token = localStorage.getItem('token');
-        const appDiv = document.getElementById('app');
+function dashboard() {
+  return `
+  <div class="flex justify-between mb-6">
+    <span class="text-white/60">Connecté : ${currentUser.email}</span>
+    <a href="/logout" class="text-red-400">Logout</a>
+  </div>
 
-        function renderAuth() {
-            appDiv.innerHTML = \`
-                <div class="mt-20 text-center">
-                    <h1 class="text-4xl font-black mb-2 bg-gradient-to-r from-amber-200 to-amber-500 bg-clip-text text-transparent italic">WAYLO</h1>
-                    <p class="text-slate-500 text-xs tracking-widest uppercase mb-10 text-center">L'innovation est en route</p>
-                    <div class="bg-slate-900/50 border border-slate-800 p-8 rounded-[2rem] backdrop-blur-xl shadow-2xl">
-                        <input id="email" type="email" placeholder="Email" class="w-full bg-slate-950 border border-slate-800 p-4 rounded-2xl mb-4 focus:border-amber-500 outline-none transition-all">
-                        <input id="pass" type="password" placeholder="Mot de passe" class="w-full bg-slate-950 border border-slate-800 p-4 rounded-2xl mb-6 focus:border-amber-500 outline-none transition-all">
-                        <button onclick="login()" class="w-full bg-amber-500 text-slate-950 font-black py-4 rounded-2xl mb-3 hover:scale-[1.02] active:scale-95 transition-all shadow-lg shadow-amber-500/20">SE CONNECTER</button>
-                        <button onclick="register()" class="w-full bg-slate-800 text-white font-bold py-4 rounded-2xl text-sm hover:bg-slate-700 transition-all">CRÉER UN COMPTE</button>
-                    </div>
-                </div>
-            \`;
-        }
+  ${createMissionForm()}
 
-        function renderDashboard(missions) {
-            appDiv.innerHTML = \`
-                <div class="flex justify-between items-center mb-8">
-                    <h1 class="text-2xl font-black bg-gradient-to-r from-amber-200 to-amber-500 bg-clip-text text-transparent italic">WAYLO</h1>
-                    <button onclick="logout()" class="text-[10px] bg-slate-800 px-3 py-1 rounded-full text-slate-400 uppercase font-bold tracking-tighter">Déconnexion</button>
-                </div>
+  <div class="mt-8 grid gap-4">
+    ${missions.map(m => missionCard(m)).join("")}
+  </div>
+  `;
+}
 
-                <div class="bg-slate-900/50 border border-slate-800 p-6 rounded-[2rem] mb-8 shadow-xl">
-                    <h2 class="text-amber-500 text-[10px] font-black uppercase tracking-widest mb-4">Nouvelle Mission</h2>
-                    <input id="item" placeholder="Objet (ex: Sac, Colis...)" class="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl mb-3 outline-none text-sm">
-                    <div class="flex gap-2 mb-3">
-                        <input id="city" placeholder="Ville" class="w-1/2 bg-slate-950 border border-slate-800 p-3 rounded-xl outline-none text-sm">
-                        <input id="budget" placeholder="Budget (€)" class="w-1/2 bg-slate-950 border border-slate-800 p-3 rounded-xl outline-none text-sm">
-                    </div>
-                    <button onclick="createMission()" class="w-full bg-amber-500 text-slate-950 font-black py-3 rounded-xl hover:bg-amber-400 transition-all">PUBLIER</button>
-                </div>
+function createMissionForm() {
+  return `
+  <form method="POST" action="/mission" class="backdrop-blur bg-white/5 p-6 rounded-2xl border border-white/10">
+    <h2 class="mb-4 text-lg">Nouvelle mission</h2>
 
-                <div class="space-y-4">
-                    \${missions.map(m => \`
-                        <div class="bg-slate-900 border border-slate-800 p-5 rounded-[1.5rem] shadow-sm">
-                            <div class="flex justify-between items-start mb-2">
-                                <h3 class="font-bold text-lg">\${m.item}</h3>
-                                <span class="text-[10px] font-bold px-2 py-1 rounded-md \${m.status === 'OPEN' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-500 border border-amber-500/20'} uppercase">\${m.status}</span>
-                            </div>
-                            <p class="text-slate-400 text-sm mb-4">📍 \${m.city} • 💰 \${m.budget}€</p>
-                            \${m.status === 'OPEN' ? \`<button onclick="acceptMission(\${m.id})" class="w-full bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-2 rounded-lg transition-all">ACCEPTER LA MISSION</button>\` : ''}
-                        </div>
-                    \`).join('')}
-                </div>
-            \`;
-        }
+    <input name="objet" placeholder="Objet" class="w-full mb-3 p-2 bg-black/40 rounded"/>
+    <input name="ville" placeholder="Ville" class="w-full mb-3 p-2 bg-black/40 rounded"/>
+    <input name="budget" placeholder="Budget €" class="w-full mb-3 p-2 bg-black/40 rounded"/>
 
-        // Fonctions API
-        async function login() {
-            const res = await fetch('/api/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email: email.value, password: pass.value })
-            });
-            if (res.ok) { const data = await res.json(); token = data.token; localStorage.setItem('token', token); load(); }
-            else alert("Erreur connexion");
-        }
+    <button class="bg-gradient-to-r from-amber-400 to-yellow-600 px-4 py-2 rounded">
+      Publier
+    </button>
+  </form>
+  `;
+}
 
-        async function register() {
-            await fetch('/api/register', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email: email.value, password: pass.value })
-            });
-            alert("Compte créé ! Connecte-toi.");
-        }
+app.post("/mission", (req, res) => {
+  const { objet, ville, budget } = req.body;
 
-        function logout() { localStorage.removeItem('token'); token = null; renderAuth(); }
+  missions.push({
+    id: Date.now(),
+    objet,
+    ville,
+    budget,
+    buyer: currentUser.email,
+    traveler: null,
+    status: "OPEN",
+    code: null
+  });
 
-        async function load() {
-            if (!token) return renderAuth();
-            const res = await fetch('/api/missions', { headers: { Authorization: 'Bearer ' + token } });
-            if (res.ok) renderDashboard(await res.json()); else renderAuth();
-        }
-
-        async function createMission() {
-            await fetch('/api/missions', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + token},
-                body: JSON.stringify({ item: item.value, city: city.value, budget: budget.value })
-            });
-            load();
-        }
-
-        async function acceptMission(id) {
-            await fetch('/api/missions/'+id+'/accept', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
-            load();
-        }
-
-        load();
-    </script>
-</body>
-</html>
-    `);
+  res.redirect("/");
 });
 
-app.listen(process.env.PORT || 3000);
+/* ======================
+   🤝 ACCEPT MISSION
+====================== */
+
+app.get("/accept/:id", (req, res) => {
+  const mission = missions.find(m => m.id == req.params.id);
+
+  if (mission && mission.status === "OPEN") {
+    mission.status = "IN_PROGRESS";
+    mission.traveler = currentUser.email;
+
+    // 🔐 Generate 4 digit code
+    mission.code = Math.floor(1000 + Math.random() * 9000);
+  }
+
+  res.redirect("/");
+});
+
+/* ======================
+   🔐 VALIDATE DELIVERY
+====================== */
+
+app.post("/validate/:id", (req, res) => {
+  const mission = missions.find(m => m.id == req.params.id);
+  const { code } = req.body;
+
+  if (mission && mission.code == code) {
+    mission.status = "COMPLETED";
+  }
+
+  res.redirect("/");
+});
+
+/* ======================
+   🧊 UI CARD
+====================== */
+
+function missionCard(m) {
+  return `
+  <div class="backdrop-blur bg-white/5 p-6 rounded-2xl border border-white/10">
+
+    <div class="flex justify-between mb-2">
+      <h3 class="text-lg">${m.objet}</h3>
+      <span class="text-amber-400">${m.budget}€</span>
+    </div>
+
+    <p class="text-white/50 text-sm mb-4">${m.ville}</p>
+
+    <p class="mb-3">Status : 
+      <span class="
+        ${m.status === "OPEN" ? "text-white/50" : ""}
+        ${m.status === "IN_PROGRESS" ? "text-yellow-400" : ""}
+        ${m.status === "COMPLETED" ? "text-green-400" : ""}
+      ">
+        ${m.status}
+      </span>
+    </p>
+
+    ${
+      m.status === "OPEN" && currentUser.email !== m.buyer
+        ? `<a href="/accept/${m.id}" class="bg-amber-500 px-3 py-1 rounded">Accepter</a>`
+        : ""
+    }
+
+    ${
+      m.status === "IN_PROGRESS" && currentUser.email === m.buyer
+        ? `<p class="text-sm text-white/60 mt-2">Code secret : 
+            <span class="text-amber-400 text-lg">${m.code}</span>
+           </p>`
+        : ""
+    }
+
+    ${
+      m.status === "IN_PROGRESS" && currentUser.email === m.traveler
+        ? `
+        <form method="POST" action="/validate/${m.id}" class="mt-3 flex gap-2">
+          <input name="code" placeholder="Entrer code" class="p-2 bg-black/40 rounded"/>
+          <button class="bg-green-500 px-3 rounded">Valider</button>
+        </form>
+        `
+        : ""
+    }
+
+    ${
+      m.status === "COMPLETED"
+        ? `<p class="mt-3 text-green-400 font-bold">✔ Livraison confirmée</p>`
+        : ""
+    }
+
+  </div>
+  `;
+}
+
+/* ======================
+   🚀 START
+====================== */
+
+app.listen(PORT, () => {
+  console.log("WAYLO running on port " + PORT);
+});
