@@ -1,11 +1,12 @@
 {
   "name": "waylo-app",
   "version": "1.0.0",
+  "description": "WAYLO - Mandat sécurisé",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "express": "^4.18.2",
-    "mongoose": "^7.0.0",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.0"
+    "express": "^4.18.2"
   }
 }
