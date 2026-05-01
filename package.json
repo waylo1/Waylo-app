@@ -1,13 +1,11 @@
 {
-  "name": "waylo",
+  "name": "waylo-app",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
   "dependencies": {
     "express": "^4.18.2",
-    "jsonwebtoken": "^9.0.0",
-    "bcryptjs": "^2.4.3"
+    "mongoose": "^7.0.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.0"
   }
 }
