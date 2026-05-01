@@ -1,132 +1,270 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const express = require("express");
 const app = express();
+const PORT = process.env.PORT || 3000;
 
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const MONGO_URI = "mongodb+srv://Waylo:Code3210@waylo.r5axflu.mongodb.net/waylo_db?retryWrites=true&w=majority"; 
-const JWT_SECRET = "waylo_secure_2026";
+/* ======================
+   🧠 STATE (IN MEMORY)
+====================== */
 
-// Schémas
-const User = mongoose.model('User', new mongoose.Schema({ email: { type: String, unique: true }, password: String }));
-const Mission = mongoose.model('Mission', new mongoose.Schema({ 
-    item: String, city: String, budget: Number, 
-    status: { type: String, default: "OPEN" }, 
-    buyer: String, traveler: String, otp: String,
-    legalAccepted: Boolean 
-}));
+let users = [];
+let missions = [];
+let currentUser = null;
 
-mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ Connexion MongoDB Réussie"))
-    .catch(err => console.error("❌ Erreur DB:", err));
+/* ======================
+   🧾 LEGAL STATUS ENUM
+====================== */
 
-const auth = (req, res, next) => {
-    try { 
-        const token = req.headers.authorization?.split(' ')[1];
-        req.user = jwt.verify(token, JWT_SECRET); 
-        next(); 
-    } catch { res.status(401).send("Session expirée"); }
+const STATUS = {
+  OPEN: "OPEN",
+  ACCEPTED: "ACCEPTED",
+  IN_PROGRESS: "IN_PROGRESS",
+  DELIVERY_PROOF: "DELIVERY_PROOF",
+  COMPLETED: "COMPLETED"
 };
 
-// Routes API
-app.post('/api/register', async (req, res) => {
-    try {
-        const hashed = await bcrypt.hash(req.body.password, 10);
-        await User.create({ email: req.body.email.trim().toLowerCase(), password: hashed });
-        res.json({ message: "OK" });
-    } catch (e) { res.status(400).send("Email déjà pris"); }
+/* ======================
+   🎨 UI
+====================== */
+
+function layout(content) {
+  return `
+  <html>
+  <head>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-[#020617] text-white p-8">
+
+    <h1 class="text-3xl mb-6 bg-gradient-to-r from-amber-400 to-yellow-600 text-transparent bg-clip-text">
+      WAYLO • Mandat sécurisé
+    </h1>
+
+    ${content}
+
+  </body>
+  </html>
+  `;
+}
+
+/* ======================
+   🔐 AUTH
+====================== */
+
+app.get("/", (req, res) => {
+  if (!currentUser) return res.send(layout(auth()));
+  res.send(layout(dashboard()));
 });
 
-app.post('/api/login', async (req, res) => {
-    try {
-        const user = await User.findOne({ email: req.body.email.trim().toLowerCase() });
-        if (user && await bcrypt.compare(req.body.password, user.password)) {
-            res.json({ token: jwt.sign({ email: user.email }, JWT_SECRET) });
-        } else res.status(401).send("Identifiants incorrects");
-    } catch (e) { res.status(500).send("Erreur serveur"); }
+function auth() {
+  return `
+  <div class="grid grid-cols-2 gap-6">
+
+    <form method="POST" action="/login" class="bg-white/5 p-6 rounded-xl">
+      <input name="email" placeholder="email" class="w-full mb-2 p-2 bg-black/40"/>
+      <input name="password" type="password" placeholder="password" class="w-full mb-2 p-2 bg-black/40"/>
+      <button class="bg-amber-500 p-2 w-full">Login</button>
+    </form>
+
+    <form method="POST" action="/register" class="bg-white/5 p-6 rounded-xl">
+      <input name="email" placeholder="email" class="w-full mb-2 p-2 bg-black/40"/>
+      <input name="password" type="password" placeholder="password" class="w-full mb-2 p-2 bg-black/40"/>
+      <button class="bg-green-500 p-2 w-full">Register</button>
+    </form>
+
+  </div>
+  `;
+}
+
+app.post("/register", (req, res) => {
+  users.push(req.body);
+  currentUser = req.body;
+  res.redirect("/");
 });
 
-app.get('/api/missions', auth, async (req, res) => {
-    const missions = await Mission.find().sort({ _id: -1 }).limit(20);
-    const count = await Mission.countDocuments({ traveler: req.user.email, status: "IN_PROGRESS" });
-    res.json({ missions, userMissionsCount: count });
+app.post("/login", (req, res) => {
+  const user = users.find(u => u.email === req.body.email && u.password === req.body.password);
+  if (user) currentUser = user;
+  res.redirect("/");
 });
 
-app.post('/api/missions', auth, async (req, res) => {
-    if(!req.body.legalAccepted) return res.status(400).send("CGU manquantes");
-    await Mission.create({ ...req.body, buyer: req.user.email });
-    res.send("OK");
+/* ======================
+   📦 MISSIONS (MANDAT)
+====================== */
+
+function dashboard() {
+  return `
+  <a href="/logout" class="text-red-400">Logout</a>
+
+  ${createMission()}
+
+  <div class="mt-6 space-y-4">
+    ${missions.map(m => missionCard(m)).join("")}
+  </div>
+  `;
+}
+
+function createMission() {
+  return `
+  <form method="POST" action="/mission" class="bg-white/5 p-4 rounded-xl">
+    <input name="objet" placeholder="Objet à acheter" class="w-full mb-2 p-2 bg-black/40"/>
+    <input name="ville" placeholder="Ville" class="w-full mb-2 p-2 bg-black/40"/>
+    <input name="budget" placeholder="Budget €" class="w-full mb-2 p-2 bg-black/40"/>
+
+    <button class="bg-amber-500 p-2 w-full">Créer mandat</button>
+  </form>
+  `;
+}
+
+app.post("/mission", (req, res) => {
+  missions.push({
+    id: Date.now(),
+    ...req.body,
+    buyer: currentUser.email,
+    traveler: null,
+    status: STATUS.OPEN,
+    escrow: "PENDING", // simulation PSP
+    otp: null,
+    proof: null
+  });
+  res.redirect("/");
 });
 
-app.post('/api/missions/:id/accept', auth, async (req, res) => {
-    const count = await Mission.countDocuments({ traveler: req.user.email, status: "IN_PROGRESS" });
-    if(count >= 4) return res.status(403).send("Limite URSSAF (4/4)");
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
-    await Mission.findByIdAndUpdate(req.params.id, { traveler: req.user.email, status: "IN_PROGRESS", otp });
-    res.send("OK");
+/* ======================
+   🤝 ACCEPTATION MANDAT
+====================== */
+
+app.get("/accept/:id", (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
+
+  if (m && m.status === STATUS.OPEN) {
+    m.status = STATUS.ACCEPTED;
+    m.traveler = currentUser.email;
+  }
+
+  res.redirect("/");
 });
 
-// Interface Front-end
-app.get('*', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
-<html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>WAYLO</title><script src="https://cdn.tailwindcss.com"></script></head>
-<body class="bg-[#020617] text-white p-4 font-sans italic">
-    <div id="app" class="max-w-md mx-auto mt-4"></div>
-    <script>
-        let t = localStorage.getItem('t');
-        let view = 'login';
+/* ======================
+   🚀 START MISSION
+====================== */
 
-        async function render() {
-            const app = document.getElementById('app');
-            if(!t) {
-                app.innerHTML = '<div class="text-center mt-12"><h1 class="text-6xl font-black mb-10 text-amber-500 tracking-tighter">WAYLO</h1>' +
-                '<div class="bg-slate-900 p-2 rounded-2xl mb-6 flex border border-white/5"><button onclick="view=\\'login\\';render()" class="w-1/2 py-3 rounded-xl font-bold '+(view==='login'?'bg-amber-500 text-black':'text-slate-500')+'">ENTRER</button><button onclick="view=\\'signup\\';render()" class="w-1/2 py-3 rounded-xl font-bold '+(view==='signup'?'bg-amber-500 text-black':'text-slate-500')+'">REJOINDRE</button></div>' +
-                '<div class="bg-slate-900 p-6 rounded-[2.5rem] border border-white/5 shadow-2xl"><input id="e" placeholder="Email" class="w-full bg-black p-4 rounded-2xl mb-4 border border-white/10 text-white outline-none focus:border-amber-500"><input id="p" type="password" placeholder="Mot de passe" class="w-full bg-black p-4 rounded-2xl mb-6 border border-white/10 text-white outline-none focus:border-amber-500"><button onclick="doAction()" class="w-full bg-white text-black font-black py-4 rounded-2xl uppercase tracking-widest">'+(view==='login'?'Connexion':'Créer Profil')+'</button></div></div>';
-            } else {
-                const r = await fetch('/api/missions', {headers: {'Authorization': 'Bearer '+t}});
-                if(!r.ok) { localStorage.clear(); location.reload(); return; }
-                const data = await r.json();
-                app.innerHTML = '<div class="flex justify-between items-center mb-6"><h1 class="text-2xl font-black text-amber-500">WAYLO</h1><div class="flex items-center gap-2"><span class="text-[9px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded">MISIONS: '+data.userMissionsCount+'/4</span><button onclick="localStorage.clear();location.reload()" class="text-[9px] text-slate-500 font-bold underline">QUITTER</button></div></div>' +
-                '<div class="bg-amber-500 p-6 rounded-[2rem] mb-6 text-black shadow-lg shadow-amber-500/10"><p class="text-[10px] font-black uppercase mb-3 opacity-70 tracking-widest">Nouveau Mandat</p><input id="m_i" placeholder="Objet" class="w-full bg-white/30 p-3 rounded-xl mb-2 border-none placeholder-black/50 font-bold"><input id="m_c" placeholder="Ville" class="w-full bg-white/30 p-3 rounded-xl mb-2 border-none placeholder-black/50 font-bold"><input id="m_b" type="number" placeholder="Budget (€)" class="w-full bg-white/30 p-3 rounded-xl mb-4 border-none placeholder-black/50 font-bold"><div class="flex gap-2 mb-4 bg-black/5 p-3 rounded-xl"><input type="checkbox" id="m_l"><label for="m_l" class="text-[8px] leading-tight font-black uppercase">Accepter Art. L.221-28 (Renoncement rétractation)</label></div><button onclick="addMission()" class="w-full bg-black text-white font-black py-3 rounded-xl text-xs uppercase">Publier</button></div>' +
-                '<div class="space-y-4">' + data.missions.map(m => '<div class="bg-slate-900 p-5 rounded-[2rem] border border-white/5"><div class="flex justify-between font-bold"><span>'+m.item+'</span><span class="text-amber-500">'+m.budget+'€</span></div><div class="text-[10px] text-slate-500 mb-4">📍 '+m.city+'</div>' + (m.status === 'OPEN' ? (data.userMissionsCount < 4 ? '<button onclick="acc(\\''+m._id+'\\')" class="w-full bg-white/5 border border-white/10 py-3 rounded-xl text-[10px] font-black uppercase">Accepter</button>' : '<p class="text-center text-[9px] text-red-500 font-bold">LIMITE URSSAF</p>') : '<div class="bg-amber-500/10 p-3 rounded-xl text-center border border-amber-500/20"><p class="text-[9px] text-amber-500 mb-1">CODE OTP</p><p class="text-2xl font-mono font-black text-amber-500 tracking-widest">'+m.otp+'</p></div>') + '</div>').join('') + '</div>';
-            }
-        }
+app.get("/start/:id", (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
 
-        window.doAction = async () => {
-            const e = document.getElementById('e').value.trim();
-            const p = document.getElementById('p').value.trim();
-            if(!e || !p) return alert("Cases vides !");
-            const type = view === 'login' ? 'login' : 'register';
-            const r = await fetch('/api/'+type, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:e, password:p})});
-            if(r.ok) { 
-                if(type==='register') { alert("Bienvenue ! Connecte-toi."); view='login'; render(); }
-                else { const d = await r.json(); localStorage.setItem('t', d.token); t=d.token; render(); }
-            } else alert("Erreur d'accès");
-        };
+  if (m && m.status === STATUS.ACCEPTED) {
+    m.status = STATUS.IN_PROGRESS;
+    m.otp = Math.floor(1000 + Math.random() * 9000);
+  }
 
-        window.addMission = async () => {
-            const item = document.getElementById('m_i').value;
-            const city = document.getElementById('m_c').value;
-            const budget = document.getElementById('m_b').value;
-            const legal = document.getElementById('m_l').checked;
-            if(!legal) return alert("Case L.221-28 obligatoire !");
-            await fetch('/api/missions', {method:'POST', headers:{'Content-Type':'application/json', 'Authorization': 'Bearer '+t}, body:JSON.stringify({item, city, budget, legalAccepted:legal})});
-            render();
-        };
-
-        window.acc = async (id) => { 
-            const r = await fetch('/api/missions/'+id+'/accept', {method:'POST', headers:{'Authorization': 'Bearer '+t}}); 
-            if(!r.ok) alert("Action impossible");
-            render(); 
-        };
-        render();
-    </script>
-</body></html>
-    `);
+  res.redirect("/");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("🚀 Waylo prêt sur le port " + PORT));
+/* ======================
+   🔐 PROOF (PPR)
+====================== */
+
+app.post("/proof/:id", (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
+
+  if (m && m.status === STATUS.IN_PROGRESS) {
+    m.status = STATUS.DELIVERY_PROOF;
+    m.proof = "uploaded"; // simulation image/gps
+  }
+
+  res.redirect("/");
+});
+
+/* ======================
+   ✅ VALIDATION OTP
+====================== */
+
+app.post("/validate/:id", (req, res) => {
+  const m = missions.find(x => x.id == req.params.id);
+
+  if (m && m.otp == req.body.otp) {
+    m.status = STATUS.COMPLETED;
+    m.escrow = "RELEASED"; // simulation PSP release
+  }
+
+  res.redirect("/");
+});
+
+/* ======================
+   🧊 UI CARD
+====================== */
+
+function missionCard(m) {
+  return `
+  <div class="bg-white/5 p-4 rounded-xl">
+
+    <div class="flex justify-between">
+      <b>${m.objet}</b>
+      <span>${m.budget}€</span>
+    </div>
+
+    <p class="text-sm text-white/50">${m.ville}</p>
+
+    <p>Status: ${m.status}</p>
+    <p class="text-xs text-white/40">Escrow: ${m.escrow}</p>
+
+    ${
+      m.status === STATUS.OPEN && m.buyer !== currentUser.email
+        ? `<a href="/accept/${m.id}" class="text-amber-400">Accepter mandat</a>`
+        : ""
+    }
+
+    ${
+      m.status === STATUS.ACCEPTED && m.traveler === currentUser.email
+        ? `<a href="/start/${m.id}" class="text-green-400">Démarrer mission</a>`
+        : ""
+    }
+
+    ${
+      m.status === STATUS.IN_PROGRESS && m.traveler === currentUser.email
+        ? `
+        <form method="POST" action="/proof/${m.id}">
+          <button class="bg-blue-500 px-2 py-1 mt-2">Envoyer preuve</button>
+        </form>`
+        : ""
+    }
+
+    ${
+      m.status === STATUS.IN_PROGRESS && m.buyer === currentUser.email
+        ? `<p class="text-amber-400">Code OTP: ${m.otp}</p>`
+        : ""
+    }
+
+    ${
+      m.status === STATUS.DELIVERY_PROOF && m.buyer === currentUser.email
+        ? `
+        <form method="POST" action="/validate/${m.id}">
+          <input name="otp" placeholder="OTP" class="p-1 bg-black/40"/>
+          <button class="bg-green-500 px-2">Valider</button>
+        </form>`
+        : ""
+    }
+
+    ${
+      m.status === STATUS.COMPLETED
+        ? `<p class="text-green-400">✔ Mission validée (fonds libérés)</p>`
+        : ""
+    }
+
+  </div>
+  `;
+}
+
+app.get("/logout", (req, res) => {
+  currentUser = null;
+  res.redirect("/");
+});
+
+/* ======================
+   🚀 START
+====================== */
+
+app.listen(PORT, () => {
+  console.log("WAYLO running on " + PORT);
+});
