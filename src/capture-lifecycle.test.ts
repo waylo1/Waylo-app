@@ -62,7 +62,7 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({
-      data: { role: 'BUYER', email: 'buyer-lifecycle@test.waylo', kycStatus: 'VERIFIED' },
+      data: { email: 'buyer-lifecycle@test.waylo', kycStatus: 'VERIFIED' },
     })
   })
 
@@ -79,7 +79,6 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
     const traveler = opts.travelerData
       ? await prisma.user.create({
           data: {
-            role: 'TRAVELER',
             email: `traveler-${opts.idem}@test.waylo`,
             kycStatus: opts.travelerData.kycStatus,
             stripeAccountId: opts.travelerData.stripeAccountId,

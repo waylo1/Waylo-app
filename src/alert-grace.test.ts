@@ -47,11 +47,10 @@ describe('Fenêtres de grâce & sink critique', () => {
     await prisma.user.deleteMany()
 
     const buyer = await prisma.user.create({
-      data: { role: 'BUYER', email: 'buyer-grace@test.waylo', kycStatus: 'VERIFIED' },
+      data: { email: 'buyer-grace@test.waylo', kycStatus: 'VERIFIED' },
     })
     const traveler = await prisma.user.create({
       data: {
-        role: 'TRAVELER',
         email: 'traveler-grace@test.waylo',
         kycStatus: 'VERIFIED',
         stripeAccountId: 'acct_test_grace',

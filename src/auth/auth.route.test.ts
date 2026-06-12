@@ -52,8 +52,8 @@ describe('Auth — register / login / me', () => {
   const me = (headers: Record<string, string> = {}) =>
     app.inject({ method: 'GET', url: '/api/auth/me', headers })
 
-  it('register : succès → 201 + JWT utilisable sur /me', async () => {
-    const res = await register({ email: EMAIL, password: PASSWORD, role: 'BUYER' })
+  it('register : succès → 201 + JWT utilisable sur /me, sans rôle de compte', async () => {
+    const res = await register({ email: EMAIL, password: PASSWORD })
     expect(res.statusCode).toBe(201)
     const { token } = res.json() as { token: string }
     expect(token).toBeTruthy()
@@ -65,31 +65,40 @@ describe('Auth — register / login / me', () => {
 
     const whoami = await me({ authorization: `Bearer ${token}` })
     expect(whoami.statusCode).toBe(200)
-    expect(whoami.json()).toMatchObject({ id: user.id, email: EMAIL, role: 'BUYER' })
+    const body = whoami.json()
+    expect(body).toMatchObject({ id: user.id, email: EMAIL })
+    // /me ne renvoie aucun rôle de compte (rôles contextuels par mission).
+    expect(body).not.toHaveProperty('role')
   })
 
   it('register : email déjà pris → 409, sans écraser le compte', async () => {
-    const res = await register({ email: EMAIL, password: 'another-password', role: 'TRAVELER' })
+    const res = await register({ email: EMAIL, password: 'another-password' })
     expect(res.statusCode).toBe(409)
     expect(res.json()).toEqual({ error: 'EMAIL_ALREADY_REGISTERED' })
     expect(await prisma.user.count({ where: { email: EMAIL } })).toBe(1)
   })
 
   it('register : mot de passe trop court → 400', async () => {
-    const res = await register({ email: 'short@test.waylo', password: 'court', role: 'BUYER' })
+    const res = await register({ email: 'short@test.waylo', password: 'court' })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'INVALID_INPUT' })
   })
 
   it('register : email invalide → 400', async () => {
-    const res = await register({ email: 'pas-un-email', password: PASSWORD, role: 'BUYER' })
+    const res = await register({ email: 'pas-un-email', password: PASSWORD })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'INVALID_INPUT' })
   })
 
-  it('register : rôle hors enum → 400', async () => {
-    const res = await register({ email: 'role@test.waylo', password: PASSWORD, role: 'ADMIN' })
-    expect(res.statusCode).toBe(400)
+  it('register : un champ role parasite est ignoré (rôle non collecté), compte normal créé', async () => {
+    // Fastify (ajv removeAdditional) retire les props hors schéma : le `role`
+    // envoyé par un vieux client est silencieusement ignoré, pas stocké.
+    const res = await register({ email: 'extra@test.waylo', password: PASSWORD, role: 'BUYER' })
+    expect(res.statusCode).toBe(201)
+    const { token } = res.json() as { token: string }
+    const whoami = await me({ authorization: `Bearer ${token}` })
+    expect(whoami.statusCode).toBe(200)
+    expect(whoami.json()).not.toHaveProperty('role')
   })
 
   it('login : succès → 200 + JWT utilisable', async () => {
@@ -126,7 +135,7 @@ describe('Auth — register / login / me', () => {
   it('me : token expiré → 401', async () => {
     const user = await prisma.user.findUniqueOrThrow({ where: { email: EMAIL } })
     // exp == iat (1 ms arrondi à la seconde) : déjà expiré à la vérification.
-    const expired = app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: '1ms' })
+    const expired = app.jwt.sign({ sub: user.id }, { expiresIn: '1ms' })
     const res = await me({ authorization: `Bearer ${expired}` })
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'UNAUTHORIZED' })

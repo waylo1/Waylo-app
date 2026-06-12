@@ -4,12 +4,13 @@ import authRoute from './auth/auth.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
 import { AlertSink } from './alerts'
-import type { Role } from './generated/prisma'
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
-    payload: { sub: string; role: Role }
-    user: { sub: string; role: Role }
+    // Payload minimal : identité seule. Aucun rôle de compte (rôles
+    // contextuels), aucun kycStatus (relu frais en DB, jamais figé dans un JWT).
+    payload: { sub: string }
+    user: { sub: string }
   }
 }
 

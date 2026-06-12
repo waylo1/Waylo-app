@@ -14,11 +14,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
-  BUYER
-  TRAVELER
-}
-
 enum KycStatus {
   PENDING
   VERIFIED
@@ -72,7 +67,8 @@ enum AuthDecision {
 
 model User {
   id               String    @id @default(cuid())
-  role             Role
+  // Pas de rôle de compte : « acheteur » / « voyageur » est CONTEXTUEL, dérivé
+  // des relations Mission (buyerId / travelerId). Un même User peut être les deux.
   email            String    @unique
   passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
   kycStatus        KycStatus @default(PENDING)

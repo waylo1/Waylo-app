@@ -50,11 +50,10 @@ describe('POST /api/stripe/webhook — idempotence payment_intent.succeeded', ()
     await prisma.user.deleteMany()
 
     const buyer = await prisma.user.create({
-      data: { role: 'BUYER', email: 'buyer@test.waylo', kycStatus: 'VERIFIED' },
+      data: { email: 'buyer@test.waylo', kycStatus: 'VERIFIED' },
     })
     const traveler = await prisma.user.create({
       data: {
-        role: 'TRAVELER',
         email: 'traveler@test.waylo',
         kycStatus: 'VERIFIED',
         stripeAccountId: 'acct_test_traveler', // requis : la libération crée l'intention de versement
@@ -171,7 +170,7 @@ describe('POST /api/stripe/webhook — idempotence payment_intent.succeeded', ()
     const REFUNDED_CENTS = 4_000
 
     const buyer = await prisma.user.create({
-      data: { role: 'BUYER', email: 'buyer-refund@test.waylo', kycStatus: 'VERIFIED' },
+      data: { email: 'buyer-refund@test.waylo', kycStatus: 'VERIFIED' },
     })
     const mission = await prisma.mission.create({
       data: {

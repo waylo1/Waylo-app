@@ -35,11 +35,10 @@ describe('TransferOutbox — worker de transfert & réconciliation', () => {
     await prisma.user.deleteMany()
 
     const buyer = await prisma.user.create({
-      data: { role: 'BUYER', email: 'buyer-outbox@test.waylo', kycStatus: 'VERIFIED' },
+      data: { email: 'buyer-outbox@test.waylo', kycStatus: 'VERIFIED' },
     })
     const traveler = await prisma.user.create({
       data: {
-        role: 'TRAVELER',
         email: 'traveler-outbox@test.waylo',
         kycStatus: 'VERIFIED',
         stripeAccountId: 'acct_test_outbox_traveler',
