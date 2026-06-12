@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as api from "@/lib/api";
 import { ApiError } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { centsToEur } from "@/lib/money";
 import type { Mission } from "@/lib/types";
 import { RequireAuth } from "@/components/require-auth";
@@ -20,7 +21,9 @@ function AvailableList() {
     api
       .listAvailableMissions()
       .then(setMissions)
-      .catch(() => setError("Impossible de charger le catalogue."));
+      .catch(err =>
+        setError(apiErrorMessage(err, "Impossible de charger le catalogue.")),
+      );
   }, []);
 
   async function handleMatch(missionId: string) {
@@ -28,13 +31,13 @@ function AvailableList() {
     setError(null);
     try {
       await api.matchMission(missionId);
+      // Redirection immédiate vers le tableau de bord voyageur de la mission.
       router.push(`/missions/${missionId}/dashboard`);
     } catch (err) {
+      setError(apiErrorMessage(err, "Échec de l'acceptation de la mission."));
+      // Mission déjà prise : on la retire du catalogue affiché.
       if (err instanceof ApiError && err.code === "MISSION_ALREADY_MATCHED") {
-        setError("Trop tard — un autre voyageur a pris cette mission.");
         setMissions(prev => prev?.filter(m => m.id !== missionId) ?? null);
-      } else {
-        setError("Échec de l'acceptation de la mission.");
       }
       setMatchingId(null);
     }

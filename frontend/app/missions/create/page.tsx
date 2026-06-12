@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import * as api from "@/lib/api";
-import { ApiError } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { eurToCents } from "@/lib/money";
 import { RequireAuth } from "@/components/require-auth";
 import { Button } from "@/components/ui/button";
@@ -18,11 +18,6 @@ import {
 
 // NOTE backend : le modèle Mission n'a PAS de colonne `description` distincte.
 // Titre + description sont fusionnés dans `targetProduct` (max 500 caractères).
-
-const ERROR_LABELS: Record<string, string> = {
-  INVALID_INPUT: "Champs invalides — vérifiez le formulaire.",
-  EXPIRES_AT_IN_PAST: "La date d'expiration doit être dans le futur.",
-};
 
 export default function CreateMissionPage() {
   const [title, setTitle] = useState("");
@@ -69,11 +64,7 @@ export default function CreateMissionPage() {
       });
       router.push(`/missions/${mission.id}/pay`);
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? (ERROR_LABELS[err.code] ?? `Erreur : ${err.code}`)
-          : "Erreur réseau.",
-      );
+      setError(apiErrorMessage(err));
       setPending(false);
     }
   }

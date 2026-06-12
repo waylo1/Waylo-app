@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import * as api from "@/lib/api";
-import { ApiError } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,13 +14,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-
-const ERROR_LABELS: Record<string, string> = {
-  INVALID_CREDENTIALS: "Email ou mot de passe incorrect.",
-  EMAIL_ALREADY_REGISTERED: "Un compte existe déjà avec cet email.",
-  INVALID_INPUT:
-    "Saisie invalide (email valide et mot de passe d'au moins 8 caractères).",
-};
 
 export default function LoginPage() {
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -43,11 +36,7 @@ export default function LoginPage() {
       await signIn(token);
       router.push("/missions");
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? (ERROR_LABELS[err.code] ?? `Erreur : ${err.code}`)
-          : "Erreur réseau — backend joignable ?",
-      );
+      setError(apiErrorMessage(err));
     } finally {
       setPending(false);
     }

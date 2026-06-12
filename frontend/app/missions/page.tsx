@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import * as api from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { centsToEur } from "@/lib/money";
 import type { Mission } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
@@ -20,7 +21,9 @@ function MissionList() {
     api
       .listMyMissions()
       .then(setMissions)
-      .catch(() => setError("Impossible de charger les missions."));
+      .catch(err =>
+        setError(apiErrorMessage(err, "Impossible de charger les missions.")),
+      );
   }, []);
 
   if (error) return <p className="text-sm text-destructive">{error}</p>;
@@ -56,7 +59,21 @@ function MissionList() {
                     Financer
                   </Button>
                 )}
-                {!isBuyer && (
+                {isBuyer ? (
+                  <Button
+                    size="sm"
+                    variant={
+                      mission.status === "AWAITING_VALIDATION"
+                        ? "default"
+                        : "outline"
+                    }
+                    render={<Link href={`/missions/${mission.id}`} />}
+                  >
+                    {mission.status === "AWAITING_VALIDATION"
+                      ? "Valider la réception"
+                      : "Suivi"}
+                  </Button>
+                ) : (
                   <Button
                     size="sm"
                     variant="outline"

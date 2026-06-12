@@ -2,7 +2,7 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import * as api from "@/lib/api";
-import { ApiError } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { centsToEur, eurToCents } from "@/lib/money";
 import type { Mission } from "@/lib/types";
 import { RequireAuth } from "@/components/require-auth";
@@ -55,16 +55,7 @@ function ReceiptForm({
       });
       onSubmitted();
     } catch (err) {
-      const code = err instanceof ApiError ? err.code : null;
-      setError(
-        code === "RECEIPT_AMOUNT_EXCEEDS_BUDGET"
-          ? "Le montant dépasse le budget de la mission."
-          : code === "RECEIPT_ALREADY_SUBMITTED"
-            ? "Un reçu a déjà été scellé pour cette mission."
-            : code === "MISSION_NOT_IN_PROGRESS"
-              ? "La mission n'est plus en cours — reçu refusé."
-              : `Échec du dépôt du reçu${code ? ` : ${code}` : "."}`,
-      );
+      setError(apiErrorMessage(err, "Échec du dépôt du reçu — erreur réseau."));
       setPending(false);
     }
   }
@@ -116,11 +107,7 @@ function DashboardContent({ missionId }: { missionId: string }) {
       .getMission(missionId)
       .then(setMission)
       .catch(err =>
-        setError(
-          err instanceof ApiError && err.code === "MISSION_NOT_FOUND"
-            ? "Mission introuvable."
-            : "Impossible de charger la mission.",
-        ),
+        setError(apiErrorMessage(err, "Impossible de charger la mission.")),
       );
   }, [missionId]);
 
@@ -134,11 +121,8 @@ function DashboardContent({ missionId }: { missionId: string }) {
     try {
       setMission(await api.startTravel(missionId));
     } catch (err) {
-      const code = err instanceof ApiError ? err.code : null;
       setError(
-        code === "MISSION_NOT_MATCHED"
-          ? "La mission n'est pas (ou plus) au statut « voyageur assigné »."
-          : `Échec du démarrage du voyage${code ? ` : ${code}` : "."}`,
+        apiErrorMessage(err, "Échec du démarrage du voyage — erreur réseau."),
       );
     } finally {
       setPending(false);

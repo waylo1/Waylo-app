@@ -10,7 +10,7 @@ import {
   useStripe,
 } from "@stripe/react-stripe-js";
 import * as api from "@/lib/api";
-import { ApiError } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/api-errors";
 import { centsToEur } from "@/lib/money";
 import type { IntentResponse, Mission } from "@/lib/types";
 import { RequireAuth } from "@/components/require-auth";
@@ -98,11 +98,7 @@ function PayContent({ missionId }: { missionId: string }) {
       .getMission(missionId)
       .then(setMission)
       .catch(err =>
-        setError(
-          err instanceof ApiError && err.code === "MISSION_NOT_FOUND"
-            ? "Mission introuvable."
-            : "Impossible de charger la mission.",
-        ),
+        setError(apiErrorMessage(err, "Impossible de charger la mission.")),
       );
   }, [missionId]);
 
@@ -112,16 +108,9 @@ function PayContent({ missionId }: { missionId: string }) {
     try {
       setIntent(await api.createIntent(missionId));
     } catch (err) {
-      if (err instanceof ApiError && err.code === "MISSION_ALREADY_FUNDED") {
-        setError("Cette mission est déjà financée.");
-      } else if (
-        err instanceof ApiError &&
-        err.code === "MISSION_NOT_FUNDABLE"
-      ) {
-        setError("Cette mission n'est plus finançable (statut avancé).");
-      } else {
-        setError("Échec de la création du paiement.");
-      }
+      setError(
+        apiErrorMessage(err, "Échec de la création du paiement — erreur réseau."),
+      );
     } finally {
       setPending(false);
     }

@@ -31,34 +31,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const router = useRouter();
 
-  const loadUser = useCallback(async () => {
-    if (!api.getToken()) {
-      setStatus("anonymous");
-      setUser(null);
-      return;
-    }
+  // Fetch pur (aucun setState) : l'application d'état se fait dans une
+  // continuation asynchrone — jamais de setState synchrone dans un effet.
+  const fetchAuthState = useCallback(async (): Promise<{
+    status: AuthStatus;
+    user: AuthUser | null;
+  }> => {
+    if (!api.getToken()) return { status: "anonymous", user: null };
     try {
       const profile = await api.me();
-      setUser(profile);
-      setStatus("authenticated");
+      return { status: "authenticated", user: profile };
     } catch {
       // Jeton expiré/invalide : purge et retour anonyme.
       api.clearToken();
-      setUser(null);
-      setStatus("anonymous");
+      return { status: "anonymous", user: null };
     }
   }, []);
 
   useEffect(() => {
-    void loadUser();
-  }, [loadUser]);
+    let cancelled = false;
+    void fetchAuthState().then(next => {
+      if (cancelled) return;
+      setUser(next.user);
+      setStatus(next.status);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAuthState]);
 
   const signIn = useCallback(
     async (token: string) => {
       api.setToken(token);
-      await loadUser();
+      const next = await fetchAuthState();
+      setUser(next.user);
+      setStatus(next.status);
     },
-    [loadUser],
+    [fetchAuthState],
   );
 
   const signOut = useCallback(() => {
