@@ -249,7 +249,7 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
     expect(mission.status).toBe('AWAITING_TRAVELER_ACCOUNT')
     const accountAlerts = collected.filter(a => a.code === 'TRAVELER_ACCOUNT_MISSING')
     expect(accountAlerts).toHaveLength(1)
-    expect(accountAlerts[0]?.severity).toBe('warn') // argent sûr et visible — pas critical
+    expect(accountAlerts[0]?.severity).toBe('ops') // fonds bloqués, action ops — durable (NDJSON), sans pager critique
     expect(accountAlerts[0]?.details).toMatchObject({
       escrowId,
       missionId,

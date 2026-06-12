@@ -10,10 +10,10 @@ import { appendFileSync } from 'node:fs'
  *   sinon Stripe rejoue en silence 3 jours puis désactive l'endpoint.
  *
  * Sévérité : dérivée DU CODE (source unique de vérité, SEVERITY_BY_CODE), pas
- * choisie au site d'émission. Invariant : une alerte critical ne peut JAMAIS
- * finir en simple stderr silencieux — le canal par défaut la route aussi vers
- * un sink dédié persistant (fichier NDJSON), et le fallback d'échec de sink
- * retente ce sink dédié.
+ * choisie au site d'émission. Invariant : une alerte critical OU ops ne peut
+ * JAMAIS finir en simple stderr silencieux — le canal par défaut la route
+ * aussi vers un sink dédié persistant (fichier NDJSON), et le fallback
+ * d'échec de sink retente ce sink dédié.
  */
 export type AlertCode =
   | 'LEDGER_INVARIANT_BROKEN'
@@ -30,7 +30,7 @@ export type AlertCode =
   | 'WEBHOOK_PROCESSING_FAILED'
   | 'RECONCILIATION_RUN_FAILED'
 
-export type AlertSeverity = 'info' | 'warn' | 'critical'
+export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
 /** Ce que les sites d'émission construisent (la sévérité est dérivée du code). */
 export interface OpsAlertInput {
@@ -48,7 +48,9 @@ export type AlertSink = (alert: OpsAlert) => void
 
 /**
  * critical = argent pris/perdu/incohérent ou condition terminale exigeant un
- * humain. warn = dégradation visible et bornée (argent sûr, action connue).
+ * humain. ops = argent sûr mais BLOQUÉ, action opérationnelle requise —
+ * durable (NDJSON) sans pager critique. warn = dégradation visible et bornée
+ * (argent sûr, action connue, transitoire probable).
  */
 const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   LEDGER_INVARIANT_BROKEN: 'critical', // corruption comptable
@@ -60,10 +62,10 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   TRANSFER_ABANDONED: 'critical', // terminal, « needs human »
   WEBHOOK_ABORT_NON_RECOVERABLE: 'critical', // OVER_REFUND, REFUND_LEDGER_AHEAD_OF_STRIPE…
   PAYOUT_NOT_SETTLED: 'warn', // latence worker normale au début, nag quotidien sinon
-  TRAVELER_ACCOUNT_MISSING: 'warn', // argent visible et sûr, action d'intervention connue
+  TRAVELER_ACCOUNT_MISSING: 'ops', // argent capturé SANS destination = fonds bloqués — durable, ne doit pas se perdre dans les logs
   ISSUING_JIT_LOOKUP_ERROR: 'warn', // refus fail-safe ; en rafale = incident infra
   WEBHOOK_PROCESSING_FAILED: 'warn', // erreur INATTENDUE (rollback, Stripe rejoue) ; persistant = endpoint désactivable
-  RECONCILIATION_RUN_FAILED: 'warn', // le monitoring lui-même est en panne — les invariants ne sont plus vérifiés
+  RECONCILIATION_RUN_FAILED: 'critical', // la couche de DÉTECTION est morte : tous les contrôles critiques cessent en silence
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {
@@ -74,6 +76,7 @@ export function toOpsAlert(input: OpsAlertInput): OpsAlert {
 export interface AlertChannel {
   info(alert: OpsAlert): void
   warn(alert: OpsAlert): void
+  ops(alert: OpsAlert): void
   critical(alert: OpsAlert): void
 }
 
@@ -93,8 +96,10 @@ const appendCriticalFile = (alert: OpsAlert): void => {
 }
 
 /**
- * Canal par défaut. info/warn → stderr structuré. critical → stderr ET sink
- * dédié persistant (jamais stderr seul).
+ * Canal par défaut. info/warn → stderr structuré. ops et critical → stderr ET
+ * sink dédié persistant (jamais stderr seul) — ops partage le fichier NDJSON,
+ * la distinction sert au branchement prod (pager pour critical, file d'action
+ * pour ops).
  *
  * TODO(prod): brancher ici le canal critique réel (PagerDuty/Slack webhook)
  * quand les credentials existeront — remplacer/compléter appendCriticalFile,
@@ -103,6 +108,10 @@ const appendCriticalFile = (alert: OpsAlert): void => {
 export const defaultAlertChannel: AlertChannel = {
   info: stderrLine,
   warn: stderrLine,
+  ops: alert => {
+    stderrLine(alert)
+    appendCriticalFile(alert)
+  },
   critical: alert => {
     stderrLine(alert)
     appendCriticalFile(alert)
@@ -119,8 +128,9 @@ export const defaultAlertSink: AlertSink = channelToSink(defaultAlertChannel)
  * Émission blindée : dérive la sévérité, appelle le sink, et retourne l'alerte
  * enrichie (pour les appelants qui la collectent, ex. réconciliation).
  * Un sink qui throw ne doit JAMAIS casser un chemin webhook (un 500
- * post-commit ferait rejouer un effet déjà appliqué) — et un critical dont le
- * sink échoue est retenté sur le sink dédié avant de finir en stderr.
+ * post-commit ferait rejouer un effet déjà appliqué) — et un critical ou un
+ * ops dont le sink échoue est retenté sur le sink dédié avant de finir en
+ * stderr.
  */
 export function safeEmit(sink: AlertSink | undefined, input: OpsAlertInput): OpsAlert {
   const alert = toOpsAlert(input)
@@ -130,7 +140,7 @@ export function safeEmit(sink: AlertSink | undefined, input: OpsAlertInput): Ops
     console.error(
       JSON.stringify({ level: 'error', kind: 'alert_sink_failed', alert, err: String(err) }),
     )
-    if (alert.severity === 'critical') {
+    if (alert.severity === 'critical' || alert.severity === 'ops') {
       try {
         appendCriticalFile(alert)
       } catch {

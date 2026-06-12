@@ -154,8 +154,8 @@ describe('Fenêtres de grâce & sink critique', () => {
     expect(dangling[0]?.details).toMatchObject({ stripeAuthorizationId: 'iauth_grace_old' })
   })
 
-  it('(3) un code critical atteint le sink NDJSON persistant, un warn non', async () => {
-    const { safeEmit } = await import('./alerts')
+  it('(3) critical et ops atteignent le sink NDJSON persistant, un warn non', async () => {
+    const { safeEmit, toOpsAlert } = await import('./alerts')
 
     const critical = safeEmit(undefined, {
       code: 'LEDGER_INVARIANT_BROKEN',
@@ -172,7 +172,7 @@ describe('Fenêtres de grâce & sink critique', () => {
       details: { escrowId: 'escrow_test_sink' },
     })
 
-    // Un warn passe par stderr structuré mais ne pollue PAS le sink critique.
+    // Un warn passe par stderr structuré mais ne pollue PAS le sink durable.
     const warn = safeEmit(undefined, {
       code: 'PAYOUT_NOT_SETTLED',
       message: 'test warn',
@@ -180,6 +180,24 @@ describe('Fenêtres de grâce & sink critique', () => {
     })
     expect(warn.severity).toBe('warn')
     expect(readFileSync(CRITICAL_FILE, 'utf8').trim().split('\n')).toHaveLength(1)
+
+    // TRAVELER_ACCOUNT_MISSING = ops : fonds bloqués → durable, comme critical.
+    const ops = safeEmit(undefined, {
+      code: 'TRAVELER_ACCOUNT_MISSING',
+      message: 'test sink ops',
+      details: { escrowId: 'escrow_test_ops' },
+    })
+    expect(ops.severity).toBe('ops')
+    const withOps = readFileSync(CRITICAL_FILE, 'utf8').trim().split('\n')
+    expect(withOps).toHaveLength(2)
+    expect(JSON.parse(withOps[1] as string)).toMatchObject({
+      code: 'TRAVELER_ACCOUNT_MISSING',
+      severity: 'ops',
+    })
+
+    // Un réconciliateur mort est un incident critique, pas un warn.
+    expect(toOpsAlert({ code: 'RECONCILIATION_RUN_FAILED', message: '', details: {} }).severity)
+      .toBe('critical')
   })
 
   it("(3 bis) sink custom défaillant : l'alerte critical retombe sur le sink NDJSON", async () => {
@@ -198,6 +216,20 @@ describe('Fenêtres de grâce & sink critique', () => {
     expect(JSON.parse(lines[0] as string)).toMatchObject({
       code: 'TRANSFER_ABANDONED',
       severity: 'critical',
+    })
+
+    // Même garantie de durabilité pour ops (fonds bloqués) sur sink défaillant.
+    safeEmit(
+      () => {
+        throw new Error('pager down')
+      },
+      { code: 'TRAVELER_ACCOUNT_MISSING', message: 'test fallback ops', details: {} },
+    )
+    const withOps = readFileSync(CRITICAL_FILE, 'utf8').trim().split('\n')
+    expect(withOps).toHaveLength(2)
+    expect(JSON.parse(withOps[1] as string)).toMatchObject({
+      code: 'TRAVELER_ACCOUNT_MISSING',
+      severity: 'ops',
     })
   })
 })
