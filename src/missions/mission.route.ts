@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
@@ -56,6 +57,24 @@ class MatchConflictError extends Error {}
 
 /** Transition MATCHED → IN_PROGRESS perdue (course / double départ). */
 class StartTravelConflictError extends Error {}
+
+/** Transition IN_PROGRESS → AWAITING_VALIDATION perdue (course / double dépôt de reçu). */
+class ReceiptConflictError extends Error {}
+
+interface SubmitReceiptBody {
+  urlRecu: string
+  purchaseAmountCents: number
+}
+
+const submitReceiptBodySchema = {
+  type: 'object',
+  required: ['urlRecu', 'purchaseAmountCents'],
+  additionalProperties: false,
+  properties: {
+    urlRecu: { type: 'string', minLength: 1, maxLength: 2048 },
+    purchaseAmountCents: { type: 'integer', minimum: 1 },
+  },
+} as const
 
 const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
@@ -130,6 +149,17 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     const userId = req.user.sub
     const missions = await prisma.mission.findMany({
       where: { OR: [{ buyerId: userId }, { travelerId: userId }] },
+      orderBy: { createdAt: 'desc' },
+    })
+    return reply.code(200).send(missions)
+  })
+
+  // GET /api/missions/available — vitrine des missions à pourvoir pour un
+  // voyageur : FUNDED et pas les siennes (on ne se propose pas ses propres
+  // missions). Route statique : find-my-way la prioritise sur /:id.
+  app.get('/available', async (req, reply) => {
+    const missions = await prisma.mission.findMany({
+      where: { status: MissionStatus.FUNDED, buyerId: { not: req.user.sub } },
       orderBy: { createdAt: 'desc' },
     })
     return reply.code(200).send(missions)
@@ -324,6 +354,62 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const started = await prisma.mission.findUniqueOrThrow({ where: { id } })
       return reply.code(200).send(started)
+    },
+  )
+
+  // POST /api/missions/:id/submit-receipt — le VOYAGEUR scelle son reçu d'achat
+  // et passe la mission en validation. Le reçu est IMMUABLE (Receipt.missionId
+  // @unique) ; sha256 scellé côté serveur, horodatage serveur (jamais le device).
+  app.post(
+    '/:id/submit-receipt',
+    { schema: { params: missionIdParamsSchema, body: submitReceiptBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // acheteur/tiers : indistinguables
+      if (mission.status !== MissionStatus.IN_PROGRESS) {
+        // Couvre aussi le double dépôt : après le 1er, la mission est AWAITING_VALIDATION.
+        return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+      }
+
+      const { urlRecu, purchaseAmountCents } = req.body as SubmitReceiptBody
+      // Hash content-addressed déterministe : scellé serveur (source de vérité).
+      const sha256Server = createHash('sha256')
+        .update(`${mission.id}:${urlRecu}:${purchaseAmountCents}`)
+        .digest('hex')
+
+      // Transaction atomique : reçu + transition conditionnelle. Tout rollback
+      // ensemble si la mission a quitté IN_PROGRESS entre-temps (anti-TOCTOU).
+      try {
+        await prisma.$transaction(async tx => {
+          await tx.receipt.create({
+            data: {
+              missionId: mission.id,
+              totalTtcCents: purchaseAmountCents,
+              // Pas de hash client distinct dans ce flux : le serveur scelle.
+              sha256Client: sha256Server,
+              sha256Server,
+              sealedAt: new Date(), // horloge serveur, jamais le device
+            },
+          })
+          const updated = await tx.mission.updateMany({
+            where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
+            data: { status: MissionStatus.AWAITING_VALIDATION },
+          })
+          if (updated.count !== 1) throw new ReceiptConflictError()
+        })
+      } catch (err) {
+        if (err instanceof ReceiptConflictError) {
+          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+        }
+        if (isUniqueViolation(err)) {
+          return reply.code(400).send({ error: 'RECEIPT_ALREADY_SUBMITTED' }) // reçu immuable déjà scellé
+        }
+        throw err
+      }
+
+      const receipt = await prisma.receipt.findUniqueOrThrow({ where: { missionId: mission.id } })
+      return reply.code(201).send(receipt)
     },
   )
 }
