@@ -241,6 +241,47 @@ describe('Découverte & reçus — GET /available, POST /:id/submit-receipt', ()
     expect(noUrl.statusCode).toBe(400)
   })
 
+  // ── GET /:id — exposition du reçu scellé ───────────────────────────────────
+  it('GET /:id : reçu joint sous `receipt` (champs exposables, jamais les sha256)', async () => {
+    const mission = await seedMission({ status: 'IN_PROGRESS', travelerId: traveler.id })
+    await submitReceipt(
+      mission.id,
+      { urlRecu: RECEIPT_URL, purchaseAmountCents: PURCHASE_CENTS },
+      bearer(travelerToken),
+    )
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/missions/${mission.id}`,
+      headers: bearer(buyerToken),
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as {
+      id: string
+      receipt: { totalTtcCents: number; receiptUrl: string; sealedAt: string } | null
+    }
+    expect(body.id).toBe(mission.id)
+    expect(body.receipt).toMatchObject({
+      totalTtcCents: PURCHASE_CENTS,
+      receiptUrl: RECEIPT_URL,
+    })
+    expect(body.receipt?.sealedAt).toBeTruthy()
+    // Détail d'implémentation du scellement : jamais exposé.
+    expect(body.receipt).not.toHaveProperty('sha256Server')
+    expect(body.receipt).not.toHaveProperty('sha256Client')
+  })
+
+  it('GET /:id : mission sans reçu → receipt null', async () => {
+    const mission = await seedMission({ status: 'IN_PROGRESS', travelerId: traveler.id })
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/missions/${mission.id}`,
+      headers: bearer(buyerToken),
+    })
+    expect(res.statusCode).toBe(200)
+    expect((res.json() as { receipt: unknown }).receipt).toBeNull()
+  })
+
   it('submit-receipt : non authentifié → 401', async () => {
     const mission = await seedMission({ status: 'IN_PROGRESS', travelerId: traveler.id })
     const res = await submitReceipt(mission.id, {

@@ -18,6 +18,14 @@ export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
 export type KycStatus = "PENDING" | "VERIFIED" | "REJECTED";
 
+// Reçu scellé tel qu'exposé par GET /missions/:id — champs publics seulement
+// (jamais les sha256). receiptUrl nullable : reçus legacy antérieurs au champ.
+export interface MissionReceipt {
+  totalTtcCents: number;
+  receiptUrl: string | null;
+  sealedAt: string;
+}
+
 export interface Mission {
   id: string;
   buyerId: string;
@@ -30,6 +38,9 @@ export interface Mission {
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
+  // Présent uniquement sur GET /missions/:id (null si aucun reçu scellé) ;
+  // absent des réponses liste.
+  receipt?: MissionReceipt | null;
 }
 
 export interface Receipt {

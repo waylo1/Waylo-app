@@ -166,12 +166,23 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   })
 
   // GET /api/missions/:id — visible par l'acheteur OU le voyageur assigné ;
-  // tiers → 404 (ne révèle pas l'existence).
+  // tiers → 404 (ne révèle pas l'existence). Le reçu scellé (s'il existe) est
+  // joint sous `receipt`, restreint aux champs exposables (totalTtcCents,
+  // receiptUrl, sealedAt) — jamais les sha256, détail d'implémentation du
+  // scellement.
   app.get('/:id', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const access = await findMissionForParticipant(prisma, id, req.user.sub)
     if (!access) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-    return reply.code(200).send(access.mission)
+    const mission = await prisma.mission.findUniqueOrThrow({
+      where: { id },
+      include: {
+        receipt: {
+          select: { totalTtcCents: true, receiptUrl: true, sealedAt: true },
+        },
+      },
+    })
+    return reply.code(200).send(mission)
   })
 
   // POST /api/missions/:id/intent — financement T0, réservé à l'ACHETEUR.

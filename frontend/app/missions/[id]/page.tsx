@@ -20,8 +20,8 @@ import {
 // Suivi ACHETEUR d'une mission. Vue dédiée par statut ; à AWAITING_VALIDATION,
 // la validation T1 (POST /validate) déclenche la capture du séquestre — le
 // webhook payment_intent.succeeded finalise ensuite VALIDATED → RELEASED.
-// Limitation V1 : pas de route API de lecture du reçu scellé — l'acheteur
-// valide sans voir le montant TTC déposé (à exposer côté backend plus tard).
+// GET /missions/:id joint le reçu scellé sous `receipt` : l'acheteur voit le
+// montant payé et le justificatif avant de confirmer.
 
 const STATUS_HINTS: Partial<Record<Mission["status"], string>> = {
   CREATED: "Mission créée — financez-la pour la publier au catalogue.",
@@ -61,9 +61,35 @@ function ValidationCard({
         <CardTitle>Validation de la réception</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {mission.receipt ? (
+          <div className="space-y-1 rounded-lg border bg-muted/30 p-3 text-sm">
+            <p className="font-medium">
+              Montant payé par le voyageur :{" "}
+              {centsToEur(mission.receipt.totalTtcCents)}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Reçu scellé le{" "}
+              {new Date(mission.receipt.sealedAt).toLocaleString("fr-FR")}
+            </p>
+            {mission.receipt.receiptUrl && (
+              <a
+                href={mission.receipt.receiptUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm underline underline-offset-4"
+              >
+                Voir le reçu
+              </a>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Reçu scellé indisponible — rechargez la page ou contactez le
+            support avant de valider.
+          </p>
+        )}
         <p className="text-sm text-muted-foreground">
-          Le voyageur a scellé son reçu d&apos;achat. En confirmant, vous
-          déclenchez la capture du séquestre (
+          En confirmant, vous déclenchez la capture du séquestre (
           {centsToEur(mission.budgetCents + mission.commissionCents)}) et la
           libération des fonds au voyageur. Cette action est définitive.
         </p>
