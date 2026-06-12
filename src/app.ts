@@ -1,7 +1,9 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import fastifyJwt from '@fastify/jwt'
+import Stripe from 'stripe'
 import authRoute from './auth/auth.route'
 import missionRoute from './missions/mission.route'
+import type { PaymentIntentClient } from './missions/mission.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
 import { AlertSink } from './alerts'
@@ -25,6 +27,8 @@ declare module 'fastify' {
 export interface BuildAppOptions {
   /** Hook d'alertes opérationnelles (cf. src/alerts.ts). Défaut : log structuré stderr. */
   onAlert?: AlertSink
+  /** Client Stripe pour le financement T0 — injectable (fake en test). Défaut : SDK réel. */
+  stripe?: PaymentIntentClient
 }
 
 /**
@@ -52,8 +56,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }))
 
+  let paymentClient = options.stripe
+  if (!paymentClient) {
+    const secretKey = process.env.STRIPE_SECRET_KEY
+    if (!secretKey) throw new Error('STRIPE_ENV_MISSING') // même fail-fast que les plugins webhook
+    paymentClient = new Stripe(secretKey)
+  }
+
   await app.register(authRoute, { prefix: '/api/auth' })
-  await app.register(missionRoute, { prefix: '/api/missions' })
+  await app.register(missionRoute, { prefix: '/api/missions', stripe: paymentClient })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
   // (encapsulé) : constructEvent exige les octets exacts du body, sans

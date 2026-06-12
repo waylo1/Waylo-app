@@ -22,6 +22,7 @@ enum KycStatus {
 
 enum MissionStatus {
   CREATED
+  FUNDED // escrow en place : PaymentIntent (capture différée) créé, EscrowTransaction HELD
   MATCHED
   IN_PROGRESS
   AWAITING_VALIDATION

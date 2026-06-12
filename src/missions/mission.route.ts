@@ -1,15 +1,45 @@
 import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
-import { findMissionForParticipant } from './mission-access'
+import { MissionStatus, Prisma } from '../generated/prisma'
+import { findMissionForBuyer, findMissionForParticipant } from './mission-access'
 
 /**
- * API missions — création & consultation. AUCUNE interaction Stripe ici :
- * la mission naît en CREATED (non financée). Le financement T0 (EscrowTransaction
- * + PaymentIntent) est la brique 2b.
+ * API missions — création, consultation, financement T0.
  *
  * Toutes les routes sont protégées (JWT) et autorisées PAR RESSOURCE
  * (cf. mission-access.ts) — jamais par un rôle de compte.
+ *
+ * Financement T0 (POST /:id/intent) : PaymentIntent à capture différée
+ * (séquestre) + EscrowTransaction HELD + mission FUNDED. Règle d'or respectée :
+ * AUCUN appel Stripe dans une transaction DB — le PI est créé AVANT, avec une
+ * idempotencyKey déterministe par mission (un retry après crash récupère le
+ * MÊME PaymentIntent, jamais un doublon).
  */
+
+/** Surface Stripe minimale — injectable (fake en test, SDK réel en prod). */
+export interface PaymentIntentClient {
+  paymentIntents: {
+    create(
+      params: {
+        amount: number
+        currency: string
+        capture_method: 'manual'
+        metadata: Record<string, string>
+      },
+      options: { idempotencyKey: string },
+    ): Promise<{ id: string; client_secret: string | null }>
+  }
+}
+
+export interface MissionRouteOptions {
+  stripe: PaymentIntentClient
+}
+
+/** Transition CREATED → FUNDED perdue (course) : la mission vient d'être financée ailleurs. */
+class FundingConflictError extends Error {}
+
+const isUniqueViolation = (err: unknown): boolean =>
+  err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
 
 interface CreateMissionBody {
   targetProduct: string
@@ -41,7 +71,7 @@ const missionIdParamsSchema = {
   properties: { id: { type: 'string', minLength: 1 } },
 } as const
 
-const missionRoute: FastifyPluginAsync = async app => {
+const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
   app.setErrorHandler((err, req, reply) => {
     if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
     req.log.error({ err }, 'mission route error')
@@ -93,6 +123,74 @@ const missionRoute: FastifyPluginAsync = async app => {
     const access = await findMissionForParticipant(prisma, id, req.user.sub)
     if (!access) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
     return reply.code(200).send(access.mission)
+  })
+
+  // POST /api/missions/:id/intent — financement T0, réservé à l'ACHETEUR.
+  // Timeline (cf. workers/reconciliation.ts) : escrow HELD, capturedAmountCents 0,
+  // ledger vide. La capture (T1/T2) viendra de la validation humaine + webhook.
+  app.post('/:id/intent', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+
+    // Prechecks AVANT l'appel Stripe : pas de PI créé pour une mission non finançable.
+    const existingEscrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: mission.id },
+      select: { id: true },
+    })
+    if (existingEscrow) return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+    if (mission.status !== MissionStatus.CREATED) {
+      return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
+    }
+
+    // Montant séquestré = budget + commission : la commission EST le frais
+    // plateforme (le webhook de capture verse capturé − commission au voyageur).
+    const totalAmountCents = mission.budgetCents + mission.commissionCents
+
+    // Appel Stripe HORS transaction DB. idempotencyKey déterministe : deux
+    // tentatives concurrentes ou un retry post-crash obtiennent le MÊME PI.
+    const intent = await opts.stripe.paymentIntents.create(
+      {
+        amount: totalAmountCents,
+        currency: 'eur',
+        capture_method: 'manual', // séquestre : autorisation maintenant, capture après validation humaine
+        metadata: { missionId: mission.id },
+      },
+      { idempotencyKey: `fund_${mission.id}` },
+    )
+
+    // Transaction atomique : transition conditionnelle (anti-TOCTOU) + escrow.
+    // Soit les deux committent, soit rien — un échec laisse la mission CREATED
+    // et le PI orphelin est récupéré tel quel au retry (idempotencyKey).
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.CREATED },
+          data: { status: MissionStatus.FUNDED },
+        })
+        if (updated.count !== 1) throw new FundingConflictError()
+        await tx.escrowTransaction.create({
+          data: {
+            missionId: mission.id,
+            stripePaymentIntentId: intent.id,
+            spendingLimitCents: mission.budgetCents, // plafond carte JIT = budget, figé
+            idempotencyKey: `escrow_fund_${mission.id}`,
+            // status HELD et capturedAmountCents 0 : défauts du schéma (T0)
+          },
+        })
+      })
+    } catch (err) {
+      if (err instanceof FundingConflictError || isUniqueViolation(err)) {
+        return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+      }
+      throw err
+    }
+
+    return reply.code(200).send({
+      clientSecret: intent.client_secret,
+      paymentIntentId: intent.id,
+      amountCents: totalAmountCents,
+    })
   })
 }
 
