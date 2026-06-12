@@ -1,0 +1,214 @@
+// Waylo — schema.prisma
+// Règles : tout montant en Int (centimes), jamais Float/Decimal (rules.md §3).
+// @unique génère déjà un index B-tree unique en PostgreSQL ; @@index explicites sur les FK.
+// Receipt et IssuingAuthorizationLog sont immuables : pas d'updatedAt, pas de soft-delete.
+
+generator client {
+  provider = "prisma-client-js"
+  // Sortie dédiée : ne pas écraser le client FlipSync (packages/db) hoisté dans node_modules/.prisma
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  BUYER
+  TRAVELER
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum MissionStatus {
+  CREATED
+  MATCHED
+  IN_PROGRESS
+  AWAITING_VALIDATION
+  AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
+  RELEASED
+  REFUNDED
+  CANCELLED
+}
+
+enum EscrowStatus {
+  HELD
+  RELEASED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum LedgerType {
+  CAPTURE
+  PAYOUT
+  COMMISSION
+  REFUND
+}
+
+enum TransferStatus {
+  PENDING
+  SUBMITTED
+  SETTLED
+  FAILED
+  ABANDONED // terminal : M tentatives épuisées (échec structurel) — hors scope worker et requeue, « needs human »
+}
+
+enum SubstitutionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ITEM_SKIPPED
+}
+
+enum AuthDecision {
+  APPROVED
+  DECLINED
+}
+
+model User {
+  id               String    @id @default(cuid())
+  role             Role
+  email            String    @unique
+  kycStatus        KycStatus @default(PENDING)
+  stripeCustomerId String?   @unique // acheteur
+  stripeAccountId  String?   @unique // voyageur (Connect)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  missionsAsBuyer    Mission[] @relation("BuyerMissions")
+  missionsAsTraveler Mission[] @relation("TravelerMissions")
+}
+
+model Mission {
+  id              String        @id @default(cuid())
+  buyerId         String
+  travelerId      String?
+  status          MissionStatus @default(CREATED)
+  targetProduct   String
+  budgetCents     Int // figé après MATCHED — toute modification post-MATCHED est interdite côté service
+  commissionCents Int // figé
+  destination     String
+  expiresAt       DateTime
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  buyer    User  @relation("BuyerMissions", fields: [buyerId], references: [id])
+  traveler User? @relation("TravelerMissions", fields: [travelerId], references: [id])
+
+  escrow          EscrowTransaction?
+  substitutions   SubstitutionRequest[]
+  receipt         Receipt?
+  issuingAuthLogs IssuingAuthorizationLog[]
+
+  @@index([buyerId])
+  @@index([travelerId])
+}
+
+model EscrowTransaction {
+  id                    String       @id @default(cuid())
+  missionId             String       @unique
+  stripePaymentIntentId String       @unique
+  capturedAmountCents   Int          @default(0) // 0 = pas encore capturé ; peuplé au MOMENT de la capture réelle (payment_intent.succeeded), jamais à la libération
+  status                EscrowStatus @default(HELD)
+  stripeIssuingCardId   String?      @unique // lecture indexée du webhook JIT (chemin critique < 2 s)
+  spendingLimitCents    Int // = budget mission, figé ; aucun champ pour ramener la carte à 0 € post-autorisation
+  idempotencyKey        String       @unique
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  mission       Mission          @relation(fields: [missionId], references: [id])
+  ledgerEntries LedgerEntry[]
+  transfers     TransferOutbox[]
+}
+
+// Outbox transactionnel : l'intention de versement commit AVEC la ligne PAYOUT
+// (même transaction DB), l'exécution Stripe est portée par le worker — SEUL
+// chemin qui appelle transfers.create. Aucun appel Stripe dans une transaction DB.
+model TransferOutbox {
+  id                   String         @id @default(cuid())
+  escrowId             String
+  stripeTransferId     String?        @unique
+  destinationAccountId String
+  amountCents          Int
+  status               TransferStatus @default(PENDING)
+  idempotencyKey       String         @unique // dérivée de l'escrowId — un seul transfert de libération par escrow
+  attempts             Int            @default(0)
+  lastError            String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  escrow EscrowTransaction @relation(fields: [escrowId], references: [id])
+
+  @@index([status])
+  @@index([escrowId])
+}
+
+model LedgerEntry {
+  id          String     @id @default(cuid())
+  escrowId    String
+  type        LedgerType
+  amountCents Int
+  createdAt   DateTime   @default(now())
+
+  escrow EscrowTransaction @relation(fields: [escrowId], references: [id])
+
+  // Invariant : Σ(PAYOUT + COMMISSION + REFUND) == Σ(CAPTURE) par escrow.
+  // Append-only : jamais d'UPDATE ni de DELETE sur une écriture comptable.
+
+  @@index([escrowId])
+}
+
+model SubstitutionRequest {
+  id                 String             @id @default(cuid())
+  missionId          String
+  lineItemRef        String
+  proposedProduct    String
+  proposedPriceCents Int
+  status             SubstitutionStatus @default(PENDING) // jamais APPROVED par défaut — validation humaine obligatoire
+  createdAt          DateTime           @default(now())
+  resolvedAt         DateTime?
+
+  mission Mission @relation(fields: [missionId], references: [id])
+
+  @@index([missionId])
+}
+
+model Receipt {
+  id            String   @id @default(cuid())
+  missionId     String   @unique
+  totalTtcCents Int
+  sha256Client  String
+  sha256Server  String
+  sealedAt      DateTime // horloge serveur uniquement, jamais le device
+  // Immuable : pas d'updatedAt — un reçu scellé ne se modifie jamais (correction = nouveau reçu)
+
+  mission Mission @relation(fields: [missionId], references: [id])
+}
+
+model ProcessedStripeEvent {
+  id            String   @id @default(cuid())
+  stripeEventId String   @unique
+  type          String
+  processedAt   DateTime @default(now())
+}
+
+model IssuingAuthorizationLog {
+  id                    String       @id @default(cuid())
+  missionId             String?
+  stripeAuthorizationId String       @unique
+  requestedAmountCents  Int
+  decision              AuthDecision
+  reason                String?
+  createdAt             DateTime     @default(now())
+
+  mission Mission? @relation(fields: [missionId], references: [id])
+
+  // Audit KYC/AML : append-only, jamais purgé, pas de soft-delete
+
+  @@index([missionId])
+}

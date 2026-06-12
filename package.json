@@ -1,12 +1,27 @@
 {
-  "name": "waylo-app",
-  "version": "1.0.0",
-  "description": "WAYLO - Mandat sécurisé",
-  "main": "index.js",
+  "name": "waylo-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Waylo — webhooks Stripe (escrow missions, autorisation JIT Issuing), worker de transfert outbox, réconciliation",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "node index.js"
+    "prisma:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "@prisma/client": "5.22.0",
+    "fastify": "^4.28.1",
+    "stripe": "^17.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "prisma": "5.22.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.9"
   }
 }

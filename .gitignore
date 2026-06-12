@@ -1,0 +1,18 @@
+# Dépendances
+node_modules/
+
+# Client Prisma généré (recréé par `npx prisma generate` — sortie custom du schéma)
+src/generated/prisma/
+
+# Secrets & environnement — seul .env.example est versionné
+.env
+.env.*
+!.env.example
+
+# Build & artefacts
+dist/
+coverage/
+*.tsbuildinfo
+
+# Artefacts runtime (sink des alertes critiques, cf. src/alerts.ts)
+alerts-critical.ndjson
