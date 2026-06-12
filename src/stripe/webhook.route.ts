@@ -295,7 +295,12 @@ async function handleCapture(
   })
 
   await tx.mission.updateMany({
-    where: { id: escrow.missionId, status: MissionStatus.AWAITING_VALIDATION },
+    // VALIDATED = mission passée par la route /validate (T1) ; AWAITING_VALIDATION =
+    // capture déclenchée hors route (rejeu, flux legacy). Les deux convergent vers RELEASED.
+    where: {
+      id: escrow.missionId,
+      status: { in: [MissionStatus.AWAITING_VALIDATION, MissionStatus.VALIDATED] },
+    },
     data: { status: MissionStatus.RELEASED },
   })
   return { handled: true, deferredAlerts: [] }

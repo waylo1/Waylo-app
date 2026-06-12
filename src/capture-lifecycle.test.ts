@@ -74,7 +74,7 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
     pi: string
     idem: string
     travelerData?: { stripeAccountId: string | null; kycStatus: 'PENDING' | 'VERIFIED' }
-    missionStatus?: 'IN_PROGRESS' | 'AWAITING_VALIDATION'
+    missionStatus?: 'IN_PROGRESS' | 'AWAITING_VALIDATION' | 'VALIDATED'
   }): Promise<{ missionId: string; escrowId: string }> {
     const traveler = opts.travelerData
       ? await prisma.user.create({
@@ -262,6 +262,41 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
     expect(replay.json()).toMatchObject({ duplicate: true, handled: false })
     expect(await prisma.ledgerEntry.count({ where: { escrowId } })).toBe(1)
     expect(collected.filter(a => a.code === 'TRAVELER_ACCOUNT_MISSING')).toHaveLength(1)
+    await app.close()
+  })
+
+  it('(E) webhook : une mission VALIDATED (T1 via /validate) est libérée → RELEASED', async () => {
+    // Prouve le garde élargi du webhook : VALIDATED, comme AWAITING_VALIDATION,
+    // converge vers RELEASED (escrow + mission), avec PAYOUT/COMMISSION/outbox.
+    const { buildApp } = await import('./app')
+    const app = await buildApp()
+    const { missionId, escrowId } = await seedMissionEscrow({
+      pi: 'pi_validated_release',
+      idem: 'idem_lifecycle_e',
+      travelerData: { stripeAccountId: 'acct_e', kycStatus: 'VERIFIED' },
+      missionStatus: 'VALIDATED',
+    })
+
+    const res = await signedInject(app, {
+      id: 'evt_capture_validated',
+      object: 'event',
+      type: 'payment_intent.succeeded',
+      data: {
+        object: { id: 'pi_validated_release', object: 'payment_intent', amount_received: BUDGET_CENTS },
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ handled: true })
+
+    const escrow = await prisma.escrowTransaction.findUniqueOrThrow({ where: { id: escrowId } })
+    expect(escrow.status).toBe('RELEASED')
+    const mission = await prisma.mission.findUniqueOrThrow({ where: { id: missionId } })
+    expect(mission.status).toBe('RELEASED') // VALIDATED → RELEASED par le webhook
+    const ledger = await prisma.ledgerEntry.findMany({ where: { escrowId } })
+    expect(ledger.map(l => l.type).sort()).toEqual(['CAPTURE', 'COMMISSION', 'PAYOUT'])
+    expect(await prisma.transferOutbox.count({ where: { escrowId } })).toBe(1)
+    // Nettoyage : ne pas laisser d'outbox PENDING que le worker d'un autre test ramasserait.
+    await prisma.transferOutbox.deleteMany({ where: { escrowId } })
     await app.close()
   })
 

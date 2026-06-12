@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
-import { MissionStatus, Prisma } from '../generated/prisma'
+import { EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
 import { findMissionForBuyer, findMissionForParticipant } from './mission-access'
 
 /**
@@ -28,6 +28,12 @@ export interface PaymentIntentClient {
       },
       options: { idempotencyKey: string },
     ): Promise<{ id: string; client_secret: string | null }>
+    /** Capture (T1) du séquestre — montant total autorisé. idempotencyKey déterministe par mission. */
+    capture(
+      id: string,
+      params: Record<string, never>,
+      options: { idempotencyKey: string },
+    ): Promise<{ id: string }>
   }
 }
 
@@ -37,6 +43,9 @@ export interface MissionRouteOptions {
 
 /** Transition CREATED → FUNDED perdue (course) : la mission vient d'être financée ailleurs. */
 class FundingConflictError extends Error {}
+
+/** Transition AWAITING_VALIDATION → VALIDATED perdue (course / double validation). */
+class ValidationConflictError extends Error {}
 
 const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
@@ -191,6 +200,57 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       paymentIntentId: intent.id,
       amountCents: totalAmountCents,
     })
+  })
+
+  // POST /api/missions/:id/validate — validation humaine (T1), réservée à l'ACHETEUR.
+  // Déclenche la capture du séquestre. Le reste (ledger CAPTURE/PAYOUT/COMMISSION,
+  // escrow→RELEASED, TransferOutbox, mission→RELEASED) est porté par le webhook
+  // payment_intent.succeeded — JAMAIS dupliqué ici (cf. timeline reconciliation.ts).
+  app.post('/:id/validate', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+
+    if (mission.status !== MissionStatus.AWAITING_VALIDATION) {
+      // Inclut le 2e clic : la 1re validation a déjà posé VALIDATED.
+      return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
+    }
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: mission.id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB. idempotencyKey déterministe : un retry
+    // post-crash ou un double appel capture le MÊME PI une seule fois côté Stripe.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `capture_${mission.id}` },
+    )
+
+    // Transaction atomique : SEULE écriture = transition conditionnelle de la
+    // mission (anti-TOCTOU). Aucune écriture comptable — le webhook s'en charge.
+    // VALIDATED est transitoire : le webhook le finalisera en RELEASED.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.AWAITING_VALIDATION },
+          data: { status: MissionStatus.VALIDATED },
+        })
+        if (updated.count !== 1) throw new ValidationConflictError()
+      })
+    } catch (err) {
+      if (err instanceof ValidationConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
+      }
+      throw err
+    }
+
+    const validated = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    return reply.code(200).send(validated)
   })
 }
 

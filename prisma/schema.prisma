@@ -26,6 +26,7 @@ enum MissionStatus {
   MATCHED
   IN_PROGRESS
   AWAITING_VALIDATION
+  VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
   REFUNDED

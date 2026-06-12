@@ -54,6 +54,8 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
           client_secret: `pi_fake_${params.metadata['missionId']}_secret_test`,
         }
       },
+      // Non sollicité par le financement T0 — présent pour satisfaire l'interface.
+      capture: async id => ({ id }),
     },
   }
 
