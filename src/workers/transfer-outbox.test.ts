@@ -69,11 +69,14 @@ describe('TransferOutbox — worker de transfert & réconciliation', () => {
       },
     })
     escrowId = escrow.id
+    // Lignes antidatées AU-DELÀ de la fenêtre de grâce PAYOUT_NOT_SETTLED
+    // (défaut 60 min) : un PAYOUT frais serait un transitoire normal, silencieux.
+    const beyondGrace = new Date(Date.now() - 2 * 3600 * 1000)
     await prisma.ledgerEntry.createMany({
       data: [
-        { escrowId, type: 'CAPTURE', amountCents: BUDGET_CENTS },
-        { escrowId, type: 'PAYOUT', amountCents: PAYOUT_CENTS },
-        { escrowId, type: 'COMMISSION', amountCents: COMMISSION_CENTS },
+        { escrowId, type: 'CAPTURE', amountCents: BUDGET_CENTS, createdAt: beyondGrace },
+        { escrowId, type: 'PAYOUT', amountCents: PAYOUT_CENTS, createdAt: beyondGrace },
+        { escrowId, type: 'COMMISSION', amountCents: COMMISSION_CENTS, createdAt: beyondGrace },
       ],
     })
   })

@@ -14,6 +14,13 @@ import { AlertSink, OpsAlertInput, safeEmit } from '../alerts'
 
 type Tx = Prisma.TransactionClient
 
+/**
+ * Abort DÉLIBÉRÉ d'un effet métier : l'alerte (WEBHOOK_ABORT_NON_RECOVERABLE)
+ * a déjà été émise AVANT le throw. Le catch de la route ne ré-alerte pas ces
+ * erreurs — seules les erreurs inattendues émettent WEBHOOK_PROCESSING_FAILED.
+ */
+class WebhookAbortError extends Error {}
+
 /** Émetteur d'alerte immédiat (la sévérité est dérivée du code par safeEmit). */
 type AlertEmitter = (input: OpsAlertInput) => void
 
@@ -88,6 +95,16 @@ const stripeWebhookRoute: FastifyPluginAsync<StripeWebhookOptions> = async (app,
     } catch (err) {
       // Rollback intégral : rien n'est committé, le 500 est sûr — Stripe rejouera.
       req.log.error({ err, eventId: event.id, type: event.type }, 'webhook processing failed')
+      if (!(err instanceof WebhookAbortError)) {
+        // Erreur INATTENDUE (DB indisponible, bug) : sans ce signal, Stripe
+        // rejoue en silence 3 jours puis désactive l'endpoint. Les aborts
+        // délibérés, eux, ont déjà émis leur alerte avant le throw.
+        safeEmit(opts.onAlert, {
+          code: 'WEBHOOK_PROCESSING_FAILED',
+          message: 'Échec inattendu du traitement webhook (rollback intégral, Stripe rejouera)',
+          details: { eventId: event.id, type: event.type, err: String(err) },
+        })
+      }
       return reply.code(500).send({ error: 'WEBHOOK_PROCESSING_FAILED' })
     }
 
@@ -167,7 +184,7 @@ async function handleCapture(
       message: 'payment_intent.succeeded sans montant capturé',
       details: { cause: 'EMPTY_CAPTURE', intentId: intent.id, escrowId: escrow.id },
     })
-    throw new Error('EMPTY_CAPTURE')
+    throw new WebhookAbortError('EMPTY_CAPTURE')
   }
 
   // ÉTAPE 1 — capture journalisée en premier, inconditionnellement.
@@ -191,7 +208,7 @@ async function handleCapture(
         incomingCapturedCents: capturedCents,
       },
     })
-    throw new Error('CAPTURE_STATE_CONFLICT')
+    throw new WebhookAbortError('CAPTURE_STATE_CONFLICT')
   }
   await tx.ledgerEntry.create({
     data: { escrowId: escrow.id, type: LedgerType.CAPTURE, amountCents: capturedCents },
@@ -239,7 +256,7 @@ async function handleCapture(
       message: 'Escrow sorti de HELD pendant la libération',
       details: { cause: 'ESCROW_NOT_HELD', escrowId: escrow.id },
     })
-    throw new Error('ESCROW_NOT_HELD')
+    throw new WebhookAbortError('ESCROW_NOT_HELD')
   }
 
   const commissionCents = escrow.mission.commissionCents
@@ -250,7 +267,7 @@ async function handleCapture(
       message: 'Commission supérieure au montant capturé',
       details: { cause: 'NEGATIVE_PAYOUT', escrowId: escrow.id, capturedCents, commissionCents },
     })
-    throw new Error('NEGATIVE_PAYOUT')
+    throw new WebhookAbortError('NEGATIVE_PAYOUT')
   }
 
   await tx.ledgerEntry.createMany({
@@ -316,7 +333,7 @@ async function applyRefund(
       message: 'charge.refunded reçu pour un escrow jamais capturé',
       details: { cause: 'REFUND_BEFORE_CAPTURE', escrowId: escrow.id, chargeId: charge.id },
     })
-    throw new Error('REFUND_BEFORE_CAPTURE')
+    throw new WebhookAbortError('REFUND_BEFORE_CAPTURE')
   }
 
   // Anti-TOCTOU : verrou de ligne AVANT toute lecture du ledger, dans la même
@@ -344,7 +361,7 @@ async function applyRefund(
         stripeRefundedCents: charge.amount_refunded,
       },
     })
-    throw new Error('REFUND_LEDGER_AHEAD_OF_STRIPE')
+    throw new WebhookAbortError('REFUND_LEDGER_AHEAD_OF_STRIPE')
   }
   if (refundedSoFarCents + deltaCents > escrow.capturedAmountCents) {
     abortAlert({
@@ -357,7 +374,7 @@ async function applyRefund(
         attemptedTotalCents: refundedSoFarCents + deltaCents,
       },
     })
-    throw new Error('OVER_REFUND') // jamais rembourser plus que capturé
+    throw new WebhookAbortError('OVER_REFUND') // jamais rembourser plus que capturé
   }
 
   const fullRefund = charge.amount_refunded >= escrow.capturedAmountCents
@@ -374,7 +391,7 @@ async function applyRefund(
       message: 'Refund sur un escrow déjà sorti du périmètre remboursable',
       details: { cause: 'ESCROW_REFUND_CONFLICT', escrowId: escrow.id },
     })
-    throw new Error('ESCROW_REFUND_CONFLICT')
+    throw new WebhookAbortError('ESCROW_REFUND_CONFLICT')
   }
 
   await tx.ledgerEntry.create({

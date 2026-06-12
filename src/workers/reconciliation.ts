@@ -69,6 +69,13 @@ export interface ReconciliationDeps {
   onAlert?: AlertSink
   /** X heures avant qu'une autorisation APPROVED sans capture ne déclenche une alerte. */
   authWithoutCaptureHours?: number
+  /**
+   * Fenêtre de grâce d'un PAYOUT non réglé, en minutes (défaut 60). Couvre le
+   * chemin nominal du worker : tick ~1 min + 5 tentatives en backoff 2^n min
+   * (≈ 31 min cumulées). Sous le seuil = transitoire normal, pas d'alerte ;
+   * au-delà, le nag reprend à chaque run tant que l'argent n'est pas réglé.
+   */
+  payoutSettleGraceMinutes?: number
   /** Fenêtre de vérification Stripe des transferts SETTLED récents. */
   transferCheckWindowDays?: number
   /** Fenêtre de confrontation ledger ↔ captures réelles Stripe. */
@@ -147,9 +154,11 @@ export async function runReconciliation(
   }
 
   // ── 2. Croisement PAYOUT ↔ TransferOutbox ────────────────────────────────
+  const payoutGraceMinutes = deps.payoutSettleGraceMinutes ?? 60
+  const payoutGraceCutoff = new Date(Date.now() - payoutGraceMinutes * 60 * 1000)
   const payouts = await prisma.ledgerEntry.findMany({
     where: { type: LedgerType.PAYOUT },
-    select: { id: true, escrowId: true, amountCents: true },
+    select: { id: true, escrowId: true, amountCents: true, createdAt: true },
   })
   const outboxes = await prisma.transferOutbox.findMany({
     select: {
@@ -171,9 +180,11 @@ export async function runReconciliation(
 
   for (const payout of payouts) {
     const settledCents = settledByEscrow.get(payout.escrowId) ?? 0
-    if (settledCents < payout.amountCents) {
-      // Nag volontaire : tant que l'argent réclamé n'est pas réglé (y compris
-      // outbox ABANDONED), l'écart financier reste signalé à chaque run.
+    if (settledCents < payout.amountCents && payout.createdAt < payoutGraceCutoff) {
+      // Fenêtre de grâce : un PAYOUT plus récent que le seuil est un transitoire
+      // normal (worker pas encore passé / retries en cours) — pas d'alerte.
+      // Au-delà : nag volontaire — tant que l'argent réclamé n'est pas réglé
+      // (y compris outbox ABANDONED), l'écart reste signalé à chaque run.
       // L'alerte « needs human » unique de l'abandon, elle, est émise une seule
       // fois par le worker (TRANSFER_ABANDONED).
       emit({

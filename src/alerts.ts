@@ -27,6 +27,8 @@ export type AlertCode =
   | 'TRANSFER_ABANDONED'
   | 'WEBHOOK_ABORT_NON_RECOVERABLE'
   | 'ISSUING_JIT_LOOKUP_ERROR'
+  | 'WEBHOOK_PROCESSING_FAILED'
+  | 'RECONCILIATION_RUN_FAILED'
 
 export type AlertSeverity = 'info' | 'warn' | 'critical'
 
@@ -60,6 +62,8 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   PAYOUT_NOT_SETTLED: 'warn', // latence worker normale au début, nag quotidien sinon
   TRAVELER_ACCOUNT_MISSING: 'warn', // argent visible et sûr, action d'intervention connue
   ISSUING_JIT_LOOKUP_ERROR: 'warn', // refus fail-safe ; en rafale = incident infra
+  WEBHOOK_PROCESSING_FAILED: 'warn', // erreur INATTENDUE (rollback, Stripe rejoue) ; persistant = endpoint désactivable
+  RECONCILIATION_RUN_FAILED: 'warn', // le monitoring lui-même est en panne — les invariants ne sont plus vérifiés
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {
