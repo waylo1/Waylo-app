@@ -1,7 +1,11 @@
 import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
-import { findMissionForBuyer, findMissionForParticipant } from './mission-access'
+import {
+  findMissionForBuyer,
+  findMissionForParticipant,
+  findMissionForTraveler,
+} from './mission-access'
 
 /**
  * API missions — création, consultation, financement T0.
@@ -46,6 +50,12 @@ class FundingConflictError extends Error {}
 
 /** Transition AWAITING_VALIDATION → VALIDATED perdue (course / double validation). */
 class ValidationConflictError extends Error {}
+
+/** Transition FUNDED → MATCHED perdue (course : un autre voyageur a pris la mission). */
+class MatchConflictError extends Error {}
+
+/** Transition MATCHED → IN_PROGRESS perdue (course / double départ). */
+class StartTravelConflictError extends Error {}
 
 const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
@@ -252,6 +262,70 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     const validated = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     return reply.code(200).send(validated)
   })
+
+  // POST /api/missions/:id/match — un VOYAGEUR (pas l'acheteur) prend la mission.
+  // La mission n'a pas encore de participant voyageur : autorisation par statut
+  // FUNDED, pas par le helper participant (le candidat n'est pas encore lié).
+  app.post('/:id/match', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const userId = req.user.sub
+    const mission = await prisma.mission.findUnique({ where: { id } })
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    // Un utilisateur ne peut pas accomplir sa propre mission.
+    if (mission.buyerId === userId) {
+      return reply.code(400).send({ error: 'CANNOT_MATCH_OWN_MISSION' })
+    }
+    if (mission.status !== MissionStatus.FUNDED) {
+      // CREATED = pas encore finançée ; tout le reste = déjà prise/au-delà.
+      const code =
+        mission.status === MissionStatus.CREATED ? 'MISSION_NOT_MATCHABLE' : 'MISSION_ALREADY_MATCHED'
+      return reply.code(400).send({ error: code })
+    }
+
+    // Transaction atomique : assignation conditionnelle (anti-TOCTOU). Deux
+    // voyageurs concurrents : le 1er commit FUNDED → MATCHED, le 2nd voit
+    // rowcount 0 (statut/travelerId ne matchent plus) → 400.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.FUNDED, travelerId: null },
+          data: { travelerId: userId, status: MissionStatus.MATCHED },
+        })
+        if (updated.count !== 1) throw new MatchConflictError()
+      })
+    } catch (err) {
+      if (err instanceof MatchConflictError) {
+        return reply.code(400).send({ error: 'MISSION_ALREADY_MATCHED' })
+      }
+      throw err
+    }
+
+    const matched = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(matched)
+  })
+
+  // POST /api/missions/:id/start-travel — le VOYAGEUR assigné passe à l'action.
+  app.post(
+    '/:id/start-travel',
+    { schema: { params: missionIdParamsSchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // acheteur/tiers : indistinguables
+
+      // Transition conditionnelle MATCHED → IN_PROGRESS (anti-TOCTOU, anti double-départ).
+      const updated = await prisma.mission.updateMany({
+        where: { id, travelerId: req.user.sub, status: MissionStatus.MATCHED },
+        data: { status: MissionStatus.IN_PROGRESS },
+      })
+      if (updated.count !== 1) {
+        return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+      }
+
+      const started = await prisma.mission.findUniqueOrThrow({ where: { id } })
+      return reply.code(200).send(started)
+    },
+  )
 }
 
 export default missionRoute

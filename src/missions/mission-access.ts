@@ -38,7 +38,7 @@ export async function findMissionForParticipant(
 /**
  * Acheteur seulement. `null` si la mission n'existe pas, ou si l'utilisateur en
  * est le voyageur ou un tiers. Base des actions réservées à l'acheteur
- * (ex. financement T0 en 2b).
+ * (ex. financement T0, validation T1).
  */
 export async function findMissionForBuyer(
   db: Db,
@@ -47,4 +47,18 @@ export async function findMissionForBuyer(
 ): Promise<Mission | null> {
   const access = await findMissionForParticipant(db, missionId, userId)
   return access?.relation === 'buyer' ? access.mission : null
+}
+
+/**
+ * Voyageur assigné seulement. `null` si la mission n'existe pas, ou si
+ * l'utilisateur en est l'acheteur ou un tiers. Base des actions réservées au
+ * voyageur (ex. départ en mission, scellement des reçus).
+ */
+export async function findMissionForTraveler(
+  db: Db,
+  missionId: string,
+  userId: string,
+): Promise<Mission | null> {
+  const access = await findMissionForParticipant(db, missionId, userId)
+  return access?.relation === 'traveler' ? access.mission : null
 }
