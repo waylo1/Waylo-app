@@ -181,6 +181,7 @@ model Receipt {
   id            String   @id @default(cuid())
   missionId     String   @unique
   totalTtcCents Int
+  receiptUrl    String? // URL du justificatif déposé (facultatif : antérieur au champ, reçus legacy null)
   sha256Client  String
   sha256Server  String
   sealedAt      DateTime // horloge serveur uniquement, jamais le device

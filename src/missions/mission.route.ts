@@ -373,6 +373,11 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       }
 
       const { urlRecu, purchaseAmountCents } = req.body as SubmitReceiptBody
+      // Un reçu ne peut pas dépasser le budget figé de la mission (le plafond
+      // carte JIT l'aurait d'ailleurs refusé à l'achat — défense en profondeur).
+      if (purchaseAmountCents > mission.budgetCents) {
+        return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+      }
       // Hash content-addressed déterministe : scellé serveur (source de vérité).
       const sha256Server = createHash('sha256')
         .update(`${mission.id}:${urlRecu}:${purchaseAmountCents}`)
@@ -386,6 +391,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
             data: {
               missionId: mission.id,
               totalTtcCents: purchaseAmountCents,
+              receiptUrl: urlRecu,
               // Pas de hash client distinct dans ce flux : le serveur scelle.
               sha256Client: sha256Server,
               sha256Server,

@@ -128,18 +128,53 @@ describe('Découverte & reçus — GET /available, POST /:id/submit-receipt', ()
       bearer(travelerToken),
     )
     expect(res.statusCode).toBe(201)
-    const receipt = res.json() as { missionId: string; totalTtcCents: number; sha256Server: string; sha256Client: string }
+    const receipt = res.json() as {
+      missionId: string
+      totalTtcCents: number
+      receiptUrl: string
+      sha256Server: string
+      sha256Client: string
+    }
     expect(receipt).toMatchObject({
       missionId: mission.id,
       totalTtcCents: PURCHASE_CENTS,
+      receiptUrl: RECEIPT_URL,
       sha256Server: expectedHash(mission.id, RECEIPT_URL, PURCHASE_CENTS),
     })
 
-    // Persistance : ligne Receipt unique + mission passée en validation.
+    // Persistance : ligne Receipt unique (hash + URL) + mission passée en validation.
     const inDb = await prisma.receipt.findUniqueOrThrow({ where: { missionId: mission.id } })
     expect(inDb.sha256Server).toBe(expectedHash(mission.id, RECEIPT_URL, PURCHASE_CENTS))
+    expect(inDb.receiptUrl).toBe(RECEIPT_URL)
     const after = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     expect(after.status).toBe('AWAITING_VALIDATION')
+  })
+
+  it('submit-receipt : montant > budget mission → 400 RECEIPT_AMOUNT_EXCEEDS_BUDGET, aucun reçu', async () => {
+    const mission = await seedMission({ status: 'IN_PROGRESS', travelerId: traveler.id })
+    const res = await submitReceipt(
+      mission.id,
+      { urlRecu: RECEIPT_URL, purchaseAmountCents: BUDGET_CENTS + 1 },
+      bearer(travelerToken),
+    )
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+
+    // Refus avant toute écriture : pas de reçu, mission toujours IN_PROGRESS.
+    expect(await prisma.receipt.count({ where: { missionId: mission.id } })).toBe(0)
+    const after = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(after.status).toBe('IN_PROGRESS')
+  })
+
+  it('submit-receipt : montant == budget mission → 201 (borne incluse)', async () => {
+    const mission = await seedMission({ status: 'IN_PROGRESS', travelerId: traveler.id })
+    const res = await submitReceipt(
+      mission.id,
+      { urlRecu: RECEIPT_URL, purchaseAmountCents: BUDGET_CENTS },
+      bearer(travelerToken),
+    )
+    expect(res.statusCode).toBe(201)
+    expect((res.json() as { totalTtcCents: number }).totalTtcCents).toBe(BUDGET_CENTS)
   })
 
   it('submit-receipt : acheteur → 404 ; tiers → 404 ; aucun reçu créé', async () => {
