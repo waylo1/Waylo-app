@@ -23,6 +23,7 @@ export const REQUIRED_ENV_VARS = [
   'STRIPE_SECRET_KEY',
   'STRIPE_WEBHOOK_SECRET',
   'STRIPE_ISSUING_WEBHOOK_SECRET',
+  'JWT_SECRET',
 ] as const
 
 /** Contrôle de présence (non vide) uniquement — aucun appel réseau. */

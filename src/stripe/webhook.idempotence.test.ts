@@ -25,6 +25,7 @@ if (!process.env.DATABASE_URL?.includes('waylo_test')) {
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy'
 process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK_SECRET
 process.env.STRIPE_ISSUING_WEBHOOK_SECRET = 'whsec_test_issuing'
+process.env.JWT_SECRET = 'jwt_test_secret_waylo'
 
 describe('POST /api/stripe/webhook — idempotence payment_intent.succeeded', () => {
   let app: FastifyInstance

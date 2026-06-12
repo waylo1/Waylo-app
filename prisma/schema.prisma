@@ -74,6 +74,7 @@ model User {
   id               String    @id @default(cuid())
   role             Role
   email            String    @unique
+  passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
   kycStatus        KycStatus @default(PENDING)
   stripeCustomerId String?   @unique // acheteur
   stripeAccountId  String?   @unique // voyageur (Connect)

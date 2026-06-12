@@ -15,6 +15,7 @@ function fullEnv(): NodeJS.ProcessEnv {
     STRIPE_SECRET_KEY: 'sk_test_dummy',
     STRIPE_WEBHOOK_SECRET: 'whsec_test_async',
     STRIPE_ISSUING_WEBHOOK_SECRET: 'whsec_test_issuing',
+    JWT_SECRET: 'jwt_test_secret_waylo',
   }
 }
 
@@ -49,6 +50,7 @@ describe('GET /health', () => {
     process.env.STRIPE_SECRET_KEY = 'sk_test_dummy'
     process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_async'
     process.env.STRIPE_ISSUING_WEBHOOK_SECRET = 'whsec_test_issuing'
+    process.env.JWT_SECRET = 'jwt_test_secret_waylo'
     app = await (await import('./app')).buildApp()
   })
 

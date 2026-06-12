@@ -27,6 +27,12 @@ const issuingAuthorizationRoute: FastifyPluginAsync<IssuingAuthorizationOptions>
   app,
   opts,
 ) => {
+  // constructEvent exige les octets EXACTS du body : parser raw SCOPÉ à ce
+  // plugin (encapsulation Fastify) — le reste de l'app garde le JSON parsé.
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
+    done(null, body),
+  )
+
   const secretKey = process.env.STRIPE_SECRET_KEY
   const issuingWebhookSecret = process.env.STRIPE_ISSUING_WEBHOOK_SECRET
   if (!secretKey || !issuingWebhookSecret) {

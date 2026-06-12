@@ -1,25 +1,60 @@
-import Fastify, { FastifyInstance } from 'fastify'
+import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import fastifyJwt from '@fastify/jwt'
+import authRoute from './auth/auth.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
 import { AlertSink } from './alerts'
+import type { Role } from './generated/prisma'
+
+declare module '@fastify/jwt' {
+  interface FastifyJWT {
+    payload: { sub: string; role: Role }
+    user: { sub: string; role: Role }
+  }
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** preHandler JWT : 401 { error: 'UNAUTHORIZED' } si token absent/invalide/expiré. */
+    authenticate: (req: FastifyRequest, reply: FastifyReply) => Promise<void>
+  }
+}
 
 export interface BuildAppOptions {
   /** Hook d'alertes opérationnelles (cf. src/alerts.ts). Défaut : log structuré stderr. */
   onAlert?: AlertSink
 }
 
-/** App Waylo — webhooks Stripe uniquement. Utilisée par le serveur (listen) et les tests (inject). */
+/**
+ * App Waylo. Routes publiques : /health, /api/auth/register, /api/auth/login.
+ * /api/stripe/* : authentifié par signature Stripe (constructEvent), JAMAIS
+ * par JWT. Tout le reste : preHandler `authenticate` (JWT).
+ */
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  const jwtSecret = process.env.JWT_SECRET
+  if (!jwtSecret) {
+    throw new Error('JWT_ENV_MISSING') // fail fast, même motif que les secrets Stripe
+  }
+
   const app = Fastify({ logger: true })
 
-  // constructEvent exige les octets EXACTS du body : parser raw global —
-  // cette app n'expose que des webhooks Stripe, aucun autre consommateur JSON.
-  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
-    done(null, body),
-  )
+  await app.register(fastifyJwt, { secret: jwtSecret })
+
+  app.decorate('authenticate', async (req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      await req.jwtVerify()
+    } catch {
+      await reply.code(401).send({ error: 'UNAUTHORIZED' })
+    }
+  })
 
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }))
 
+  await app.register(authRoute, { prefix: '/api/auth' })
+
+  // Les plugins Stripe portent chacun leur parser raw application/json
+  // (encapsulé) : constructEvent exige les octets exacts du body, sans
+  // impacter le parsing JSON du reste de l'app.
   await app.register(issuingAuthorizationRoute, {
     prefix: '/api/stripe',
     onAlert: options.onAlert,

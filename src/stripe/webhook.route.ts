@@ -54,6 +54,12 @@ export interface StripeWebhookOptions {
  * - chemin nominal (ex. TRAVELER_ACCOUNT_MISSING) → alerte différée post-commit.
  */
 const stripeWebhookRoute: FastifyPluginAsync<StripeWebhookOptions> = async (app, opts) => {
+  // constructEvent exige les octets EXACTS du body : parser raw SCOPÉ à ce
+  // plugin (encapsulation Fastify) — le reste de l'app garde le JSON parsé.
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
+    done(null, body),
+  )
+
   const secretKey = process.env.STRIPE_SECRET_KEY
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
   if (!secretKey || !webhookSecret) {
