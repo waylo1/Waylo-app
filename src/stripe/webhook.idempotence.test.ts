@@ -8,8 +8,8 @@ import type { PrismaClient } from '../generated/prisma'
  * valide) et prouve qu'un seul PAYOUT est écrit — l'idempotence repose sur
  * ProcessedStripeEvent + effet métier dans la même transaction.
  *
- * Prérequis : DATABASE_URL → base dédiée waylo_test (conteneur flipsync-pg:5433),
- * schéma poussé via prisma db push.
+ * Prérequis : DATABASE_URL → base dédiée waylo_test (conteneur flipsync-pg:5433).
+ * Schéma appliqué par migrations versionnées (globalSetup → prisma migrate deploy).
  */
 
 const WEBHOOK_SECRET = 'whsec_test_async'

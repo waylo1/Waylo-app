@@ -10,7 +10,9 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "prisma:generate": "prisma generate",
-    "db:push": "prisma db push",
+    "migrate:dev": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:reset": "prisma migrate reset --force",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "postinstall": "prisma generate"
