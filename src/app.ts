@@ -1,6 +1,7 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import fastifyJwt from '@fastify/jwt'
 import authRoute from './auth/auth.route'
+import missionRoute from './missions/mission.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
 import { AlertSink } from './alerts'
@@ -52,6 +53,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/health', async () => ({ status: 'ok', ts: new Date().toISOString() }))
 
   await app.register(authRoute, { prefix: '/api/auth' })
+  await app.register(missionRoute, { prefix: '/api/missions' })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
   // (encapsulé) : constructEvent exige les octets exacts du body, sans
