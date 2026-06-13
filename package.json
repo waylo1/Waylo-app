@@ -15,6 +15,7 @@
     "migrate:reset": "prisma migrate reset --force",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "tsx scripts/e2e-smoke.mts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
