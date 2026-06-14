@@ -260,6 +260,13 @@ async function handleCapture(
   })
   if (!escrow) return NO_EFFECT // PaymentIntent étranger à Waylo — acquitté sans effet
 
+  // Verrou de ligne (anti-TOCTOU, modèle applyRefund) : sérialise dans cette
+  // prisma.$transaction les traitements concurrents touchant cet escrow
+  // (capture vs refund). L'idempotence d'event est déjà assurée EN AMONT par
+  // ProcessedStripeEvent : un rejeu du même event.id ressort en 200 sans effet
+  // et SANS throw (pas de boucle de rejeu Stripe).
+  await tx.$queryRaw`SELECT id FROM "EscrowTransaction" WHERE id = ${escrow.id} FOR UPDATE`
+
   const capturedCents = intent.amount_received
   if (capturedCents <= 0) {
     abortAlert({
