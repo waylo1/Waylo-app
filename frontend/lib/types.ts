@@ -6,6 +6,7 @@ export const MISSION_STATUSES = [
   "FUNDED",
   "MATCHED",
   "IN_PROGRESS",
+  "ESCROW_LOCKED_CUSTOMS",
   "AWAITING_VALIDATION",
   "VALIDATED",
   "AWAITING_TRAVELER_ACCOUNT",
@@ -37,6 +38,9 @@ export interface Mission {
   origin: string;
   destination: string;
   trackingReference: string | null;
+  destinationCountry: string | null;
+  customsReceiptUrl: string | null;
+  customsReceiptSha256: string | null;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;

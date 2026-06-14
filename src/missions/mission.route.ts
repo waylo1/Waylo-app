@@ -7,6 +7,7 @@ import {
   findMissionForParticipant,
   findMissionForTraveler,
 } from './mission-access'
+import { getCustomsThreshold } from './customs'
 
 /**
  * API missions — création, consultation, financement T0.
@@ -92,6 +93,22 @@ class ReceiptConflictError extends Error {}
 
 /** Transition IN_PROGRESS → VALIDATED perdue (course / double confirmation de réception). */
 class ReceiveConflictError extends Error {}
+
+/** Transition ESCROW_LOCKED_CUSTOMS → IN_PROGRESS perdue (course / double dépôt de quittance). */
+class CustomsConflictError extends Error {}
+
+interface CustomsReceiptBody {
+  customsReceiptUrl: string
+}
+
+const customsReceiptBodySchema = {
+  type: 'object',
+  required: ['customsReceiptUrl'],
+  additionalProperties: false,
+  properties: {
+    customsReceiptUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+  },
+} as const
 
 interface SubmitReceiptBody {
   urlRecu: string
@@ -440,6 +457,27 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     if (mission.status !== MissionStatus.IN_PROGRESS) {
       return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
     }
+
+    // Contrôle douanier : si un pays de destination est connu, que la quittance
+    // n'a pas encore été fournie et que la valeur déclarée (= budget des biens)
+    // dépasse le seuil de minimis, on BLOQUE la prime AVANT toute capture —
+    // l'argent de l'acheteur n'est pas prélevé tant que les taxes ne sont pas
+    // prouvées (cf. POST /:id/customs-receipt qui lève le verrou).
+    if (mission.destinationCountry && !mission.customsReceiptUrl) {
+      const thresholdCents = getCustomsThreshold(mission.destinationCountry) * 100
+      if (mission.budgetCents > thresholdCents) {
+        const locked = await prisma.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
+          data: { status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
+        })
+        if (locked.count !== 1) {
+          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+        }
+        const lockedMission = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+        return reply.code(200).send(lockedMission)
+      }
+    }
+
     const escrow = await prisma.escrowTransaction.findUnique({
       where: { missionId: mission.id },
       select: { stripePaymentIntentId: true, status: true },
@@ -474,6 +512,49 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     const received = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     return reply.code(200).send(received)
   })
+
+  // POST /api/missions/:id/customs-receipt — le VOYAGEUR téléverse sa preuve de
+  // paiement des taxes pour LEVER le verrou douanier. Scellé serveur (sha256,
+  // horloge serveur). Transition conditionnelle ESCROW_LOCKED_CUSTOMS →
+  // IN_PROGRESS : l'acheteur peut alors reconfirmer la réception (/receive),
+  // qui ne re-bloquera pas (customsReceiptUrl désormais renseignée).
+  app.post(
+    '/:id/customs-receipt',
+    { schema: { params: missionIdParamsSchema, body: customsReceiptBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // acheteur/tiers : indistinguables
+      if (mission.status !== MissionStatus.ESCROW_LOCKED_CUSTOMS) {
+        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
+      }
+
+      const { customsReceiptUrl } = req.body as CustomsReceiptBody
+      const sha256 = createHash('sha256').update(`${mission.id}:${customsReceiptUrl}`).digest('hex')
+
+      try {
+        await prisma.$transaction(async tx => {
+          const updated = await tx.mission.updateMany({
+            where: { id: mission.id, status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
+            data: {
+              status: MissionStatus.IN_PROGRESS,
+              customsReceiptUrl,
+              customsReceiptSha256: sha256,
+            },
+          })
+          if (updated.count !== 1) throw new CustomsConflictError()
+        })
+      } catch (err) {
+        if (err instanceof CustomsConflictError) {
+          return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
+        }
+        throw err
+      }
+
+      const unlocked = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+      return reply.code(200).send(unlocked)
+    },
+  )
 
   // POST /api/missions/:id/match — un VOYAGEUR (pas l'acheteur) prend la mission.
   // La mission n'a pas encore de participant voyageur : autorisation par statut

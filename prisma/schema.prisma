@@ -25,6 +25,7 @@ enum MissionStatus {
   FUNDED // escrow en place : PaymentIntent (capture différée) créé, EscrowTransaction HELD
   MATCHED
   IN_PROGRESS
+  ESCROW_LOCKED_CUSTOMS // valeur déclarée > seuil douanier du pays : prime bloquée jusqu'à preuve de paiement des taxes (/customs-receipt)
   AWAITING_VALIDATION
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
@@ -95,6 +96,9 @@ model Mission {
   origin          String   @default("") // lieu d'origine (acheteur) ; @default("") pour backfill des lignes existantes — jamais vide via l'API (validation min 1)
   destination     String
   trackingReference String? // référence de suivi du dépôt/expédition (posée à MATCHED → IN_PROGRESS via /ship)
+  destinationCountry String? // code pays ISO-2 destination (seuil douanier) ; null = pas de contrôle douanier
+  customsReceiptUrl  String? // preuve de paiement des taxes (posée par le voyageur via /customs-receipt) ; null = non fournie
+  customsReceiptSha256 String? // scellé serveur de la quittance douanière
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt

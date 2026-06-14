@@ -204,6 +204,63 @@ function ReceiveCard({
   );
 }
 
+function CustomsReceiptForm({
+  mission,
+  onCleared,
+}: {
+  mission: Mission;
+  onCleared: (m: Mission) => void;
+}) {
+  const [customsReceiptUrl, setCustomsReceiptUrl] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const url = customsReceiptUrl.trim();
+    if (!url) return setError("Lien de la quittance requis.");
+    setPending(true);
+    setError(null);
+    try {
+      onCleared(await api.submitCustomsReceipt(mission.id, url));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Quittance douanière requise</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="mb-3 text-sm text-muted-foreground">
+          La valeur déclarée dépasse le seuil douanier de destination.
+          Téléversez votre preuve de paiement des taxes pour lever le verrou.
+        </p>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="customsReceiptUrl">Lien de la quittance</Label>
+            <Input
+              id="customsReceiptUrl"
+              required
+              maxLength={2048}
+              placeholder="https://…"
+              value={customsReceiptUrl}
+              onChange={e => setCustomsReceiptUrl(e.target.value)}
+            />
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <Button type="submit" className="w-full" disabled={pending}>
+            {pending ? "Envoi…" : "Téléverser la quittance"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 function MissionDetail({ missionId }: { missionId: string }) {
   const { user } = useAuth();
   const [mission, setMission] = useState<Mission | null>(null);
@@ -288,6 +345,8 @@ function MissionDetail({ missionId }: { missionId: string }) {
           </div>
         ) : mission.status === "MATCHED" && user?.id === mission.travelerId ? (
           <ShipForm mission={mission} onShipped={setMission} />
+        ) : mission.status === "ESCROW_LOCKED_CUSTOMS" ? (
+          <CustomsReceiptForm mission={mission} onCleared={setMission} />
         ) : (
           <p className="text-sm text-muted-foreground">
             Vous êtes le voyageur de cette mission —{" "}
@@ -311,6 +370,19 @@ function MissionDetail({ missionId }: { missionId: string }) {
             <Button variant="outline" render={<Link href="/missions" />}>
               Retour à mes missions
             </Button>
+          </CardContent>
+        </Card>
+      ) : mission.status === "ESCROW_LOCKED_CUSTOMS" ? (
+        <Card>
+          <CardContent className="space-y-2 py-4">
+            <p className="text-sm font-medium text-destructive">
+              Mission bloquée en douane
+            </p>
+            <p className="text-sm text-muted-foreground">
+              La valeur déclarée dépasse le seuil douanier de destination. Les
+              fonds restent séquestrés tant que le voyageur n&apos;a pas fourni
+              la quittance de paiement des taxes.
+            </p>
           </CardContent>
         </Card>
       ) : mission.status === "AWAITING_VALIDATION" ? (

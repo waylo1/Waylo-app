@@ -24,6 +24,8 @@ const ERROR_LABELS: Record<string, string> = {
   MISSION_NOT_MATCHED:
     "La mission n'est pas (ou plus) au statut « voyageur assigné ».",
   MISSION_NOT_IN_PROGRESS: "La mission n'est plus en cours — action refusée.",
+  MISSION_NOT_CUSTOMS_LOCKED:
+    "La mission n'est pas (ou plus) bloquée en douane — action refusée.",
   // Reçus
   RECEIPT_AMOUNT_EXCEEDS_BUDGET:
     "Le montant du reçu dépasse le budget figé de la mission.",

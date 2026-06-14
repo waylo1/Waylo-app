@@ -10,6 +10,7 @@ const STATUS_CONFIG: Record<
   FUNDED: { label: "Financée", variant: "secondary" },
   MATCHED: { label: "Voyageur assigné", variant: "secondary" },
   IN_PROGRESS: { label: "En cours", variant: "default" },
+  ESCROW_LOCKED_CUSTOMS: { label: "Bloquée (douane)", variant: "destructive" },
   AWAITING_VALIDATION: { label: "En attente de validation", variant: "default" },
   VALIDATED: { label: "Validée", variant: "default" },
   AWAITING_TRAVELER_ACCOUNT: {
