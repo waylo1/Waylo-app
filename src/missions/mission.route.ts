@@ -487,11 +487,13 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   // IN_PROGRESS → VALIDATED (transitoire) ; le webhook finalise → RELEASED (statut final).
   app.post('/:id/receive', { schema: { params: missionIdParamsSchema }, preHandler: rateLimit('receive') }, async (req, reply) => {
     const { id } = req.params as { id: string }
-    // Contrôle d'accès : 404 si absente, 403 si l'utilisateur n'est pas
-    // l'Acheteur Final (buyer) de cette mission.
+    // Contrôle d'accès (MASQUAGE TOTAL) : 404 si la mission n'existe pas OU si
+    // l'utilisateur n'est pas l'Acheteur Final (buyer) — les deux cas sont
+    // indistinguables, l'existence de la mission n'est jamais révélée à un tiers.
     const mission = await prisma.mission.findUnique({ where: { id } })
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-    if (mission.buyerId !== req.user.sub) return reply.code(403).send({ error: 'FORBIDDEN' })
+    if (!mission || mission.buyerId !== req.user.sub) {
+      return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    }
 
     if (mission.status !== MissionStatus.IN_PROGRESS) {
       return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
@@ -577,11 +579,13 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     },
     async (req, reply) => {
       const { id } = req.params as { id: string }
-      // Contrôle d'accès : 404 si absente, 403 si l'utilisateur n'est pas le
-      // Voyageur Importateur (traveler) assigné à cette mission.
+      // Contrôle d'accès (MASQUAGE TOTAL) : 404 si la mission n'existe pas OU si
+      // l'utilisateur n'est pas le Voyageur Importateur (traveler) assigné — les
+      // deux cas indistinguables, l'existence n'est jamais révélée à un tiers.
       const mission = await prisma.mission.findUnique({ where: { id } })
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-      if (mission.travelerId !== req.user.sub) return reply.code(403).send({ error: 'FORBIDDEN' })
+      if (!mission || mission.travelerId !== req.user.sub) {
+        return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      }
       if (mission.status !== MissionStatus.ESCROW_LOCKED_CUSTOMS) {
         return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
       }

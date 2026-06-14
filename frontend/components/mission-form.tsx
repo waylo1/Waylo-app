@@ -176,7 +176,7 @@ export function MissionForm({ onCreated }: MissionFormProps) {
             id="commission"
             readOnly
             tabIndex={-1}
-            aria-label="Commission calculée"
+            aria-label="Marge Voyageur calculée"
             className="bg-muted/50"
             value={
               previewCommissionCents !== null
@@ -186,6 +186,10 @@ export function MissionForm({ onCreated }: MissionFormProps) {
           />
         </div>
       </div>
+      <p className="text-xs text-muted-foreground">
+        Marge Voyageur transparente — aucun frais caché ; le prix de revente
+        final est validé à la réception (revente intermédiée v8.0).
+      </p>
       <div className="space-y-2">
         <Label htmlFor="expiresAt">Expire le</Label>
         <Input

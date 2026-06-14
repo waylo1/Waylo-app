@@ -204,6 +204,15 @@ function ReceiveCard({
   );
 }
 
+// Validation upload quittance (côté client) : PDF ou image, 5 Mo max.
+const MAX_RECEIPT_BYTES = 5 * 1024 * 1024;
+const ALLOWED_RECEIPT_TYPES = [
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+];
+
 function CustomsReceiptForm({
   mission,
   onCleared,
@@ -213,10 +222,30 @@ function CustomsReceiptForm({
 }) {
   const [customsReceiptUrl, setCustomsReceiptUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  // Bloque tout fichier non PDF/image ou > 5 Mo AVANT soumission, avec un
+  // message UI clair. (Le backend reçoit une URL ; cette garde est côté client.)
+  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return setFileError(null);
+    if (!ALLOWED_RECEIPT_TYPES.includes(file.type)) {
+      e.target.value = "";
+      return setFileError(
+        "Format invalide — PDF ou image (PNG, JPEG, WEBP) uniquement.",
+      );
+    }
+    if (file.size > MAX_RECEIPT_BYTES) {
+      e.target.value = "";
+      return setFileError("Fichier trop volumineux — 5 Mo maximum.");
+    }
+    setFileError(null);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (fileError) return;
     const url = customsReceiptUrl.trim();
     if (!url) return setError("Lien de la quittance requis.");
     setPending(true);
@@ -241,7 +270,22 @@ function CustomsReceiptForm({
         </p>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="customsReceiptUrl">Lien de la quittance</Label>
+            <Label htmlFor="customsReceiptFile">
+              Quittance (PDF ou image, 5 Mo max)
+            </Label>
+            <input
+              id="customsReceiptFile"
+              type="file"
+              accept="application/pdf,image/png,image/jpeg,image/webp"
+              onChange={handleFile}
+              className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border file:border-input file:bg-transparent file:px-3 file:py-1 file:text-sm"
+            />
+            {fileError && (
+              <p className="text-sm text-destructive">{fileError}</p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="customsReceiptUrl">Lien de la quittance hébergée</Label>
             <Input
               id="customsReceiptUrl"
               required
@@ -252,7 +296,11 @@ function CustomsReceiptForm({
             />
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
-          <Button type="submit" className="w-full" disabled={pending}>
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={pending || fileError !== null}
+          >
             {pending ? "Envoi…" : "Téléverser la quittance"}
           </Button>
         </form>
@@ -324,6 +372,10 @@ function MissionDetail({ missionId }: { missionId: string }) {
           <p className="text-xs text-muted-foreground">
             Marge Voyageur {centsToEur(mission.commissionCents)} · expire le{" "}
             {new Date(mission.expiresAt).toLocaleDateString("fr-FR")}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Aucun frais caché — prix de revente final validé (revente
+            intermédiée).
           </p>
         </CardContent>
       </Card>
