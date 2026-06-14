@@ -140,6 +140,16 @@ const missionIdParamsSchema = {
   properties: { id: { type: 'string', minLength: 1 } },
 } as const
 
+// Filtres optionnels du catalogue FUNDED (recherche insensible à la casse).
+const availableQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    origin: { type: 'string', maxLength: 200 },
+    destination: { type: 'string', maxLength: 200 },
+  },
+} as const
+
 const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
   app.setErrorHandler((err, req, reply) => {
     if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
@@ -188,14 +198,23 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
   // GET /api/missions/available — vitrine des missions à pourvoir pour un
   // voyageur : FUNDED et pas les siennes (on ne se propose pas ses propres
-  // missions). Route statique : find-my-way la prioritise sur /:id.
-  app.get('/available', async (req, reply) => {
-    const missions = await prisma.mission.findMany({
-      where: { status: MissionStatus.FUNDED, buyerId: { not: req.user.sub } },
-      orderBy: { createdAt: 'desc' },
-    })
-    return reply.code(200).send(missions)
-  })
+  // missions). Filtres optionnels origin/destination (contains, insensible à la
+  // casse). Route statique : find-my-way la prioritise sur /:id.
+  app.get(
+    '/available',
+    { schema: { querystring: availableQuerySchema } },
+    async (req, reply) => {
+      const { origin, destination } = req.query as { origin?: string; destination?: string }
+      const where: Prisma.MissionWhereInput = {
+        status: MissionStatus.FUNDED,
+        buyerId: { not: req.user.sub },
+      }
+      if (origin) where.origin = { contains: origin, mode: 'insensitive' }
+      if (destination) where.destination = { contains: destination, mode: 'insensitive' }
+      const missions = await prisma.mission.findMany({ where, orderBy: { createdAt: 'desc' } })
+      return reply.code(200).send(missions)
+    },
+  )
 
   // GET /api/missions/:id — visible par l'acheteur OU le voyageur assigné ;
   // tiers → 404 (ne révèle pas l'existence). Le reçu scellé (s'il existe) est

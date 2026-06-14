@@ -34,6 +34,7 @@ export interface Mission {
   targetProduct: string;
   budgetCents: number;
   commissionCents: number;
+  origin: string;
   destination: string;
   expiresAt: string;
   createdAt: string;

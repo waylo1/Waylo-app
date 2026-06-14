@@ -87,8 +87,16 @@ export const createMission = (body: CreateMissionBody) =>
 
 export const listMyMissions = () => apiFetch<Mission[]>("/missions");
 
-export const listAvailableMissions = () =>
-  apiFetch<Mission[]>("/missions/available");
+export const listAvailableMissions = (filters?: {
+  origin?: string;
+  destination?: string;
+}) => {
+  const qs = new URLSearchParams();
+  if (filters?.origin) qs.set("origin", filters.origin);
+  if (filters?.destination) qs.set("destination", filters.destination);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return apiFetch<Mission[]>(`/missions/available${suffix}`);
+};
 
 export const getMission = (id: string) => apiFetch<Mission>(`/missions/${id}`);
 
