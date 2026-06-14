@@ -94,6 +94,7 @@ model Mission {
   commissionCents Int // figé
   origin          String   @default("") // lieu d'origine (acheteur) ; @default("") pour backfill des lignes existantes — jamais vide via l'API (validation min 1)
   destination     String
+  trackingReference String? // référence de suivi du dépôt/expédition (posée à MATCHED → IN_PROGRESS via /ship)
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt

@@ -114,6 +114,15 @@ export const validateMission = (id: string) =>
 export const matchMission = (id: string) =>
   apiFetch<Mission>(`/missions/${id}/match`, { method: "POST" });
 
+export const acceptMission = (id: string) =>
+  apiFetch<Mission>(`/missions/${id}/accept`, { method: "POST" });
+
+export const shipMission = (id: string, trackingReference: string) =>
+  apiFetch<Mission>(`/missions/${id}/ship`, {
+    method: "POST",
+    body: { trackingReference },
+  });
+
 export const startTravel = (id: string) =>
   apiFetch<Mission>(`/missions/${id}/start-travel`, { method: "POST" });
 

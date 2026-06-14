@@ -95,6 +95,19 @@ interface SubmitReceiptBody {
   purchaseAmountCents: number
 }
 
+interface ShipBody {
+  trackingReference: string
+}
+
+const shipBodySchema = {
+  type: 'object',
+  required: ['trackingReference'],
+  additionalProperties: false,
+  properties: {
+    trackingReference: { type: 'string', minLength: 1, maxLength: 200 },
+  },
+} as const
+
 const submitReceiptBodySchema = {
   type: 'object',
   required: ['urlRecu', 'purchaseAmountCents'],
@@ -509,6 +522,35 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const started = await prisma.mission.findUniqueOrThrow({ where: { id } })
       return reply.code(200).send(started)
+    },
+  )
+
+  // POST /api/missions/:id/ship — le VOYAGEUR assigné déclare le dépôt/expédition
+  // (trackingReference) et fait avancer la mission au statut de livraison
+  // supérieur : MATCHED → IN_PROGRESS. Transition conditionnelle atomique
+  // (anti-TOCTOU). Recouvre /start-travel, mais enregistre en plus la référence.
+  app.post(
+    '/:id/ship',
+    { schema: { params: missionIdParamsSchema, body: shipBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // acheteur/tiers : indistinguables
+      if (mission.status !== MissionStatus.MATCHED) {
+        return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+      }
+
+      const { trackingReference } = req.body as ShipBody
+      const updated = await prisma.mission.updateMany({
+        where: { id, travelerId: req.user.sub, status: MissionStatus.MATCHED },
+        data: { status: MissionStatus.IN_PROGRESS, trackingReference },
+      })
+      if (updated.count !== 1) {
+        return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+      }
+
+      const shipped = await prisma.mission.findUniqueOrThrow({ where: { id } })
+      return reply.code(200).send(shipped)
     },
   )
 

@@ -36,6 +36,7 @@ export interface Mission {
   commissionCents: number;
   origin: string;
   destination: string;
+  trackingReference: string | null;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;

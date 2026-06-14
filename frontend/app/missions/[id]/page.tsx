@@ -10,6 +10,8 @@ import { useAuth } from "@/lib/auth";
 import { RequireAuth } from "@/components/require-auth";
 import { MissionStatusBadge } from "@/components/mission-status-badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -104,11 +106,66 @@ function ValidationCard({
   );
 }
 
+function ShipForm({
+  mission,
+  onShipped,
+}: {
+  mission: Mission;
+  onShipped: (m: Mission) => void;
+}) {
+  const [trackingReference, setTrackingReference] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const ref = trackingReference.trim();
+    if (!ref) return setError("Référence de suivi requise.");
+    setPending(true);
+    setError(null);
+    try {
+      onShipped(await api.shipMission(mission.id, ref));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Déclarer le dépôt/expédition</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="trackingReference">Référence de suivi</Label>
+            <Input
+              id="trackingReference"
+              required
+              maxLength={200}
+              placeholder="1Z999AA10123456784"
+              value={trackingReference}
+              onChange={e => setTrackingReference(e.target.value)}
+            />
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <Button type="submit" className="w-full" disabled={pending}>
+            {pending ? "Envoi…" : "Déclarer le dépôt/expédition"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 function MissionDetail({ missionId }: { missionId: string }) {
   const { user } = useAuth();
   const [mission, setMission] = useState<Mission | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [justValidated, setJustValidated] = useState(false);
+  const [accepting, setAccepting] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -118,6 +175,19 @@ function MissionDetail({ missionId }: { missionId: string }) {
         setError(apiErrorMessage(err, "Impossible de charger la mission.")),
       );
   }, [missionId]);
+
+  // Acceptation du transport (voyageur) : FUNDED -> MATCHED. Le succès remplace
+  // la mission en state → la vue bascule sur l'état « voyageur assigné ».
+  async function handleAccept(id: string) {
+    setAccepting(true);
+    setAcceptError(null);
+    try {
+      setMission(await api.acceptMission(id));
+    } catch (err) {
+      setAcceptError(apiErrorMessage(err, "Échec de l'acceptation."));
+      setAccepting(false);
+    }
+  }
 
   if (error && !mission)
     return <p className="text-sm text-destructive">{error}</p>;
@@ -157,12 +227,23 @@ function MissionDetail({ missionId }: { missionId: string }) {
       </Card>
 
       {!isBuyer ? (
-        <div className="space-y-3">
-          {/* Bouton principal de la fiche — désactivé pour l'instant (flux
-              d'acceptation du transport à brancher ultérieurement). */}
-          <Button className="w-full" disabled>
-            Accepter le transport de ce colis
-          </Button>
+        mission.status === "FUNDED" ? (
+          <div className="space-y-3">
+            {/* Bouton principal — actif si connecté et mission FUNDED. */}
+            <Button
+              className="w-full"
+              disabled={!user || accepting}
+              onClick={() => handleAccept(mission.id)}
+            >
+              {accepting ? "Acceptation…" : "Accepter le transport de ce colis"}
+            </Button>
+            {acceptError && (
+              <p className="text-sm text-destructive">{acceptError}</p>
+            )}
+          </div>
+        ) : mission.status === "MATCHED" && user?.id === mission.travelerId ? (
+          <ShipForm mission={mission} onShipped={setMission} />
+        ) : (
           <p className="text-sm text-muted-foreground">
             Vous êtes le voyageur de cette mission —{" "}
             <Link
@@ -173,7 +254,7 @@ function MissionDetail({ missionId }: { missionId: string }) {
             </Link>
             .
           </p>
-        </div>
+        )
       ) : fundsReleased ? (
         <Card>
           <CardContent className="space-y-2 py-4">
