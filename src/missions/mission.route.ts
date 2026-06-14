@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { prisma } from '../db'
 import { EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
 import {
@@ -8,6 +8,33 @@ import {
   findMissionForTraveler,
 } from './mission-access'
 import { getCustomsThreshold } from './customs'
+
+// Rate limiter anti-brute-force EN MÉMOIRE (léger, sans dépendance) : fenêtre
+// fixe, max RATE_LIMIT_MAX requêtes par RATE_LIMIT_WINDOW_MS et par clé IP+user.
+// Mono-process : suffisant ici (cf. consigne « stockage léger en mémoire »).
+const RATE_LIMIT_MAX = 5
+const RATE_LIMIT_WINDOW_MS = 60_000
+const rateBuckets = new Map<string, { count: number; resetAt: number }>()
+
+function isRateLimited(key: string): boolean {
+  const now = Date.now()
+  const bucket = rateBuckets.get(key)
+  if (!bucket || now >= bucket.resetAt) {
+    rateBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS })
+    return false
+  }
+  if (bucket.count >= RATE_LIMIT_MAX) return true
+  bucket.count += 1
+  return false
+}
+
+/** preHandler de rate limit, clé par route + IP + utilisateur. 429 si dépassé. */
+const rateLimit =
+  (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (isRateLimited(`${name}:${req.ip}:${req.user.sub}`)) {
+      await reply.code(429).send({ error: 'RATE_LIMITED' })
+    }
+  }
 
 /**
  * API missions — création, consultation, financement T0.
@@ -106,7 +133,16 @@ const customsReceiptBodySchema = {
   required: ['customsReceiptUrl'],
   additionalProperties: false,
   properties: {
-    customsReceiptUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+    // Sécurise l'upload : URL http(s) pointant un PDF ou une image
+    // (pdf/png/jpg/jpeg/webp), query string optionnelle. NB : la taille (< 5 Mo)
+    // n'est PAS vérifiable ici — la route reçoit une URL, pas les octets ; un
+    // fetch serveur exposerait au SSRF. À borner à l'upload (stockage objet).
+    customsReceiptUrl: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 2048,
+      pattern: '^https?://.+\\.([pP][dD][fF]|[pP][nN][gG]|[jJ][pP][eE]?[gG]|[wW][eE][bB][pP])(\\?.*)?$',
+    },
   },
 } as const
 
@@ -449,10 +485,13 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   // payment_intent.succeeded journalise PAYOUT/COMMISSION + crée le TransferOutbox,
   // et le worker (seul exécutant des versements) exécute le transfert Stripe.
   // IN_PROGRESS → VALIDATED (transitoire) ; le webhook finalise → RELEASED (statut final).
-  app.post('/:id/receive', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+  app.post('/:id/receive', { schema: { params: missionIdParamsSchema }, preHandler: rateLimit('receive') }, async (req, reply) => {
     const { id } = req.params as { id: string }
-    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+    // Contrôle d'accès : 404 si absente, 403 si l'utilisateur n'est pas
+    // l'Acheteur Final (buyer) de cette mission.
+    const mission = await prisma.mission.findUnique({ where: { id } })
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (mission.buyerId !== req.user.sub) return reply.code(403).send({ error: 'FORBIDDEN' })
 
     if (mission.status !== MissionStatus.IN_PROGRESS) {
       return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
@@ -532,11 +571,17 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   // qui ne re-bloquera pas (customsReceiptUrl désormais renseignée).
   app.post(
     '/:id/customs-receipt',
-    { schema: { params: missionIdParamsSchema, body: customsReceiptBodySchema } },
+    {
+      schema: { params: missionIdParamsSchema, body: customsReceiptBodySchema },
+      preHandler: rateLimit('customs-receipt'),
+    },
     async (req, reply) => {
       const { id } = req.params as { id: string }
-      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // acheteur/tiers : indistinguables
+      // Contrôle d'accès : 404 si absente, 403 si l'utilisateur n'est pas le
+      // Voyageur Importateur (traveler) assigné à cette mission.
+      const mission = await prisma.mission.findUnique({ where: { id } })
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (mission.travelerId !== req.user.sub) return reply.code(403).send({ error: 'FORBIDDEN' })
       if (mission.status !== MissionStatus.ESCROW_LOCKED_CUSTOMS) {
         return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
       }

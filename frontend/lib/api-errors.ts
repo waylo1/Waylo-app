@@ -6,6 +6,8 @@ import { ApiError } from "./api";
 const ERROR_LABELS: Record<string, string> = {
   // Auth
   UNAUTHORIZED: "Session expirée — reconnectez-vous.",
+  FORBIDDEN: "Accès refusé — vous n'êtes pas autorisé pour cette action.",
+  RATE_LIMITED: "Trop de requêtes — patientez une minute puis réessayez.",
   INVALID_CREDENTIALS: "Email ou mot de passe incorrect.",
   EMAIL_ALREADY_REGISTERED: "Un compte existe déjà avec cet email.",
   INVALID_INPUT: "Champs invalides — vérifiez le formulaire.",
