@@ -494,11 +494,23 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       { idempotencyKey: `capture_${mission.id}` },
     )
 
+    // Certificat de revente électronique (modèle marchand v8.0, revente
+    // intermédiée) : ID transaction, Voyageur Importateur, Acheteur Final, prix
+    // d'achat et Marge Voyageur. Scellé sha256, stocké dans saleSignature.
+    const saleCertificate = JSON.stringify({
+      transactionId: mission.id,
+      voyageurImportateurId: mission.travelerId,
+      acheteurFinalId: mission.buyerId,
+      prixAchatCents: mission.budgetCents,
+      margeCents: mission.commissionCents,
+    })
+    const saleSignature = createHash('sha256').update(saleCertificate).digest('hex')
+
     try {
       await prisma.$transaction(async tx => {
         const updated = await tx.mission.updateMany({
           where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
-          data: { status: MissionStatus.VALIDATED },
+          data: { status: MissionStatus.VALIDATED, saleSignature },
         })
         if (updated.count !== 1) throw new ReceiveConflictError()
       })

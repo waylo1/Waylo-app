@@ -121,9 +121,12 @@ export async function runTransferWorkerOnce(
     if (!claimed) break
 
     try {
-      // HORS transaction DB — l'idempotencyKey de la ligne garantit qu'un
-      // rejeu (retry, ligne SUBMITTED réclamée après crash) ne crée pas de
-      // second versement : Stripe renvoie le transfert existant.
+      // HORS transaction DB — l'idempotencyKey DÉTERMINISTE de la ligne
+      // (transfer_marchand_<missionId>, posée à la création par le webhook)
+      // garantit qu'un rejeu (retry, ligne SUBMITTED réclamée après crash) ne
+      // crée pas de second versement : Stripe renvoie le transfert existant.
+      // On réutilise la clé PERSISTÉE — jamais recalculée ici (le recalcul
+      // briserait la garantie sur les lignes déjà soumises).
       const transfer = await stripe.transfers.create(
         {
           amount: claimed.amountCents,

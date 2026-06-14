@@ -367,14 +367,17 @@ async function handleCapture(
     ],
   })
 
-  // Intention de versement, committée avec le PAYOUT. idempotencyKey dérivée
-  // de l'escrowId (+ @unique) : un seul transfert de libération par escrow.
+  // Intention de versement, committée avec le PAYOUT. idempotencyKey
+  // DÉTERMINISTE par mission (transfer_marchand_<missionId>) + @unique :
+  // interdit mathématiquement tout double décaissement au Voyageur Importateur.
+  // Cette clé est PERSISTÉE ici et réutilisée telle quelle par le worker
+  // (jamais recalculée à l'exécution — sinon un rejeu créerait un 2e versement).
   await tx.transferOutbox.create({
     data: {
       escrowId: escrow.id,
       destinationAccountId,
       amountCents: payoutCents,
-      idempotencyKey: `transfer_release_${escrow.id}`,
+      idempotencyKey: `transfer_marchand_${escrow.missionId}`,
     },
   })
 

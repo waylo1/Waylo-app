@@ -322,7 +322,7 @@ function MissionDetail({ missionId }: { missionId: string }) {
             </dd>
           </dl>
           <p className="text-xs text-muted-foreground">
-            commission {centsToEur(mission.commissionCents)} · expire le{" "}
+            Marge Voyageur {centsToEur(mission.commissionCents)} · expire le{" "}
             {new Date(mission.expiresAt).toLocaleDateString("fr-FR")}
           </p>
         </CardContent>
@@ -349,7 +349,7 @@ function MissionDetail({ missionId }: { missionId: string }) {
           <CustomsReceiptForm mission={mission} onCleared={setMission} />
         ) : (
           <p className="text-sm text-muted-foreground">
-            Vous êtes le voyageur de cette mission —{" "}
+            Vous êtes le Voyageur Importateur de cette mission —{" "}
             <Link
               href={`/missions/${mission.id}/dashboard`}
               className="underline underline-offset-4"

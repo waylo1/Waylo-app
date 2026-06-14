@@ -170,7 +170,7 @@ export function MissionForm({ onCreated }: MissionFormProps) {
         </div>
         <div className="space-y-2">
           <Label htmlFor="commission">
-            Commission voyageur ({Math.round(COMMISSION_RATE * 100)} %)
+            Marge Voyageur ({Math.round(COMMISSION_RATE * 100)} %)
           </Label>
           <Input
             id="commission"

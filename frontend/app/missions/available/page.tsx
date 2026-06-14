@@ -63,7 +63,7 @@ function AvailableList() {
               <p className="truncate font-medium">{mission.targetProduct}</p>
               <p className="text-sm text-muted-foreground">
                 {mission.destination} · budget{" "}
-                {centsToEur(mission.budgetCents)} · commission{" "}
+                {centsToEur(mission.budgetCents)} · Marge Voyageur{" "}
                 {centsToEur(mission.commissionCents)} · expire le{" "}
                 {new Date(mission.expiresAt).toLocaleDateString("fr-FR")}
               </p>
