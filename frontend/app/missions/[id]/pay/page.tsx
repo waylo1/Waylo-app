@@ -92,6 +92,7 @@ function PayContent({ missionId }: { missionId: string }) {
   const [intent, setIntent] = useState<IntentResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
 
   useEffect(() => {
     api
@@ -168,10 +169,41 @@ function PayContent({ missionId }: { missionId: string }) {
             </Elements>
           ) : (
             <div className="space-y-3">
+              <p className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                Waylo agit exclusivement comme tiers de confiance. Le transport
+                et l&apos;importation sont gérés de pair à pair entre
+                l&apos;Acheteur et le Voyageur.
+              </p>
+              <label
+                htmlFor="acceptTerms"
+                className="flex items-start gap-2 text-sm text-muted-foreground"
+              >
+                <input
+                  id="acceptTerms"
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={acceptedTerms}
+                  onChange={e => setAcceptedTerms(e.target.checked)}
+                />
+                <span>
+                  J&apos;accepte les{" "}
+                  <a
+                    href="/cgu"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-4"
+                  >
+                    CGU
+                  </a>{" "}
+                  et le fonctionnement de la mise en relation sous séquestre.
+                </span>
+              </label>
               {error && <p className="text-sm text-destructive">{error}</p>}
               <Button
                 className="w-full"
-                disabled={pending || mission.status !== "CREATED"}
+                disabled={
+                  pending || mission.status !== "CREATED" || !acceptedTerms
+                }
                 onClick={handleCreateIntent}
               >
                 {pending ? "Préparation…" : "Procéder au paiement"}
