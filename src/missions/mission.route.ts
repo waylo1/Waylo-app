@@ -90,6 +90,9 @@ class StartTravelConflictError extends Error {}
 /** Transition IN_PROGRESS → AWAITING_VALIDATION perdue (course / double dépôt de reçu). */
 class ReceiptConflictError extends Error {}
 
+/** Transition IN_PROGRESS → VALIDATED perdue (course / double confirmation de réception). */
+class ReceiveConflictError extends Error {}
+
 interface SubmitReceiptBody {
   urlRecu: string
   purchaseAmountCents: number
@@ -421,6 +424,55 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
     const validated = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     return reply.code(200).send(validated)
+  })
+
+  // POST /api/missions/:id/receive — l'ACHETEUR confirme la réception du colis
+  // (depuis IN_PROGRESS). Déclenche la CAPTURE du séquestre (capture différée).
+  // Le virement du gain au voyageur N'EST PAS fait ici : le webhook
+  // payment_intent.succeeded journalise PAYOUT/COMMISSION + crée le TransferOutbox,
+  // et le worker (seul exécutant des versements) exécute le transfert Stripe.
+  // IN_PROGRESS → VALIDATED (transitoire) ; le webhook finalise → RELEASED (statut final).
+  app.post('/:id/receive', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+
+    if (mission.status !== MissionStatus.IN_PROGRESS) {
+      return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+    }
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: mission.id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB. idempotencyKey déterministe partagée avec
+    // /validate → un seul débit par mission quel que soit le chemin.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `capture_${mission.id}` },
+    )
+
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
+          data: { status: MissionStatus.VALIDATED },
+        })
+        if (updated.count !== 1) throw new ReceiveConflictError()
+      })
+    } catch (err) {
+      if (err instanceof ReceiveConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+      }
+      throw err
+    }
+
+    const received = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    return reply.code(200).send(received)
   })
 
   // POST /api/missions/:id/match — un VOYAGEUR (pas l'acheteur) prend la mission.

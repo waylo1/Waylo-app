@@ -123,6 +123,9 @@ export const shipMission = (id: string, trackingReference: string) =>
     body: { trackingReference },
   });
 
+export const receiveMission = (id: string) =>
+  apiFetch<Mission>(`/missions/${id}/receive`, { method: "POST" });
+
 export const startTravel = (id: string) =>
   apiFetch<Mission>(`/missions/${id}/start-travel`, { method: "POST" });
 

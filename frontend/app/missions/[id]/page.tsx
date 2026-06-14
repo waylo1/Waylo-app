@@ -159,6 +159,51 @@ function ShipForm({
   );
 }
 
+function ReceiveCard({
+  mission,
+  onReceived,
+}: {
+  mission: Mission;
+  onReceived: (m: Mission) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  async function handleReceive() {
+    setPending(true);
+    setError(null);
+    try {
+      onReceived(await api.receiveMission(mission.id));
+    } catch (err) {
+      setError(apiErrorMessage(err));
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Réception du colis</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm">
+          Référence de suivi :{" "}
+          <span className="font-medium">{mission.trackingReference ?? "—"}</span>
+        </p>
+        <p className="text-sm text-muted-foreground">
+          En confirmant la réception, vous déclenchez la capture du séquestre (
+          {centsToEur(mission.budgetCents + mission.commissionCents)}) et la
+          libération des fonds au voyageur. Cette action est définitive.
+        </p>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <Button className="w-full" disabled={pending} onClick={handleReceive}>
+          {pending ? "Confirmation…" : "Confirmer la réception"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 function MissionDetail({ missionId }: { missionId: string }) {
   const { user } = useAuth();
   const [mission, setMission] = useState<Mission | null>(null);
@@ -272,6 +317,14 @@ function MissionDetail({ missionId }: { missionId: string }) {
         <ValidationCard
           mission={mission}
           onValidated={m => {
+            setMission(m);
+            setJustValidated(true);
+          }}
+        />
+      ) : mission.status === "IN_PROGRESS" ? (
+        <ReceiveCard
+          mission={mission}
+          onReceived={m => {
             setMission(m);
             setJustValidated(true);
           }}
