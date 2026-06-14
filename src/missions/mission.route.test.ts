@@ -29,6 +29,7 @@ const validBody = () => ({
   targetProduct: 'Sac introuvable en France',
   budgetCents: 10_000,
   commissionCents: 1_500,
+  origin: 'Paris',
   destination: 'Tokyo',
   expiresAt: futureISO(7),
 })

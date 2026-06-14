@@ -67,11 +67,18 @@ export interface IntentResponse {
   amountCents: number;
 }
 
+// POST /api/missions/:id/checkout-session
+export interface CheckoutSessionResponse {
+  checkoutUrl: string | null;
+  sessionId: string;
+}
+
 // POST /api/missions — corps attendu par le backend.
 export interface CreateMissionBody {
   targetProduct: string;
   budgetCents: number;
   commissionCents: number;
+  origin: string;
   destination: string;
   expiresAt: string;
 }

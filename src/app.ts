@@ -3,6 +3,7 @@ import fastifyJwt from '@fastify/jwt'
 import Stripe from 'stripe'
 import authRoute from './auth/auth.route'
 import missionRoute from './missions/mission.route'
+import escrowRoute from './escrow/escrow.route'
 import type { PaymentIntentClient } from './missions/mission.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
@@ -65,6 +66,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(authRoute, { prefix: '/api/auth' })
   await app.register(missionRoute, { prefix: '/api/missions', stripe: paymentClient })
+  await app.register(escrowRoute, { prefix: '/api/escrow', stripe: paymentClient })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
   // (encapsulé) : constructEvent exige les octets exacts du body, sans

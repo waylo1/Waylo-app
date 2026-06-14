@@ -133,6 +133,8 @@ async function applyBusinessEffect(
   abortAlert: AlertEmitter,
 ): Promise<EffectOutcome> {
   switch (event.type) {
+    case 'checkout.session.completed':
+      return handleCheckoutCompleted(tx, event.data.object as Stripe.Checkout.Session, abortAlert)
     case 'payment_intent.succeeded':
       return handleCapture(tx, event.data.object as Stripe.PaymentIntent, abortAlert)
     case 'payment_intent.payment_failed':
@@ -144,6 +146,79 @@ async function applyBusinessEffect(
     default:
       return NO_EFFECT
   }
+}
+
+/**
+ * checkout.session.completed = financement T0 via Stripe Checkout (alternative à
+ * POST /:id/intent). La session a été créée avec payment_intent_data.capture_method
+ * 'manual' → le PaymentIntent associé est en séquestre (capture différée). C'EST
+ * ICI que l'escrow est posé : miroir EXACT de la transaction de /intent —
+ * transition conditionnelle mission CREATED → FUNDED + EscrowTransaction HELD.
+ *
+ * Idempotence : event.id (ProcessedStripeEvent) couvre le rejeu du MÊME event.
+ * En plus, un escrow PRÉEXISTANT (mission déjà financée via /intent ou une autre
+ * session) → acquit sans second escrow (EscrowTransaction.missionId est @unique).
+ * Le PaymentIntent de la session devient stripePaymentIntentId de l'escrow → les
+ * handlers capture/échec ultérieurs le retrouvent normalement.
+ */
+async function handleCheckoutCompleted(
+  tx: Tx,
+  session: Stripe.Checkout.Session,
+  abortAlert: AlertEmitter,
+): Promise<EffectOutcome> {
+  const missionId = session.metadata?.missionId
+  if (!missionId) return NO_EFFECT // session sans notre métadonnée — étrangère à Waylo, acquittée
+
+  const intentId =
+    typeof session.payment_intent === 'string'
+      ? session.payment_intent
+      : session.payment_intent?.id
+  if (!intentId) {
+    // Session payment complétée sans PaymentIntent : structurellement anormal.
+    abortAlert({
+      code: 'WEBHOOK_ABORT_NON_RECOVERABLE',
+      message: 'checkout.session.completed sans PaymentIntent',
+      details: { cause: 'CHECKOUT_NO_PAYMENT_INTENT', missionId, sessionId: session.id },
+    })
+    throw new WebhookAbortError('CHECKOUT_NO_PAYMENT_INTENT')
+  }
+
+  // Déjà financée (via /intent ou une session antérieure) → pas de second escrow.
+  const existing = await tx.escrowTransaction.findUnique({
+    where: { missionId },
+    select: { id: true },
+  })
+  if (existing) return NO_EFFECT
+
+  const mission = await tx.mission.findUnique({
+    where: { id: missionId },
+    select: { budgetCents: true, status: true },
+  })
+  if (!mission) return NO_EFFECT // mission disparue — acquit sans effet
+
+  // Transition conditionnelle CREATED → FUNDED (anti-TOCTOU) + escrow HELD :
+  // soit les deux committent dans la transaction webhook, soit rien.
+  const funded = await tx.mission.updateMany({
+    where: { id: missionId, status: MissionStatus.CREATED },
+    data: { status: MissionStatus.FUNDED },
+  })
+  if (funded.count !== 1) {
+    abortAlert({
+      code: 'WEBHOOK_ABORT_NON_RECOVERABLE',
+      message: 'checkout.session.completed : mission non finançable (statut ≠ CREATED, sans escrow)',
+      details: { cause: 'MISSION_NOT_FUNDABLE', missionId, missionStatus: mission.status },
+    })
+    throw new WebhookAbortError('MISSION_NOT_FUNDABLE')
+  }
+  await tx.escrowTransaction.create({
+    data: {
+      missionId,
+      stripePaymentIntentId: intentId,
+      spendingLimitCents: mission.budgetCents, // plafond carte JIT = budget, figé — miroir de /intent
+      idempotencyKey: `escrow_fund_${missionId}`,
+    },
+  })
+  return { handled: true, deferredAlerts: [] }
 }
 
 /**

@@ -1,5 +1,6 @@
 import type {
   AuthUser,
+  CheckoutSessionResponse,
   CreateMissionBody,
   IntentResponse,
   Mission,
@@ -93,6 +94,11 @@ export const getMission = (id: string) => apiFetch<Mission>(`/missions/${id}`);
 
 export const createIntent = (id: string) =>
   apiFetch<IntentResponse>(`/missions/${id}/intent`, { method: "POST" });
+
+export const createCheckoutSession = (id: string) =>
+  apiFetch<CheckoutSessionResponse>(`/missions/${id}/checkout-session`, {
+    method: "POST",
+  });
 
 export const validateMission = (id: string) =>
   apiFetch<Mission>(`/missions/${id}/validate`, { method: "POST" });

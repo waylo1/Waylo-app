@@ -92,6 +92,7 @@ model Mission {
   targetProduct   String
   budgetCents     Int // figé après MATCHED — toute modification post-MATCHED est interdite côté service
   commissionCents Int // figé
+  origin          String   @default("") // lieu d'origine (acheteur) ; @default("") pour backfill des lignes existantes — jamais vide via l'API (validation min 1)
   destination     String
   expiresAt       DateTime
   createdAt       DateTime      @default(now())

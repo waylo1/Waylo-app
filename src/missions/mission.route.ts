@@ -33,12 +33,41 @@ export interface PaymentIntentClient {
       },
       options: { idempotencyKey: string },
     ): Promise<{ id: string; client_secret: string | null }>
-    /** Capture (T1) du séquestre — montant total autorisé. idempotencyKey déterministe par mission. */
+    /** Capture (T1) du séquestre — montant EXACT (amount_to_capture, centimes Int) ou total autorisé si omis. idempotencyKey déterministe par mission. */
     capture(
       id: string,
-      params: Record<string, never>,
+      params: { amount_to_capture?: number },
       options: { idempotencyKey: string },
     ): Promise<{ id: string }>
+  }
+  /**
+   * Surface Checkout — OPTIONNELLE : présente sur le SDK Stripe réel, omise par
+   * les fakes du financement T0 (qui ne sollicitent que paymentIntents). La
+   * session porte payment_intent_data.capture_method 'manual' → même séquestre
+   * (capture différée) que /intent. La transition escrow HELD / mission FUNDED
+   * reste portée par le webhook checkout.session.completed (hors périmètre ici).
+   */
+  checkout?: {
+    sessions: {
+      create(
+        params: {
+          mode: 'payment'
+          line_items: Array<{
+            price_data: {
+              currency: string
+              product_data: { name: string }
+              unit_amount: number
+            }
+            quantity: number
+          }>
+          payment_intent_data: { capture_method: 'manual'; metadata: Record<string, string> }
+          success_url: string
+          cancel_url: string
+          metadata: Record<string, string>
+        },
+        options: { idempotencyKey: string },
+      ): Promise<{ id: string; url: string | null }>
+    }
   }
 }
 
@@ -83,6 +112,7 @@ interface CreateMissionBody {
   targetProduct: string
   budgetCents: number
   commissionCents: number
+  origin: string
   destination: string
   expiresAt: string
 }
@@ -92,12 +122,13 @@ interface CreateMissionBody {
 // applicatif (l'ajv de Fastify 4 n'embarque pas le format date-time).
 const createMissionBodySchema = {
   type: 'object',
-  required: ['targetProduct', 'budgetCents', 'commissionCents', 'destination', 'expiresAt'],
+  required: ['targetProduct', 'budgetCents', 'commissionCents', 'origin', 'destination', 'expiresAt'],
   additionalProperties: false,
   properties: {
     targetProduct: { type: 'string', minLength: 1, maxLength: 500 },
     budgetCents: { type: 'integer', minimum: 1 },
     commissionCents: { type: 'integer', minimum: 0 },
+    origin: { type: 'string', minLength: 1, maxLength: 200 },
     destination: { type: 'string', minLength: 1, maxLength: 200 },
     expiresAt: { type: 'string', minLength: 1 },
   },
@@ -136,6 +167,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         targetProduct: body.targetProduct,
         budgetCents: body.budgetCents,
         commissionCents: body.commissionCents,
+        origin: body.origin,
         destination: body.destination,
         expiresAt: new Date(expiresAtMs),
         // status : défaut CREATED. travelerId : null (assignation = matchmaking, plus tard).
@@ -252,6 +284,61 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       amountCents: totalAmountCents,
     })
   })
+
+  // POST /api/missions/:id/checkout-session — financement T0 via Stripe Checkout
+  // (page hébergée), alternative à /intent. Réservé à l'ACHETEUR, mêmes
+  // préconditions de finançabilité. La session crée un PaymentIntent
+  // capture_method 'manual' → séquestre identique. L'escrow HELD + mission FUNDED
+  // sont posés à la complétion, via le webhook checkout.session.completed (hors
+  // périmètre de cet endpoint, qui se borne à générer l'URL de paiement).
+  app.post(
+    '/:id/checkout-session',
+    { schema: { params: missionIdParamsSchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+
+      // Mêmes prechecks que /intent : pas de session pour une mission déjà financée.
+      const existingEscrow = await prisma.escrowTransaction.findUnique({
+        where: { missionId: mission.id },
+        select: { id: true },
+      })
+      if (existingEscrow) return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+      if (mission.status !== MissionStatus.CREATED) {
+        return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
+      }
+      if (!opts.stripe.checkout) return reply.code(500).send({ error: 'CHECKOUT_UNAVAILABLE' })
+
+      // Prix = budget + commission (frais plateforme), centimes Int — miroir de /intent.
+      const totalAmountCents = mission.budgetCents + mission.commissionCents
+      const frontendBaseUrl = process.env.FRONTEND_BASE_URL ?? 'http://localhost:3001'
+
+      // idempotencyKey déterministe : un double clic ou un retry réutilise la session.
+      const session = await opts.stripe.checkout.sessions.create(
+        {
+          mode: 'payment',
+          line_items: [
+            {
+              price_data: {
+                currency: 'eur',
+                product_data: { name: mission.targetProduct },
+                unit_amount: totalAmountCents,
+              },
+              quantity: 1,
+            },
+          ],
+          payment_intent_data: { capture_method: 'manual', metadata: { missionId: mission.id } },
+          success_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=cancel`,
+          metadata: { missionId: mission.id },
+        },
+        { idempotencyKey: `checkout_${mission.id}` },
+      )
+
+      return reply.code(200).send({ checkoutUrl: session.url, sessionId: session.id })
+    },
+  )
 
   // POST /api/missions/:id/validate — validation humaine (T1), réservée à l'ACHETEUR.
   // Déclenche la capture du séquestre. Le reste (ledger CAPTURE/PAYOUT/COMMISSION,
