@@ -135,6 +135,8 @@ async function applyBusinessEffect(
   switch (event.type) {
     case 'payment_intent.succeeded':
       return handleCapture(tx, event.data.object as Stripe.PaymentIntent, abortAlert)
+    case 'payment_intent.payment_failed':
+      return handlePaymentFailed(tx, event.data.object as Stripe.PaymentIntent, abortAlert)
     case 'charge.refunded':
       return applyRefund(tx, event.data.object as Stripe.Charge, abortAlert)
     case 'issuing_authorization.created':
@@ -302,6 +304,55 @@ async function handleCapture(
       status: { in: [MissionStatus.AWAITING_VALIDATION, MissionStatus.VALIDATED] },
     },
     data: { status: MissionStatus.RELEASED },
+  })
+  return { handled: true, deferredAlerts: [] }
+}
+
+/**
+ * payment_intent.payment_failed = l'autorisation/le paiement a échoué AVANT toute
+ * capture (capture différée : aucun fonds n'a été pris). L'escrow HELD n'a jamais
+ * retenu d'argent réel → on l'annule (CANCELLED), AUCUNE écriture de ledger.
+ *
+ * Transition conditionnelle atomique HELD + capturedAmountCents 0 → CANCELLED
+ * (anti-TOCTOU). Échec déjà traité (escrow CANCELLED) → acquit idempotent. Un
+ * échec reçu après capture est structurellement impossible → abort + alerte.
+ */
+async function handlePaymentFailed(
+  tx: Tx,
+  intent: Stripe.PaymentIntent,
+  abortAlert: AlertEmitter,
+): Promise<EffectOutcome> {
+  const escrow = await tx.escrowTransaction.findUnique({
+    where: { stripePaymentIntentId: intent.id },
+    select: { id: true, missionId: true, status: true },
+  })
+  if (!escrow) return NO_EFFECT // PaymentIntent étranger à Waylo — acquitté sans effet
+
+  const cancelled = await tx.escrowTransaction.updateMany({
+    where: { id: escrow.id, status: EscrowStatus.HELD, capturedAmountCents: 0 },
+    data: { status: EscrowStatus.CANCELLED },
+  })
+  if (cancelled.count !== 1) {
+    if (escrow.status === EscrowStatus.CANCELLED) return NO_EFFECT // échec déjà annulé — acquit idempotent
+    abortAlert({
+      code: 'WEBHOOK_ABORT_NON_RECOVERABLE',
+      message: 'payment_intent.payment_failed sur un escrow non annulable',
+      details: {
+        cause: 'ESCROW_NOT_CANCELLABLE',
+        escrowId: escrow.id,
+        escrowStatus: escrow.status,
+      },
+    })
+    throw new WebhookAbortError('ESCROW_NOT_CANCELLABLE')
+  }
+
+  // Mission ramenée à CANCELLED depuis tout état non terminal : le financement a échoué.
+  await tx.mission.updateMany({
+    where: {
+      id: escrow.missionId,
+      status: { notIn: [MissionStatus.RELEASED, MissionStatus.REFUNDED, MissionStatus.CANCELLED] },
+    },
+    data: { status: MissionStatus.CANCELLED },
   })
   return { handled: true, deferredAlerts: [] }
 }

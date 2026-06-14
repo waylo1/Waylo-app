@@ -38,6 +38,7 @@ enum EscrowStatus {
   RELEASED
   REFUNDED
   PARTIALLY_REFUNDED
+  CANCELLED // PaymentIntent échoué (payment_intent.payment_failed) : hold jamais capturé → annulé
 }
 
 enum LedgerType {
