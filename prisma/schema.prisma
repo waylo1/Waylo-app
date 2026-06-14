@@ -114,6 +114,7 @@ model Mission {
 
   @@index([buyerId])
   @@index([travelerId])
+  @@index([status]) // catalogue FUNDED + filtres de statut : évite un seq scan
 }
 
 model EscrowTransaction {
