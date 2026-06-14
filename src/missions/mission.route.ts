@@ -451,6 +451,44 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     return reply.code(200).send(matched)
   })
 
+  // POST /api/missions/:id/accept — un VOYAGEUR (pas l'acheteur) accepte le
+  // transport. « ASSIGNED » dans le langage produit = statut MATCHED de l'enum
+  // (label « Voyageur assigné ») ; aucune valeur ASSIGNED n'existe — on ne
+  // duplique pas MATCHED. Même transition sûre que /match : FUNDED + travelerId
+  // null → MATCHED + travelerId, conditionnelle et atomique (anti-TOCTOU).
+  app.post('/:id/accept', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const userId = req.user.sub
+    const mission = await prisma.mission.findUnique({ where: { id } })
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (mission.buyerId === userId) {
+      return reply.code(400).send({ error: 'CANNOT_MATCH_OWN_MISSION' })
+    }
+    if (mission.status !== MissionStatus.FUNDED) {
+      const code =
+        mission.status === MissionStatus.CREATED ? 'MISSION_NOT_MATCHABLE' : 'MISSION_ALREADY_MATCHED'
+      return reply.code(400).send({ error: code })
+    }
+
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.FUNDED, travelerId: null },
+          data: { travelerId: userId, status: MissionStatus.MATCHED },
+        })
+        if (updated.count !== 1) throw new MatchConflictError()
+      })
+    } catch (err) {
+      if (err instanceof MatchConflictError) {
+        return reply.code(400).send({ error: 'MISSION_ALREADY_MATCHED' })
+      }
+      throw err
+    }
+
+    const accepted = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(accepted)
+  })
+
   // POST /api/missions/:id/start-travel — le VOYAGEUR assigné passe à l'action.
   app.post(
     '/:id/start-travel',

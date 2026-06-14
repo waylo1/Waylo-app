@@ -137,28 +137,43 @@ function MissionDetail({ missionId }: { missionId: string }) {
             <MissionStatusBadge status={mission.status} />
           </div>
         </CardHeader>
-        <CardContent className="space-y-1 text-sm">
-          <p className="font-medium">{mission.targetProduct}</p>
-          <p className="text-muted-foreground">{mission.destination}</p>
-          <p className="text-muted-foreground">
-            Budget {centsToEur(mission.budgetCents)} · commission{" "}
-            {centsToEur(mission.commissionCents)} · expire le{" "}
+        <CardContent className="space-y-2 text-sm">
+          <p className="text-base font-medium">{mission.targetProduct}</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+            <dt className="font-medium">Origine</dt>
+            <dd className="text-muted-foreground">{mission.origin}</dd>
+            <dt className="font-medium">Destination</dt>
+            <dd className="text-muted-foreground">{mission.destination}</dd>
+            <dt className="font-medium">Budget</dt>
+            <dd className="text-muted-foreground">
+              {centsToEur(mission.budgetCents)}
+            </dd>
+          </dl>
+          <p className="text-xs text-muted-foreground">
+            commission {centsToEur(mission.commissionCents)} · expire le{" "}
             {new Date(mission.expiresAt).toLocaleDateString("fr-FR")}
           </p>
         </CardContent>
       </Card>
 
       {!isBuyer ? (
-        <p className="text-sm text-muted-foreground">
-          Vous êtes le voyageur de cette mission —{" "}
-          <Link
-            href={`/missions/${mission.id}/dashboard`}
-            className="underline underline-offset-4"
-          >
-            ouvrir le tableau de bord voyageur
-          </Link>
-          .
-        </p>
+        <div className="space-y-3">
+          {/* Bouton principal de la fiche — désactivé pour l'instant (flux
+              d'acceptation du transport à brancher ultérieurement). */}
+          <Button className="w-full" disabled>
+            Accepter le transport de ce colis
+          </Button>
+          <p className="text-sm text-muted-foreground">
+            Vous êtes le voyageur de cette mission —{" "}
+            <Link
+              href={`/missions/${mission.id}/dashboard`}
+              className="underline underline-offset-4"
+            >
+              ouvrir le tableau de bord voyageur
+            </Link>
+            .
+          </p>
+        </div>
       ) : fundsReleased ? (
         <Card>
           <CardContent className="space-y-2 py-4">
