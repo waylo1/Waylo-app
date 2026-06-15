@@ -125,10 +125,14 @@ export const matchMission = (id: string) =>
 export const acceptMission = (id: string) =>
   apiFetch<Mission>(`/missions/${id}/accept`, { method: "POST" });
 
-export const shipMission = (id: string, trackingReference: string) =>
+export const shipMission = (
+  id: string,
+  trackingReference: string,
+  purchaseAmountCents: number,
+) =>
   apiFetch<Mission>(`/missions/${id}/ship`, {
     method: "POST",
-    body: { trackingReference },
+    body: { trackingReference, purchaseAmountCents },
   });
 
 export const receiveMission = (id: string) =>

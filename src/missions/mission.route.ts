@@ -84,7 +84,7 @@ export interface PaymentIntentClient {
           metadata: Record<string, string>
         },
         options: { idempotencyKey: string },
-      ): Promise<{ id: string; url: string | null }>
+      ): Promise<{ id: string; url: string | null; payment_intent: string | { id: string } | null }>
     }
   }
 }
@@ -92,9 +92,6 @@ export interface PaymentIntentClient {
 export interface MissionRouteOptions {
   stripe: PaymentIntentClient
 }
-
-/** Transition CREATED → FUNDED perdue (course) : la mission vient d'être financée ailleurs. */
-class FundingConflictError extends Error {}
 
 /** Transition AWAITING_VALIDATION → VALIDATED perdue (course / double validation). */
 class ValidationConflictError extends Error {}
@@ -143,14 +140,17 @@ interface SubmitReceiptBody {
 
 interface ShipBody {
   trackingReference: string
+  purchaseAmountCents: number
 }
 
 const shipBodySchema = {
   type: 'object',
-  required: ['trackingReference'],
+  required: ['trackingReference', 'purchaseAmountCents'],
   additionalProperties: false,
   properties: {
     trackingReference: { type: 'string', minLength: 1, maxLength: 200 },
+    // Montant d'achat réel : base du contrôle douanier (scellé serveur ici).
+    purchaseAmountCents: { type: 'integer', minimum: 1 },
   },
 } as const
 
@@ -332,58 +332,61 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     // plateforme (le webhook de capture verse capturé − commission au voyageur).
     const totalAmountCents = mission.budgetCents + mission.commissionCents
 
-    // Appel Stripe HORS transaction DB. idempotencyKey déterministe : deux
-    // tentatives concurrentes ou un retry post-crash obtiennent le MÊME PI.
-    const intent = await opts.stripe.paymentIntents.create(
-      {
-        amount: totalAmountCents,
-        currency: 'eur',
-        capture_method: 'manual', // séquestre : autorisation maintenant, capture après validation humaine
-        metadata: { missionId: mission.id },
-      },
-      { idempotencyKey: `fund_${mission.id}` },
-    )
+    // RÉSERVATION ATOMIQUE avant tout appel Stripe. /intent et /checkout-session
+    // se disputent la MÊME transition CREATED → FUNDED : le perdant échoue ICI,
+    // avant de créer le moindre PaymentIntent → jamais deux séquestres/holds.
+    const reserved = await prisma.mission.updateMany({
+      where: { id: mission.id, status: MissionStatus.CREATED },
+      data: { status: MissionStatus.FUNDED },
+    })
+    if (reserved.count !== 1) {
+      return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+    }
 
-    // Transaction atomique : transition conditionnelle (anti-TOCTOU) + escrow.
-    // Soit les deux committent, soit rien — un échec laisse la mission CREATED
-    // et le PI orphelin est récupéré tel quel au retry (idempotencyKey).
     try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id: mission.id, status: MissionStatus.CREATED },
-          data: { status: MissionStatus.FUNDED },
-        })
-        if (updated.count !== 1) throw new FundingConflictError()
-        await tx.escrowTransaction.create({
-          data: {
-            missionId: mission.id,
-            stripePaymentIntentId: intent.id,
-            spendingLimitCents: mission.budgetCents, // plafond carte JIT = budget, figé
-            idempotencyKey: `escrow_fund_${mission.id}`,
-            // status HELD et capturedAmountCents 0 : défauts du schéma (T0)
-          },
-        })
+      // idempotencyKey déterministe : un retry post-crash récupère le MÊME PI.
+      const intent = await opts.stripe.paymentIntents.create(
+        {
+          amount: totalAmountCents,
+          currency: 'eur',
+          capture_method: 'manual', // séquestre : autorisation maintenant, capture après validation
+          metadata: { missionId: mission.id },
+        },
+        { idempotencyKey: `fund_${mission.id}` },
+      )
+      await prisma.escrowTransaction.create({
+        data: {
+          missionId: mission.id,
+          stripePaymentIntentId: intent.id,
+          spendingLimitCents: mission.budgetCents, // plafond carte JIT = budget, figé
+          idempotencyKey: `escrow_fund_${mission.id}`,
+          // status HELD et capturedAmountCents 0 : défauts du schéma (T0)
+        },
+      })
+      return reply.code(200).send({
+        clientSecret: intent.client_secret,
+        paymentIntentId: intent.id,
+        amountCents: totalAmountCents,
       })
     } catch (err) {
-      if (err instanceof FundingConflictError || isUniqueViolation(err)) {
+      // Échec Stripe/escrow : on RELÂCHE la réservation (FUNDED → CREATED) pour
+      // permettre un retry — aucun escrow n'a été committé dans ce chemin.
+      await prisma.mission.updateMany({
+        where: { id: mission.id, status: MissionStatus.FUNDED },
+        data: { status: MissionStatus.CREATED },
+      })
+      if (isUniqueViolation(err)) {
         return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
       }
       throw err
     }
-
-    return reply.code(200).send({
-      clientSecret: intent.client_secret,
-      paymentIntentId: intent.id,
-      amountCents: totalAmountCents,
-    })
   })
 
   // POST /api/missions/:id/checkout-session — financement T0 via Stripe Checkout
-  // (page hébergée), alternative à /intent. Réservé à l'ACHETEUR, mêmes
-  // préconditions de finançabilité. La session crée un PaymentIntent
-  // capture_method 'manual' → séquestre identique. L'escrow HELD + mission FUNDED
-  // sont posés à la complétion, via le webhook checkout.session.completed (hors
-  // périmètre de cet endpoint, qui se borne à générer l'URL de paiement).
+  // (page hébergée), alternative à /intent. UNIFIÉ avec /intent : même réservation
+  // atomique CREATED → FUNDED, même escrow HELD créé SYNCHRONEMENT à partir du
+  // PaymentIntent de la session (un seul PI déterministe par mission). Le webhook
+  // checkout.session.completed devient un simple acquittement (escrow déjà posé).
   app.post(
     '/:id/checkout-session',
     { schema: { params: missionIdParamsSchema } },
@@ -392,7 +395,6 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
       if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
 
-      // Mêmes prechecks que /intent : pas de session pour une mission déjà financée.
       const existingEscrow = await prisma.escrowTransaction.findUnique({
         where: { missionId: mission.id },
         select: { id: true },
@@ -407,29 +409,65 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       const totalAmountCents = mission.budgetCents + mission.commissionCents
       const frontendBaseUrl = process.env.FRONTEND_BASE_URL ?? 'http://localhost:3001'
 
-      // idempotencyKey déterministe : un double clic ou un retry réutilise la session.
-      const session = await opts.stripe.checkout.sessions.create(
-        {
-          mode: 'payment',
-          line_items: [
-            {
-              price_data: {
-                currency: 'eur',
-                product_data: { name: mission.targetProduct },
-                unit_amount: totalAmountCents,
-              },
-              quantity: 1,
-            },
-          ],
-          payment_intent_data: { capture_method: 'manual', metadata: { missionId: mission.id } },
-          success_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=cancel`,
-          metadata: { missionId: mission.id },
-        },
-        { idempotencyKey: `checkout_${mission.id}` },
-      )
+      // Réservation atomique AVANT l'appel Stripe (cf. /intent) : exclut tout
+      // financement concurrent par l'autre chemin → pas de double hold.
+      const reserved = await prisma.mission.updateMany({
+        where: { id: mission.id, status: MissionStatus.CREATED },
+        data: { status: MissionStatus.FUNDED },
+      })
+      if (reserved.count !== 1) {
+        return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+      }
 
-      return reply.code(200).send({ checkoutUrl: session.url, sessionId: session.id })
+      try {
+        const session = await opts.stripe.checkout.sessions.create(
+          {
+            mode: 'payment',
+            line_items: [
+              {
+                price_data: {
+                  currency: 'eur',
+                  product_data: { name: mission.targetProduct },
+                  unit_amount: totalAmountCents,
+                },
+                quantity: 1,
+              },
+            ],
+            payment_intent_data: { capture_method: 'manual', metadata: { missionId: mission.id } },
+            success_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${frontendBaseUrl}/missions/${mission.id}?checkout=cancel`,
+            metadata: { missionId: mission.id },
+          },
+          { idempotencyKey: `checkout_${mission.id}` },
+        )
+
+        // PI de la session = source de vérité de l'escrow (un seul PI par mission).
+        const piId =
+          typeof session.payment_intent === 'string'
+            ? session.payment_intent
+            : session.payment_intent?.id
+        if (!piId) throw new Error('CHECKOUT_NO_PAYMENT_INTENT')
+
+        await prisma.escrowTransaction.create({
+          data: {
+            missionId: mission.id,
+            stripePaymentIntentId: piId,
+            spendingLimitCents: mission.budgetCents,
+            idempotencyKey: `escrow_fund_${mission.id}`,
+          },
+        })
+        return reply.code(200).send({ checkoutUrl: session.url, sessionId: session.id })
+      } catch (err) {
+        // Relâche la réservation pour permettre un retry (aucun escrow committé).
+        await prisma.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.FUNDED },
+          data: { status: MissionStatus.CREATED },
+        })
+        if (isUniqueViolation(err)) {
+          return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+        }
+        throw err
+      }
     },
   )
 
@@ -511,7 +549,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     // prouvées (cf. POST /:id/customs-receipt qui lève le verrou).
     if (mission.destinationCountry && !mission.customsReceiptUrl) {
       const thresholdCents = getCustomsThreshold(mission.destinationCountry) * 100
-      if (mission.budgetCents > thresholdCents) {
+      // Base = montant d'achat RÉEL scellé par le voyageur (/ship), pas le budget
+      // déclaratif de l'acheteur → bloque la sous-déclaration. Fallback budget si absent.
+      const declaredCents = mission.purchaseAmountCents ?? mission.budgetCents
+      if (declaredCents > thresholdCents) {
         const locked = await prisma.mission.updateMany({
           where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
           data: { status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
@@ -758,10 +799,15 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
       }
 
-      const { trackingReference } = req.body as ShipBody
+      const { trackingReference, purchaseAmountCents } = req.body as ShipBody
+      // Le montant d'achat scellé ne peut excéder le budget figé (le plafond carte
+      // JIT l'aurait refusé) — défense en profondeur contre la sur-déclaration.
+      if (purchaseAmountCents > mission.budgetCents) {
+        return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+      }
       const updated = await prisma.mission.updateMany({
         where: { id, travelerId: req.user.sub, status: MissionStatus.MATCHED },
-        data: { status: MissionStatus.IN_PROGRESS, trackingReference },
+        data: { status: MissionStatus.IN_PROGRESS, trackingReference, purchaseAmountCents },
       })
       if (updated.count !== 1) {
         return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })

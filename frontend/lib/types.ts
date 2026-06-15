@@ -39,6 +39,7 @@ export interface Mission {
   origin: string;
   destination: string;
   trackingReference: string | null;
+  purchaseAmountCents: number | null;
   destinationCountry: string | null;
   customsReceiptUrl: string | null;
   customsReceiptSha256: string | null;

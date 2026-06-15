@@ -4,7 +4,7 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import * as api from "@/lib/api";
 import { apiErrorMessage } from "@/lib/api-errors";
-import { centsToEur } from "@/lib/money";
+import { centsToEur, eurToCents } from "@/lib/money";
 import type { Mission } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
 import { RequireAuth } from "@/components/require-auth";
@@ -115,6 +115,7 @@ function ShipForm({
   onShipped: (m: Mission) => void;
 }) {
   const [trackingReference, setTrackingReference] = useState("");
+  const [purchaseAmount, setPurchaseAmount] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -122,10 +123,17 @@ function ShipForm({
     e.preventDefault();
     const ref = trackingReference.trim();
     if (!ref) return setError("Référence de suivi requise.");
+    const purchaseCents = eurToCents(purchaseAmount);
+    if (purchaseCents === null || purchaseCents <= 0) {
+      return setError("Montant d'achat invalide (ex. : 120 ou 120,50).");
+    }
+    if (purchaseCents > mission.budgetCents) {
+      return setError("Le montant d'achat dépasse le budget de la mission.");
+    }
     setPending(true);
     setError(null);
     try {
-      onShipped(await api.shipMission(mission.id, ref));
+      onShipped(await api.shipMission(mission.id, ref, purchaseCents));
     } catch (err) {
       setError(apiErrorMessage(err));
       setPending(false);
@@ -148,6 +156,17 @@ function ShipForm({
               placeholder="1Z999AA10123456784"
               value={trackingReference}
               onChange={e => setTrackingReference(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="purchaseAmount">Montant d&apos;achat réel (€)</Label>
+            <Input
+              id="purchaseAmount"
+              required
+              inputMode="decimal"
+              placeholder="120,00"
+              value={purchaseAmount}
+              onChange={e => setPurchaseAmount(e.target.value)}
             />
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
