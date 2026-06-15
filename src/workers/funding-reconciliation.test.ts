@@ -18,6 +18,8 @@ describe('Réconciliation financements abandonnés', () => {
   let buyer: User
   const piStatus: Record<string, string> = {}
   const cancelCalls: string[] = []
+  // Résultat de recherche Stripe par missionId (piloté par test).
+  const searchByMission: Record<string, Array<{ id: string; status: string }>> = {}
 
   // Fake Stripe : statut du PI piloté par test, enregistre les annulations.
   const fakeStripe = {
@@ -26,6 +28,10 @@ describe('Réconciliation financements abandonnés', () => {
       cancel: async (id: string) => {
         cancelCalls.push(id)
         return { id }
+      },
+      search: async (params: { query: string }) => {
+        const missionId = params.query.match(/:'([^']+)'/)?.[1] ?? ''
+        return { data: searchByMission[missionId] ?? [] }
       },
     },
   }
@@ -131,5 +137,49 @@ describe('Réconciliation financements abandonnés', () => {
     const result = await runFundingReconciliationOnce({ prisma, stripe: fakeStripe })
     expect(result.rolledBack).toBe(0)
     expect(cancelCalls).toEqual([])
+  })
+
+  // Mission FUNDED SANS escrow (fenêtre de crash). updatedAt rétro-daté en SQL
+  // brut car @updatedAt n'est pas réglable à la création.
+  async function seedOrphan(fundedAgeMin: number): Promise<string> {
+    const m = await prisma.mission.create({
+      data: {
+        buyerId: buyer.id,
+        status: 'FUNDED',
+        targetProduct: 'Mission orpheline',
+        budgetCents: 12_000,
+        commissionCents: 1_200,
+        destination: 'Tokyo',
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      },
+    })
+    await prisma.$executeRaw`UPDATE "Mission" SET "updatedAt" = now() - make_interval(mins => ${fundedAgeMin}::int) WHERE id = ${m.id}`
+    return m.id
+  }
+
+  it('FUNDED orpheline : PI retrouvé → escrow recréé ; pas de PI → rollback ; récente → intacte', async () => {
+    const { runOrphanFundingReconciliationOnce } = await import('./funding-reconciliation')
+
+    const withPi = await seedOrphan(20) // > 10 min
+    searchByMission[withPi] = [{ id: 'pi_recovered_orphan', status: 'requires_capture' }]
+    const noPi = await seedOrphan(20) // aucun PI Stripe
+    const fresh = await seedOrphan(2) // < 10 min : hors fenêtre
+
+    const result = await runOrphanFundingReconciliationOnce({ prisma, stripe: fakeStripe })
+    expect(result).toEqual({ escrowRecreated: 1, rolledBack: 1, skipped: 0 })
+
+    // PI retrouvé → escrow recréé, mission toujours FUNDED.
+    const escrow = await prisma.escrowTransaction.findUniqueOrThrow({ where: { missionId: withPi } })
+    expect(escrow.stripePaymentIntentId).toBe('pi_recovered_orphan')
+    expect(escrow.status).toBe('HELD')
+    expect((await prisma.mission.findUniqueOrThrow({ where: { id: withPi } })).status).toBe('FUNDED')
+
+    // Pas de PI → rollback CREATED, toujours sans escrow.
+    expect((await prisma.mission.findUniqueOrThrow({ where: { id: noPi } })).status).toBe('CREATED')
+    expect(await prisma.escrowTransaction.count({ where: { missionId: noPi } })).toBe(0)
+
+    // Récente → intacte (FUNDED, sans escrow).
+    expect((await prisma.mission.findUniqueOrThrow({ where: { id: fresh } })).status).toBe('FUNDED')
+    expect(await prisma.escrowTransaction.count({ where: { missionId: fresh } })).toBe(0)
   })
 })

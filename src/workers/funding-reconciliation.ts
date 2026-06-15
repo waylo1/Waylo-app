@@ -34,6 +34,8 @@ export interface FundingReconciliationStripeClient {
   paymentIntents: {
     retrieve(id: string): Promise<{ status: string }>
     cancel(id: string): Promise<{ id: string }>
+    // Recherche par metadata.missionId — retrouve le PI d'une mission orpheline.
+    search(params: { query: string }): Promise<{ data: Array<{ id: string; status: string }> }>
   }
 }
 
@@ -42,6 +44,8 @@ export interface FundingReconciliationDeps {
   stripe: FundingReconciliationStripeClient
   /** Âge minimal d'une réservation FUNDED avant rollback (défaut 30 min). */
   staleMinutes?: number
+  /** Âge minimal d'une mission FUNDED SANS escrow avant réparation (défaut 10 min). */
+  orphanStaleMinutes?: number
   /** Bornage d'un passage (le reliquat part au tick suivant). */
   batchLimit?: number
   log?: WorkerLogger
@@ -49,6 +53,7 @@ export interface FundingReconciliationDeps {
 }
 
 const DEFAULT_STALE_MINUTES = 30
+const DEFAULT_ORPHAN_STALE_MINUTES = 10
 const DEFAULT_BATCH_LIMIT = 100
 
 /** L'escrow/mission a changé d'état entre la lecture et l'écriture (capture concurrente). */
@@ -153,9 +158,110 @@ export async function runFundingReconciliationOnce(
 }
 
 /**
+ * Réconciliation des missions FUNDED ORPHELINES — sans EscrowTransaction
+ * associée depuis > orphanStaleMinutes. Cause : crash entre la réservation
+ * (CREATED→FUNDED) et la création de l'escrow dans /intent|/checkout-session
+ * (fenêtre non transactionnelle, l'appel Stripe étant intercalé).
+ *
+ * Logique par mission : on cherche le PI Stripe via metadata.missionId.
+ *   - PI trouvé (non annulé) → on RECRÉE l'escrow depuis ce PI (état restauré) ;
+ *   - aucun PI → la réservation n'a jamais abouti → rollback FUNDED → CREATED.
+ * Tout l'effet DB se fait dans UNE transaction, avec re-vérification de
+ * l'invariant (toujours FUNDED, toujours sans escrow) — anti-TOCTOU. La
+ * recherche Stripe (réseau) reste HORS transaction.
+ */
+export async function runOrphanFundingReconciliationOnce(
+  deps: FundingReconciliationDeps,
+): Promise<{ escrowRecreated: number; rolledBack: number; skipped: number }> {
+  const { prisma, stripe } = deps
+  const staleMinutes = deps.orphanStaleMinutes ?? DEFAULT_ORPHAN_STALE_MINUTES
+  const batchLimit = deps.batchLimit ?? DEFAULT_BATCH_LIMIT
+  const log = deps.log ?? console
+
+  const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000)
+  const orphans = await prisma.mission.findMany({
+    where: { status: MissionStatus.FUNDED, escrow: { is: null }, updatedAt: { lt: cutoff } },
+    select: { id: true },
+    take: batchLimit,
+  })
+
+  let escrowRecreated = 0
+  let rolledBack = 0
+  let skipped = 0
+
+  for (const { id: missionId } of orphans) {
+    // PI créé (ou tenté) avec metadata.missionId — recherche hors transaction.
+    let pi: { id: string; status: string } | undefined
+    try {
+      const found = await stripe.paymentIntents.search({
+        query: `metadata['missionId']:'${missionId}'`,
+      })
+      pi = found.data.find(p => p.status !== 'canceled')
+    } catch (err) {
+      skipped++
+      log.error({ missionId, err: String(err) }, 'orphan-recon: search PI échoué')
+      continue
+    }
+
+    try {
+      const outcome = await prisma.$transaction(async tx => {
+        // Re-vérifie l'invariant DANS la transaction (anti-TOCTOU) : un /intent
+        // ou l'autre passe ont pu agir entre le scan et ici.
+        const m = await tx.mission.findUnique({
+          where: { id: missionId },
+          select: { status: true, budgetCents: true, escrow: { select: { id: true } } },
+        })
+        if (!m || m.status !== MissionStatus.FUNDED || m.escrow) return 'skip' as const
+        if (pi) {
+          await tx.escrowTransaction.create({
+            data: {
+              missionId,
+              stripePaymentIntentId: pi.id,
+              spendingLimitCents: m.budgetCents,
+              idempotencyKey: `escrow_fund_${missionId}`,
+            },
+          })
+          return 'recreated' as const
+        }
+        await tx.mission.updateMany({
+          where: { id: missionId, status: MissionStatus.FUNDED },
+          data: { status: MissionStatus.CREATED },
+        })
+        return 'rolledback' as const
+      })
+
+      if (outcome === 'recreated') {
+        escrowRecreated++
+        safeEmit(deps.onAlert, {
+          code: 'ORPHAN_FUNDING_RECOVERED',
+          message: 'Escrow recréé pour une mission FUNDED orpheline (PI Stripe retrouvé)',
+          details: { missionId, stripePaymentIntentId: pi?.id },
+        })
+      } else if (outcome === 'rolledback') {
+        rolledBack++
+        safeEmit(deps.onAlert, {
+          code: 'STALE_FUNDING_ROLLED_BACK',
+          message: 'Mission FUNDED orpheline sans PI Stripe → rollback CREATED',
+          details: { missionId },
+        })
+      } else {
+        skipped++
+      }
+    } catch (err) {
+      // Conflit (escrow créé entre-temps) ou autre → sauté, retenté au prochain tick.
+      skipped++
+      log.error({ missionId, err: String(err) }, 'orphan-recon: transaction échouée')
+    }
+  }
+
+  return { escrowRecreated, rolledBack, skipped }
+}
+
+/**
  * Boucle cron (~15 min). Garde `inFlight` : un tick qui arrive pendant un run en
  * cours est SAUTÉ (jamais deux runs concurrents) ; `stop()` attend la fin du run
- * en vol.
+ * en vol. Chaque tick enchaîne : réservations abandonnées (PI non autorisé) puis
+ * missions FUNDED orphelines (sans escrow).
  */
 export function startFundingReconciliationLoop(
   deps: FundingReconciliationDeps,
@@ -165,7 +271,10 @@ export function startFundingReconciliationLoop(
   let inFlight: Promise<unknown> | null = null
   const tick = (): void => {
     if (inFlight) return
-    inFlight = runFundingReconciliationOnce(deps)
+    inFlight = (async () => {
+      await runFundingReconciliationOnce(deps)
+      await runOrphanFundingReconciliationOnce(deps)
+    })()
       .catch((err: unknown) =>
         log.error({ err: String(err) }, 'funding reconciliation tick failed'),
       )
