@@ -29,6 +29,8 @@ export type AlertCode =
   | 'ISSUING_JIT_LOOKUP_ERROR'
   | 'WEBHOOK_PROCESSING_FAILED'
   | 'RECONCILIATION_RUN_FAILED'
+  | 'STALE_FUNDING_ROLLED_BACK'
+  | 'FUNDING_RECON_CANCEL_FAILED'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -66,6 +68,8 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   ISSUING_JIT_LOOKUP_ERROR: 'warn', // refus fail-safe ; en rafale = incident infra
   WEBHOOK_PROCESSING_FAILED: 'warn', // erreur INATTENDUE (rollback, Stripe rejoue) ; persistant = endpoint désactivable
   RECONCILIATION_RUN_FAILED: 'critical', // la couche de DÉTECTION est morte : tous les contrôles critiques cessent en silence
+  STALE_FUNDING_ROLLED_BACK: 'warn', // réservation abandonnée nettoyée (argent jamais pris) — visibilité, transitoire normal
+  FUNDING_RECON_CANCEL_FAILED: 'ops', // rollback DB OK mais PI Stripe non annulé : hold résiduel (auto-expire), action de nettoyage
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {

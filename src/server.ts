@@ -3,6 +3,7 @@ import { safeEmit } from './alerts'
 import { startTransferWorkerLoop } from './workers/transfer-worker'
 import { runReconciliation } from './workers/reconciliation'
 import type { ReconciliationDeps } from './workers/reconciliation'
+import { startFundingReconciliationLoop } from './workers/funding-reconciliation'
 
 /**
  * Point d'entrée serveur Waylo — MVP monoprocess : trois composants démarrés
@@ -35,6 +36,8 @@ const DEFAULT_PORT = 3000
 const DEFAULT_HOST = '0.0.0.0'
 const DEFAULT_WORKER_INTERVAL_MS = 60_000
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 24 * 3600 * 1000
+// Réconciliation des financements abandonnés (PI jamais autorisé) : balayage 15 min.
+const DEFAULT_FUNDING_RECONCILIATION_INTERVAL_MS = 15 * 60_000
 // Balayage post-redémarrage : différé pour laisser les webhooks rejoués par
 // Stripe atterrir après un downtime (sinon faux CAPTURE_WITHOUT_LEDGER — seul
 // contrôle sans horodatage local pour une fenêtre de grâce par ligne).
@@ -126,6 +129,10 @@ async function main(): Promise<void> {
     'RECONCILIATION_BOOT_DELAY_MS',
     DEFAULT_RECONCILIATION_BOOT_DELAY_MS,
   )
+  const fundingReconciliationIntervalMs = intFromEnv(
+    'FUNDING_RECONCILIATION_INTERVAL_MS',
+    DEFAULT_FUNDING_RECONCILIATION_INTERVAL_MS,
+  )
 
   const { prisma } = await import('./db')
   const { buildApp } = await import('./app')
@@ -144,9 +151,20 @@ async function main(): Promise<void> {
     { prisma, stripe },
     { intervalMs: reconciliationIntervalMs, bootDelayMs: reconciliationBootDelayMs, log },
   )
+  const fundingReconciliation = startFundingReconciliationLoop(
+    { prisma, stripe, log },
+    fundingReconciliationIntervalMs,
+  )
   log.info(
-    { port, host, workerIntervalMs, reconciliationIntervalMs, reconciliationBootDelayMs },
-    'Waylo démarré — HTTP + worker outbox + cron réconciliation',
+    {
+      port,
+      host,
+      workerIntervalMs,
+      reconciliationIntervalMs,
+      reconciliationBootDelayMs,
+      fundingReconciliationIntervalMs,
+    },
+    'Waylo démarré — HTTP + worker outbox + cron réconciliation + cron financements abandonnés',
   )
 
   let shuttingDown = false
@@ -159,6 +177,7 @@ async function main(): Promise<void> {
     // est reprise par un prochain tick et l'idempotencyKey rend le rejeu sûr.
     clearInterval(workerTimer)
     await reconciliation.stop()
+    await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol
     await prisma.$disconnect()
     log.info({}, 'arrêt gracieux terminé')
