@@ -1,7 +1,17 @@
-import { FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import argon2 from 'argon2'
 import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
+import { isRateLimited } from '../rate-limit'
+
+/** Anti-brute-force : 429 au-delà du seuil, clé par route + IP + email. */
+const authRateLimit =
+  (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const email = ((req.body as { email?: string } | undefined)?.email ?? '').toLowerCase()
+    if (isRateLimited(`${name}:${req.ip}:${email}`)) {
+      await reply.code(429).send({ error: 'RATE_LIMITED' })
+    }
+  }
 
 /**
  * Authentification minimale : register / login / me.
@@ -66,7 +76,7 @@ const authRoute: FastifyPluginAsync = async app => {
   // vérification argon2, que le compte existe ou non.
   const dummyHash = await argon2.hash('waylo-dummy-password-timing-shield')
 
-  app.post('/register', { schema: { body: registerBodySchema } }, async (req, reply) => {
+  app.post('/register', { schema: { body: registerBodySchema }, preHandler: authRateLimit('register') }, async (req, reply) => {
     const { email, password } = req.body as CredentialsBody
     const passwordHash = await argon2.hash(password)
     try {
@@ -83,7 +93,7 @@ const authRoute: FastifyPluginAsync = async app => {
     }
   })
 
-  app.post('/login', { schema: { body: loginBodySchema } }, async (req, reply) => {
+  app.post('/login', { schema: { body: loginBodySchema }, preHandler: authRateLimit('login') }, async (req, reply) => {
     const { email, password } = req.body as CredentialsBody
     const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } })
     // Toujours un verify (hash réel ou factice) AVANT de décider — pas

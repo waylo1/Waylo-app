@@ -13,8 +13,13 @@ const PII_KEY =
 const CARD_RE = /\b(?:\d[ -]?){13,19}\b/g;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._-]+/gi;
 
+const EMAIL_RE = /[\w.+-]+@[\w.-]+\.\w+/g;
+
 function scrubString(s: string): string {
-  return s.replace(CARD_RE, "[REDACTED]").replace(BEARER_RE, "Bearer [REDACTED]");
+  return s
+    .replace(CARD_RE, "[REDACTED]")
+    .replace(BEARER_RE, "Bearer [REDACTED]")
+    .replace(EMAIL_RE, "[EMAIL]");
 }
 
 function scrub(value: unknown, depth = 0): unknown {

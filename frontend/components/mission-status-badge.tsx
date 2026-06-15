@@ -11,6 +11,7 @@ const STATUS_CONFIG: Record<
   MATCHED: { label: "Voyageur assigné", variant: "secondary" },
   IN_PROGRESS: { label: "En cours", variant: "default" },
   ESCROW_LOCKED_CUSTOMS: { label: "Bloquée (douane)", variant: "destructive" },
+  PENDING_CUSTOMS_REVIEW: { label: "Revue douane (ops)", variant: "secondary" },
   AWAITING_VALIDATION: { label: "En attente de validation", variant: "default" },
   VALIDATED: { label: "Validée", variant: "default" },
   AWAITING_TRAVELER_ACCOUNT: {

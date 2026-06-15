@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "MissionStatus" ADD VALUE 'PENDING_CUSTOMS_REVIEW';

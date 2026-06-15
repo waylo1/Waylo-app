@@ -8,25 +8,15 @@ import {
   findMissionForTraveler,
 } from './mission-access'
 import { getCustomsThreshold } from './customs'
+import { isRateLimited } from '../rate-limit'
 
-// Rate limiter anti-brute-force EN MÉMOIRE (léger, sans dépendance) : fenêtre
-// fixe, max RATE_LIMIT_MAX requêtes par RATE_LIMIT_WINDOW_MS et par clé IP+user.
-// Mono-process : suffisant ici (cf. consigne « stockage léger en mémoire »).
-const RATE_LIMIT_MAX = 5
-const RATE_LIMIT_WINDOW_MS = 60_000
-const rateBuckets = new Map<string, { count: number; resetAt: number }>()
-
-function isRateLimited(key: string): boolean {
-  const now = Date.now()
-  const bucket = rateBuckets.get(key)
-  if (!bucket || now >= bucket.resetAt) {
-    rateBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS })
-    return false
-  }
-  if (bucket.count >= RATE_LIMIT_MAX) return true
-  bucket.count += 1
-  return false
-}
+// Allowlist ops/admin (IDs utilisateur), via env. Hors-allowlist → pas d'approbation.
+const ADMIN_USER_IDS = new Set(
+  (process.env.ADMIN_USER_IDS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+)
 
 /** preHandler de rate limit, clé par route + IP + utilisateur. 429 si dépassé. */
 const rateLimit =
@@ -169,7 +159,9 @@ const submitReceiptBodySchema = {
   required: ['urlRecu', 'purchaseAmountCents'],
   additionalProperties: false,
   properties: {
-    urlRecu: { type: 'string', minLength: 1, maxLength: 2048 },
+    // Schéma http(s) obligatoire : rejette javascript:/data: (anti-XSS stocké,
+    // le reçu est rendu en href côté acheteur).
+    urlRecu: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^https?://.+' },
     purchaseAmountCents: { type: 'integer', minimum: 1 },
   },
 } as const
@@ -580,10 +572,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   })
 
   // POST /api/missions/:id/customs-receipt — le VOYAGEUR téléverse sa preuve de
-  // paiement des taxes pour LEVER le verrou douanier. Scellé serveur (sha256,
-  // horloge serveur). Transition conditionnelle ESCROW_LOCKED_CUSTOMS →
-  // IN_PROGRESS : l'acheteur peut alors reconfirmer la réception (/receive),
-  // qui ne re-bloquera pas (customsReceiptUrl désormais renseignée).
+  // paiement des taxes. Scellé serveur (sha256). Transition conditionnelle
+  // ESCROW_LOCKED_CUSTOMS → PENDING_CUSTOMS_REVIEW : le bénéficiaire NE lève PAS
+  // son propre verrou ; une validation ops/admin (/customs-approve) est requise
+  // pour repasser en IN_PROGRESS.
   app.post(
     '/:id/customs-receipt',
     {
@@ -611,7 +603,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
           const updated = await tx.mission.updateMany({
             where: { id: mission.id, status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
             data: {
-              status: MissionStatus.IN_PROGRESS,
+              status: MissionStatus.PENDING_CUSTOMS_REVIEW,
               customsReceiptUrl,
               customsReceiptSha256: sha256,
             },
@@ -625,10 +617,29 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         throw err
       }
 
-      const unlocked = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
-      return reply.code(200).send(unlocked)
+      const reviewing = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+      return reply.code(200).send(reviewing)
     },
   )
+
+  // POST /api/missions/:id/customs-approve — validation ops/admin du verrou
+  // douanier : PENDING_CUSTOMS_REVIEW → IN_PROGRESS. Réservé à l'allowlist
+  // ADMIN_USER_IDS (le voyageur bénéficiaire en est exclu). 403 sinon.
+  app.post('/:id/customs-approve', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+      return reply.code(403).send({ error: 'FORBIDDEN' })
+    }
+    const { id } = req.params as { id: string }
+    const updated = await prisma.mission.updateMany({
+      where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+      data: { status: MissionStatus.IN_PROGRESS },
+    })
+    if (updated.count !== 1) {
+      return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+    }
+    const approved = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(approved)
+  })
 
   // POST /api/missions/:id/match — un VOYAGEUR (pas l'acheteur) prend la mission.
   // La mission n'a pas encore de participant voyageur : autorisation par statut

@@ -73,16 +73,17 @@ function ValidationCard({
               Reçu scellé le{" "}
               {new Date(mission.receipt.sealedAt).toLocaleString("fr-FR")}
             </p>
-            {mission.receipt.receiptUrl && (
-              <a
-                href={mission.receipt.receiptUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm underline underline-offset-4"
-              >
-                Voir le reçu
-              </a>
-            )}
+            {mission.receipt.receiptUrl &&
+              /^https?:\/\//i.test(mission.receipt.receiptUrl) && (
+                <a
+                  href={mission.receipt.receiptUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm underline underline-offset-4"
+                >
+                  Voir le reçu
+                </a>
+              )}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">

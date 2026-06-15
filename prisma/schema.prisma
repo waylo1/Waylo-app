@@ -25,7 +25,8 @@ enum MissionStatus {
   FUNDED // escrow en place : PaymentIntent (capture différée) créé, EscrowTransaction HELD
   MATCHED
   IN_PROGRESS
-  ESCROW_LOCKED_CUSTOMS // valeur déclarée > seuil douanier du pays : prime bloquée jusqu'à preuve de paiement des taxes (/customs-receipt)
+  ESCROW_LOCKED_CUSTOMS // valeur déclarée > seuil douanier : verrou initial posé par /receive
+  PENDING_CUSTOMS_REVIEW // quittance déposée par le voyageur : en attente de validation ops/admin (le bénéficiaire ne lève pas son propre verrou)
   AWAITING_VALIDATION
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
