@@ -682,6 +682,29 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     return reply.code(200).send(approved)
   })
 
+  // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
+  // Réservé à l'allowlist ADMIN_USER_IDS. Retourne id, montants, quittance
+  // déposée par le voyageur (URL + sha256) et le pays de destination.
+  app.get('/customs-pending', async (req, reply) => {
+    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+      return reply.code(403).send({ error: 'FORBIDDEN' })
+    }
+    const missions = await prisma.mission.findMany({
+      where: { status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+      select: {
+        id: true,
+        budgetCents: true,
+        purchaseAmountCents: true,
+        destinationCountry: true,
+        customsReceiptUrl: true,
+        customsReceiptSha256: true,
+        updatedAt: true,
+      },
+      orderBy: { updatedAt: 'asc' },
+    })
+    return reply.code(200).send(missions)
+  })
+
   // POST /api/missions/:id/match — un VOYAGEUR (pas l'acheteur) prend la mission.
   // La mission n'a pas encore de participant voyageur : autorisation par statut
   // FUNDED, pas par le helper participant (le candidat n'est pas encore lié).
