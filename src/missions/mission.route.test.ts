@@ -31,6 +31,7 @@ const validBody = () => ({
   commissionCents: 1_500,
   origin: 'Paris',
   destination: 'Tokyo',
+  destinationCountry: 'JP',
   expiresAt: futureISO(7),
 })
 

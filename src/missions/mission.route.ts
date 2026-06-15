@@ -183,6 +183,7 @@ interface CreateMissionBody {
   commissionCents: number
   origin: string
   destination: string
+  destinationCountry: string
   expiresAt: string
 }
 
@@ -191,7 +192,15 @@ interface CreateMissionBody {
 // applicatif (l'ajv de Fastify 4 n'embarque pas le format date-time).
 const createMissionBodySchema = {
   type: 'object',
-  required: ['targetProduct', 'budgetCents', 'commissionCents', 'origin', 'destination', 'expiresAt'],
+  required: [
+    'targetProduct',
+    'budgetCents',
+    'commissionCents',
+    'origin',
+    'destination',
+    'destinationCountry',
+    'expiresAt',
+  ],
   additionalProperties: false,
   properties: {
     targetProduct: { type: 'string', minLength: 1, maxLength: 500 },
@@ -199,6 +208,9 @@ const createMissionBodySchema = {
     commissionCents: { type: 'integer', minimum: 0 },
     origin: { type: 'string', minLength: 1, maxLength: 200 },
     destination: { type: 'string', minLength: 1, maxLength: 200 },
+    // Code pays ISO-2 du pays de destination — REQUIS : pilote le seuil douanier
+    // (fail-safe, plus de contrôle inerte). Normalisé en majuscules côté route.
+    destinationCountry: { type: 'string', pattern: '^[A-Za-z]{2}$' },
     expiresAt: { type: 'string', minLength: 1 },
   },
 } as const
@@ -248,6 +260,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         commissionCents: body.commissionCents,
         origin: body.origin,
         destination: body.destination,
+        destinationCountry: body.destinationCountry.toUpperCase(),
         expiresAt: new Date(expiresAtMs),
         // status : défaut CREATED. travelerId : null (assignation = matchmaking, plus tard).
       },

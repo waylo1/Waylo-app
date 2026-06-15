@@ -33,6 +33,7 @@ export function MissionForm({ onCreated }: MissionFormProps) {
   const [description, setDescription] = useState("");
   const [origin, setOrigin] = useState("");
   const [destination, setDestination] = useState("");
+  const [destinationCountry, setDestinationCountry] = useState("");
   const [budget, setBudget] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +61,10 @@ export function MissionForm({ onCreated }: MissionFormProps) {
     if (destinationTrimmed.length === 0 || destinationTrimmed.length > 200) {
       return setError("Destination : entre 1 et 200 caractères.");
     }
+    const countryTrimmed = destinationCountry.trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(countryTrimmed)) {
+      return setError("Pays de destination : code ISO à 2 lettres (ex. JP).");
+    }
     const budgetCents = eurToCents(budget);
     if (budgetCents === null || budgetCents <= 0) {
       return setError("Budget invalide (ex. : 120 ou 120,50).");
@@ -85,6 +90,7 @@ export function MissionForm({ onCreated }: MissionFormProps) {
         commissionCents: computeCommissionCents(budgetCents),
         origin: originTrimmed,
         destination: destinationTrimmed,
+        destinationCountry: countryTrimmed,
         expiresAt: new Date(expiresAtMs).toISOString(),
       });
       // Override parent éventuel ; sinon financement T0 via Stripe Checkout :
@@ -155,6 +161,19 @@ export function MissionForm({ onCreated }: MissionFormProps) {
             onChange={e => setDestination(e.target.value)}
           />
         </div>
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="destinationCountry">
+          Pays de destination (code ISO, ex. JP)
+        </Label>
+        <Input
+          id="destinationCountry"
+          required
+          maxLength={2}
+          placeholder="JP"
+          value={destinationCountry}
+          onChange={e => setDestinationCountry(e.target.value.toUpperCase())}
+        />
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">

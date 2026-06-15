@@ -86,6 +86,7 @@ export interface CreateMissionBody {
   commissionCents: number;
   origin: string;
   destination: string;
+  destinationCountry: string;
   expiresAt: string;
 }
 
