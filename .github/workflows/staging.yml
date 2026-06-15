@@ -1,11 +1,31 @@
-name: e2e
+name: staging
 
 on:
   push:
   pull_request:
 
 jobs:
-  playwright:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Backend — deps + typecheck
+        run: |
+          npm ci || npm install
+          npx prisma generate
+          npm run typecheck
+      - name: Frontend — deps + build
+        working-directory: frontend
+        run: |
+          npm ci || npm install
+          npm run typecheck
+          npm run build
+
+  e2e:
+    needs: build
     runs-on: ubuntu-latest
 
     services:
@@ -24,35 +44,29 @@ jobs:
           --health-retries 10
 
     env:
-      # Base de test éphémère du service postgres ci-dessus.
       DATABASE_URL: postgresql://waylo:waylo@localhost:5432/waylo_test
       JWT_SECRET: ci_jwt_secret
       # Clés Stripe factices : le flux de connexion (e2e) n'appelle pas Stripe.
       STRIPE_SECRET_KEY: sk_test_ci_dummy
       STRIPE_WEBHOOK_SECRET: whsec_ci_dummy
       STRIPE_ISSUING_WEBHOOK_SECRET: whsec_ci_issuing_dummy
-      # Le front Next proxy /api → ce backend (cf. next.config.ts).
       API_URL: http://localhost:3000
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-
       - name: Backend — deps + Prisma
         run: |
           npm ci || npm install
           npx prisma migrate deploy
           npx prisma generate
-
       - name: Frontend — deps + navigateur Playwright
         working-directory: frontend
         run: |
           npm ci || npm install
           npx playwright install --with-deps chromium
-
       - name: e2e (backend en arrière-plan + Playwright)
         run: |
           npm start &
@@ -62,7 +76,6 @@ jobs:
           done
           cd frontend
           npm run e2e
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
