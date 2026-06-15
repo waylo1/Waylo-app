@@ -1,0 +1,11 @@
+node_modules
+frontend
+.git
+.github
+src/generated
+.next
+*.md
+.env
+.env.*
+alerts-critical.ndjson
+scripts/test-real-webhook-failed.mts
