@@ -682,6 +682,29 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     return reply.code(200).send(approved)
   })
 
+  // POST /api/missions/:id/customs-reject — l'admin rejette la quittance soumise :
+  // PENDING_CUSTOMS_REVIEW → ESCROW_LOCKED_CUSTOMS. Efface customsReceiptUrl/sha256
+  // pour que le voyageur puisse soumettre un nouveau document. Admin-only.
+  app.post('/:id/customs-reject', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+      return reply.code(403).send({ error: 'FORBIDDEN' })
+    }
+    const { id } = req.params as { id: string }
+    const updated = await prisma.mission.updateMany({
+      where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+      data: {
+        status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
+        customsReceiptUrl: null,
+        customsReceiptSha256: null,
+      },
+    })
+    if (updated.count !== 1) {
+      return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+    }
+    const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(rejected)
+  })
+
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
   // Réservé à l'allowlist ADMIN_USER_IDS. Retourne id, montants, quittance
   // déposée par le voyageur (URL + sha256) et le pays de destination.
