@@ -182,4 +182,30 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'UNAUTHORIZED' })
   })
+
+  it('(6) deux /intent SIMULTANÉS sur le même panier → un seul PI, un seul escrow', async () => {
+    const mission = await seedMission()
+    const before = intentCalls.filter(c => c.metadata['missionId'] === mission.id).length
+
+    // Deux financements concurrents de la MÊME mission (idempotence sous course).
+    const [a, b] = await Promise.all([
+      fund(mission.id, bearer(buyerToken)),
+      fund(mission.id, bearer(buyerToken)),
+    ])
+
+    // Exactement un succès, un refus idempotent (réservation atomique CREATED→FUNDED).
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 400])
+    const refused = a.statusCode === 400 ? a : b
+    expect(refused.json()).toEqual({ error: 'MISSION_ALREADY_FUNDED' })
+
+    // Le perdant échoue AVANT l'appel Stripe : UN SEUL PaymentIntent créé.
+    const after = intentCalls.filter(c => c.metadata['missionId'] === mission.id).length
+    expect(after - before).toBe(1)
+
+    // Un seul escrow, mission FUNDED.
+    expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(1)
+    expect(
+      (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
+    ).toBe('FUNDED')
+  })
 })
