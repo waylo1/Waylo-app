@@ -702,6 +702,12 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
     }
     const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    // Stub notification : log structuré consommable par un futur service d'alertes
+    // voyageur (email/push). Le travelerId est la cible ; missionId la référence.
+    req.log.info(
+      { missionId: id, travelerId: rejected.travelerId, event: 'CUSTOMS_RECEIPT_REJECTED' },
+      'customs: quittance refusée — voyageur à notifier',
+    )
     return reply.code(200).send(rejected)
   })
 

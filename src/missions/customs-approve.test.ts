@@ -65,9 +65,9 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
   })
 
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
-  const approve = (id: string, headers = bearer(adminToken)) =>
+  const approve = (id: string, headers: Record<string, string> = bearer(adminToken)) =>
     app.inject({ method: 'POST', url: `/api/missions/${id}/customs-approve`, headers })
-  const reject = (id: string, headers = bearer(adminToken)) =>
+  const reject = (id: string, headers: Record<string, string> = bearer(adminToken)) =>
     app.inject({ method: 'POST', url: `/api/missions/${id}/customs-reject`, headers })
 
   async function seedPending() {
