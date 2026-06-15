@@ -44,10 +44,18 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
   let buyerToken: string
   const intentCalls: RecordedIntentCall[] = []
 
+  // Bascule de panne : quand vrai, l'appel Stripe échoue (coupure réseau simulée).
+  let stripeFailMode = false
+
   // Fake Stripe : enregistre chaque appel, rend un PI déterministe par mission.
   const fakeStripe: PaymentIntentClient = {
     paymentIntents: {
       create: async (params, options) => {
+        if (stripeFailMode) {
+          // Timeout artificiel AVANT toute réponse Stripe, puis échec réseau.
+          await new Promise(resolve => setTimeout(resolve, 5))
+          throw new Error('SIMULATED_NETWORK_OUTAGE')
+        }
         intentCalls.push({ ...params, idempotencyKey: options.idempotencyKey })
         return {
           id: `pi_fake_${params.metadata['missionId']}`,
@@ -203,6 +211,34 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     expect(after - before).toBe(1)
 
     // Un seul escrow, mission FUNDED.
+    expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(1)
+    expect(
+      (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
+    ).toBe('FUNDED')
+  })
+
+  it('(7) échec Stripe (coupure réseau) → rollback DB : mission CREATED, aucun escrow', async () => {
+    const mission = await seedMission()
+
+    stripeFailMode = true
+    try {
+      const res = await fund(mission.id, bearer(buyerToken))
+      // L'erreur Stripe propage après rollback → 500 (gestionnaire d'erreurs route).
+      expect(res.statusCode).toBe(500)
+      expect(res.json()).toEqual({ error: 'INTERNAL_ERROR' })
+    } finally {
+      stripeFailMode = false
+    }
+
+    // Réservation RELÂCHÉE : mission de retour CREATED, aucun escrow committé.
+    expect(
+      (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
+    ).toBe('CREATED')
+    expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(0)
+
+    // Re-finançable : un nouvel essai (Stripe rétabli) aboutit normalement.
+    const retry = await fund(mission.id, bearer(buyerToken))
+    expect(retry.statusCode).toBe(200)
     expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(1)
     expect(
       (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
