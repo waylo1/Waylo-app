@@ -29,11 +29,13 @@ export default function LoginPage() {
     setError(null);
     setPending(true);
     try {
-      const { token } =
-        mode === "login"
-          ? await api.login(email, password)
-          : await api.register(email, password);
-      await signIn(token);
+      // login/register posent le cookie HttpOnly ; signIn() relit l'état.
+      if (mode === "login") {
+        await api.login(email, password);
+      } else {
+        await api.register(email, password);
+      }
+      await signIn();
       router.push("/missions");
     } catch (err) {
       setError(apiErrorMessage(err));

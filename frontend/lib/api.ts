@@ -11,8 +11,6 @@ import type {
 // Client API minimal. Le backend répond { error: 'SNAKE_CASE_CODE' } — on le
 // remonte tel quel via ApiError.code. JWT en Authorization: Bearer.
 
-const TOKEN_KEY = "waylo_token";
-
 export class ApiError extends Error {
   constructor(
     public readonly code: string,
@@ -23,33 +21,37 @@ export class ApiError extends Error {
   }
 }
 
-export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
-}
-
-export function setToken(token: string): void {
-  window.localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken(): void {
-  window.localStorage.removeItem(TOKEN_KEY);
-}
-
+// Auth par cookie HttpOnly : aucun jeton manipulé côté JS. `credentials:
+// "include"` envoie/reçoit le cookie ; un 401 déclenche UN refresh silencieux
+// puis rejoue la requête.
 async function apiFetch<T>(
   path: string,
   init: { method?: "GET" | "POST"; body?: unknown } = {},
+  retryOn401 = true,
 ): Promise<T> {
   const headers: Record<string, string> = {};
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
 
   const res = await fetch(`/api${path}`, {
     method: init.method ?? "GET",
     headers,
+    credentials: "include",
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
+
+  if (
+    res.status === 401 &&
+    retryOn401 &&
+    path !== "/auth/refresh" &&
+    path !== "/auth/login" &&
+    path !== "/auth/register"
+  ) {
+    const refreshed = await fetch(`/api/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+    });
+    if (refreshed.ok) return apiFetch<T>(path, init, false);
+  }
 
   if (!res.ok) {
     let code = "UNKNOWN_ERROR";
@@ -79,6 +81,12 @@ export const login = (email: string, password: string) =>
   });
 
 export const me = () => apiFetch<AuthUser>("/auth/me");
+
+export const refresh = () =>
+  apiFetch<{ token: string }>("/auth/refresh", { method: "POST" });
+
+export const logout = () =>
+  apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" });
 
 // --- Missions ---
 

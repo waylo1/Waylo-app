@@ -7,6 +7,7 @@ import escrowRoute from './escrow/escrow.route'
 import type { PaymentIntentClient } from './missions/mission.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
+import { readAuthCookie } from './auth/cookie'
 import { AlertSink } from './alerts'
 
 declare module '@fastify/jwt' {
@@ -49,6 +50,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.decorate('authenticate', async (req: FastifyRequest, reply: FastifyReply) => {
     try {
+      // Authorization: Bearer prioritaire (clients/tests) ; à défaut, le jeton
+      // du cookie HttpOnly est injecté en en-tête pour réutiliser jwtVerify
+      // (vérification + typage de req.user identiques aux deux chemins).
+      const header = req.headers.authorization
+      if (!(typeof header === 'string' && header.startsWith('Bearer '))) {
+        const token = readAuthCookie(req.headers.cookie)
+        if (token) req.headers.authorization = `Bearer ${token}`
+      }
       await req.jwtVerify()
     } catch {
       await reply.code(401).send({ error: 'UNAUTHORIZED' })

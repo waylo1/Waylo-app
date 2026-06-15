@@ -12,16 +12,17 @@ import { useRouter } from "next/navigation";
 import * as api from "./api";
 import type { AuthUser } from "./types";
 
-// Session JWT côté client : jeton en localStorage, profil relu via /auth/me.
-// `status` évite le flash de redirection pendant l'hydratation.
+// Session par cookie HttpOnly : aucun jeton lisible côté JS. Le statut est
+// dérivé de /auth/me (le cookie est envoyé automatiquement). `status` évite le
+// flash de redirection pendant l'hydratation.
 
 type AuthStatus = "loading" | "authenticated" | "anonymous";
 
 interface AuthContextValue {
   status: AuthStatus;
   user: AuthUser | null;
-  signIn: (token: string) => Promise<void>;
-  signOut: () => void;
+  signIn: () => Promise<void>;
+  signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -37,13 +38,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     status: AuthStatus;
     user: AuthUser | null;
   }> => {
-    if (!api.getToken()) return { status: "anonymous", user: null };
     try {
+      // Le cookie est envoyé d'office ; /me valide la session (avec refresh 401).
       const profile = await api.me();
       return { status: "authenticated", user: profile };
     } catch {
-      // Jeton expiré/invalide : purge et retour anonyme.
-      api.clearToken();
       return { status: "anonymous", user: null };
     }
   }, []);
@@ -60,18 +59,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [fetchAuthState]);
 
-  const signIn = useCallback(
-    async (token: string) => {
-      api.setToken(token);
-      const next = await fetchAuthState();
-      setUser(next.user);
-      setStatus(next.status);
-    },
-    [fetchAuthState],
-  );
+  // Le cookie a déjà été posé par /auth/login|register : on relit l'état.
+  const signIn = useCallback(async () => {
+    const next = await fetchAuthState();
+    setUser(next.user);
+    setStatus(next.status);
+  }, [fetchAuthState]);
 
-  const signOut = useCallback(() => {
-    api.clearToken();
+  const signOut = useCallback(async () => {
+    try {
+      await api.logout(); // purge le cookie HttpOnly côté serveur
+    } catch {
+      // best-effort
+    }
     setUser(null);
     setStatus("anonymous");
     router.push("/login");

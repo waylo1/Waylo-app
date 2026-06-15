@@ -3,6 +3,7 @@ import argon2 from 'argon2'
 import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
 import { isRateLimited } from '../rate-limit'
+import { clearAuthCookie, serializeAuthCookie } from './cookie'
 
 /** Anti-brute-force : 429 au-delà du seuil, clé par route + IP + email. */
 const authRateLimit =
@@ -84,7 +85,11 @@ const authRoute: FastifyPluginAsync = async app => {
         data: { email: email.toLowerCase(), passwordHash },
       })
       const token = app.jwt.sign({ sub: user.id }, { expiresIn: TOKEN_TTL })
-      return await reply.code(201).send({ token })
+      // Cookie HttpOnly émis ; { token } conservé pour compat (clients non-navigateur).
+      return await reply
+        .header('set-cookie', serializeAuthCookie(token))
+        .code(201)
+        .send({ token })
     } catch (err) {
       if (isUniqueViolation(err)) {
         return reply.code(409).send({ error: 'EMAIL_ALREADY_REGISTERED' })
@@ -103,7 +108,20 @@ const authRoute: FastifyPluginAsync = async app => {
       return reply.code(401).send({ error: 'INVALID_CREDENTIALS' }) // générique, voulu
     }
     const token = app.jwt.sign({ sub: user.id }, { expiresIn: TOKEN_TTL })
-    return reply.code(200).send({ token })
+    return reply.header('set-cookie', serializeAuthCookie(token)).code(200).send({ token })
+  })
+
+  // POST /auth/refresh — session glissante : un jeton VALIDE (cookie ou Bearer)
+  // est ré-émis (cookie HttpOnly rafraîchi). 401 si la session est expirée.
+  app.post('/refresh', { preHandler: app.authenticate }, async (req, reply) => {
+    const token = app.jwt.sign({ sub: req.user.sub }, { expiresIn: TOKEN_TTL })
+    return reply.header('set-cookie', serializeAuthCookie(token)).code(200).send({ token })
+  })
+
+  // POST /auth/logout — purge le cookie d'auth (pas d'auth requise : permet de
+  // nettoyer une session même expirée).
+  app.post('/logout', async (_req, reply) => {
+    return reply.header('set-cookie', clearAuthCookie()).code(200).send({ ok: true })
   })
 
   // Route protégée : valide le middleware ET sert au frontend. Relit la DB :
