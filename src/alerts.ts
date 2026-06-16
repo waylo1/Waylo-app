@@ -32,6 +32,7 @@ export type AlertCode =
   | 'STALE_FUNDING_ROLLED_BACK'
   | 'FUNDING_RECON_CANCEL_FAILED'
   | 'ORPHAN_FUNDING_RECOVERED'
+  | 'CUSTOMS_LOCK_CAPTURED'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -72,6 +73,7 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   STALE_FUNDING_ROLLED_BACK: 'warn', // réservation abandonnée nettoyée (argent jamais pris) — visibilité, transitoire normal
   FUNDING_RECON_CANCEL_FAILED: 'ops', // rollback DB OK mais PI Stripe non annulé : hold résiduel (auto-expire), action de nettoyage
   ORPHAN_FUNDING_RECOVERED: 'ops', // mission FUNDED sans escrow (crash window) réparée depuis le PI Stripe — état financier restauré
+  CUSTOMS_LOCK_CAPTURED: 'critical', // capture Stripe sur mission en verrou douanier : fonds pris sans libération possible
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {

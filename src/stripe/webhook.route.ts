@@ -381,6 +381,27 @@ async function handleCapture(
     },
   })
 
+  const missionForCheck = await tx.mission.findUnique({
+    where: { id: escrow.missionId },
+    select: { status: true },
+  })
+  if (
+    missionForCheck?.status === MissionStatus.ESCROW_LOCKED_CUSTOMS ||
+    missionForCheck?.status === MissionStatus.PENDING_CUSTOMS_REVIEW
+  ) {
+    abortAlert({
+      code: 'CUSTOMS_LOCK_CAPTURED',
+      message: 'Capture Stripe sur mission en verrou douanier — fonds captures sans liberation possible',
+      details: {
+        cause: 'CUSTOMS_LOCK_CAPTURED',
+        escrowId: escrow.id,
+        missionId: escrow.missionId,
+        missionStatus: missionForCheck.status,
+      },
+    })
+    throw new WebhookAbortError('CUSTOMS_LOCK_CAPTURED')
+  }
+
   await tx.mission.updateMany({
     // VALIDATED = mission passée par la route /validate (T1) ; AWAITING_VALIDATION =
     // capture déclenchée hors route (rejeu, flux legacy). Les deux convergent vers RELEASED.
