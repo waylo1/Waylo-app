@@ -35,6 +35,7 @@ export type AlertCode =
   | 'CUSTOMS_LOCK_CAPTURED'
   | 'CUSTOMS_RECEIPT_REJECTED'
   | 'CUSTOMS_TIMEOUT_REFUND_FAILED'
+  | 'COLLECTION_TIMEOUT_CAPTURE_FAILED'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -78,6 +79,7 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   CUSTOMS_LOCK_CAPTURED: 'critical', // capture Stripe sur mission en verrou douanier : fonds pris sans libération possible
   CUSTOMS_RECEIPT_REJECTED: 'warn', // quittance douanière refusée par l'ops : voyageur à notifier (re-soumission) — argent sûr et bloqué, action connue
   CUSTOMS_TIMEOUT_REFUND_FAILED: 'ops', // annulation PI échouée côté Stripe pour timeout douanier > 7 j : mission reste bloquée, action manuelle requise
+  COLLECTION_TIMEOUT_CAPTURE_FAILED: 'critical', // capture échouée (carte expirée / erreur Stripe) sur timeout collecte > 5 j : autorisation vieillissante, voyageur impayé, risque de hold non capturable → humain requis
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {

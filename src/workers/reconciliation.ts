@@ -63,6 +63,13 @@ export interface StripeReconciliationClient {
     retrieve(id: string): Promise<{ amount_received: number }>
     /** Annule un PI non encore capturé (HELD). Utilisé pour le timeout douanier. */
     cancel(id: string, opts?: { idempotencyKey?: string }): Promise<{ id: string }>
+    /** Capture (T1) un PI HELD. Utilisé pour le timeout collecte (auto-libération).
+     *  Signature 3-arg (id, params, options) = SDK Stripe réel : idempotencyKey en options. */
+    capture(
+      id: string,
+      params: { amount_to_capture?: number },
+      options: { idempotencyKey: string },
+    ): Promise<{ id: string }>
   }
 }
 
@@ -351,6 +358,66 @@ export async function runReconciliation(
             type: LedgerType.REFUND,
             amountCents: 0,
           },
+        })
+      })
+    }
+  }
+
+  // ── 7. Timeout collecte acheteur — missions DEPOSITED > 5 jours ────────────
+  // L'acheteur n'a pas confirmé la collecte du colis déposé pendant 5 jours : on
+  // libère automatiquement le séquestre vers le voyageur (auto-confirmation).
+  // Miroir AUTOMATISÉ de /confirm-collection — MÊME chemin financier, MÊMES invariants :
+  // capture Stripe HORS tx → DEPOSITED → VALIDATED (transitoire) → le webhook
+  // payment_intent.succeeded journalise PAYOUT/COMMISSION + crée le TransferOutbox
+  // (transfer-worker = unique exécutant) → RELEASED. AUCUNE écriture ledger ici
+  // (portée par le webhook), AUCUN transfers.create (pattern outbox préservé).
+  if (deps.stripe) {
+    const COLLECTION_TIMEOUT_DAYS = 5
+    const collectionTimeoutCutoff = new Date(Date.now() - COLLECTION_TIMEOUT_DAYS * 24 * 3600 * 1000)
+    const stalledCollection = await prisma.mission.findMany({
+      where: {
+        status: MissionStatus.DEPOSITED,
+        dropoffAt: { lt: collectionTimeoutCutoff },
+      },
+      select: {
+        id: true,
+        escrow: { select: { stripePaymentIntentId: true, status: true } },
+      },
+    })
+
+    for (const mission of stalledCollection) {
+      // Sans escrow HELD, rien à capturer (déjà libéré/refundé/annulé) — on saute.
+      if (!mission.escrow || mission.escrow.status !== EscrowStatus.HELD) continue
+
+      try {
+        await deps.stripe.paymentIntents.capture(
+          mission.escrow.stripePaymentIntentId,
+          {},
+          { idempotencyKey: `timeout_collection_${mission.id}` },
+        )
+      } catch (err) {
+        // Échec technique (carte expirée, erreur Stripe) : la capture n'a pas eu
+        // lieu, le voyageur n'est pas payé, l'autorisation vieillit → intervention
+        // humaine. Alerte critique, et on continue la boucle (pas d'arrêt du worker).
+        emit({
+          code: 'COLLECTION_TIMEOUT_CAPTURE_FAILED',
+          message: 'Capture Stripe échouée pour timeout collecte — mission DEPOSITED > 5 j, intervention humaine requise',
+          details: {
+            missionId: mission.id,
+            stripePaymentIntentId: mission.escrow.stripePaymentIntentId,
+            err: String(err),
+          },
+        })
+        continue
+      }
+
+      // Transition conditionnelle (anti-TOCTOU) DEPOSITED → VALIDATED. count 0 =
+      // collecte déjà confirmée par l'acheteur / tick concurrent : bénin (la capture
+      // est idempotente et le webhook finalisera) — pas d'alerte.
+      await prisma.$transaction(async tx => {
+        await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.DEPOSITED },
+          data: { status: MissionStatus.VALIDATED },
         })
       })
     }

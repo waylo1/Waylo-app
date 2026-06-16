@@ -153,6 +153,12 @@ journalise `PAYOUT`/`COMMISSION` + crée le `TransferOutbox` PENDING → le tran
 (unique exécutant) exécute `transfers.create` → `RELEASED`. Aucune valeur d'enum `COMPLETED`
 ni champ `travelerRewardCents` : le gain voyageur = `PAYOUT = capturé − commission` (invariant §3).
 
+**Timeout collecte (SLA 5 jours)** : si l'acheteur ne confirme pas, `runReconciliation` §7
+auto-libère toute mission `DEPOSITED` dont `dropoffAt` > 5 jours — même chemin que
+`/confirm-collection` (capture `timeout_collection_<id>` hors tx → `VALIDATED` → webhook →
+`RELEASED`). Échec de capture (carte expirée / erreur Stripe) → alerte **critique**
+`COLLECTION_TIMEOUT_CAPTURE_FAILED` (mission reste `DEPOSITED`, intervention humaine), boucle non interrompue.
+
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
 
@@ -173,6 +179,7 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
    | `capture_<missionId>` | `paymentIntents.capture` (T1) | `/validate`, `/receive`, `captureEscrowFunds` |
    | `capture_customs_<missionId>` | `paymentIntents.capture` (T1-douane) | `/customs-approve` — chemin admin, distinct du chemin buyer |
    | `capture_collection_<missionId>` | `paymentIntents.capture` (T1-collecte) | `/confirm-collection` — chemin acheteur depuis `DEPOSITED` ; le transfert aval réutilise `transfer_marchand_<id>` (webhook → outbox → worker) |
+   | `timeout_collection_<missionId>` | `paymentIntents.capture` (T1-timeout) | `runReconciliation` §7 — auto-libération si `DEPOSITED` > 5 j (acheteur inactif) ; même aval que la collecte manuelle |
    | `refund_customs_<missionId>` | `paymentIntents.cancel` (timeout) | worker `runReconciliation` section 6 (SLA > 7 j) |
    | `transfer_marchand_<missionId>` | `transfers.create` (T4) | `handleCapture` → réutilisée telle quelle par le worker |
 
@@ -200,6 +207,10 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   + **section 6 timeout douanier** : `ESCROW_LOCKED_CUSTOMS` > 7 j → `paymentIntents.cancel`
   (`refund_customs_<id>`) → `$transaction(mission→REFUNDED + LedgerEntry REFUND 0)` ;
   échec Stripe → alerte `CUSTOMS_TIMEOUT_REFUND_FAILED` (ops) + `continue`.
+  + **section 7 timeout collecte** : `DEPOSITED` (`dropoffAt` > 5 j) + escrow `HELD` →
+  `paymentIntents.capture` (`timeout_collection_<id>`, hors tx) → `$transaction(mission→VALIDATED)` ;
+  ledger/outbox portés par le webhook (aucune écriture comptable, aucun `transfers.create` ici) ;
+  échec Stripe → alerte critique `COLLECTION_TIMEOUT_CAPTURE_FAILED` + `continue`.
 - **funding-reconciliation** (~15 min) : rollback financements abandonnés (uniquement
   PI `requires_payment_method|requires_confirmation` — jamais `requires_capture`) +
   réparation des missions `FUNDED` orphelines (sans escrow).
@@ -265,7 +276,15 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   — le versement passe par le chemin outbox existant (invariant §5 : worker = unique exécutant)
   et le gain voyageur reste `PAYOUT = capturé − commission` (préserve l'invariant ledger B).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **19 fichiers,
-118 tests verts** (107 sprints douane + 7 dropoff + 5 collecte). Fichiers dépôt : `schema.prisma`,
-migration `20260616201254_add_dropoff_to_mission`, `mission.route.ts`, `dropoff-receipt.test.ts`.
-Fichiers collecte : `mission.route.ts`, `confirm-collection.test.ts`, ce fichier.
+### Worker Timeout Collecte — `runReconciliation` §7
+- **Worker** [`reconciliation.ts`](../src/workers/reconciliation.ts) §7 + [`alerts.ts`](../src/alerts.ts) :
+  auto-libération des missions `DEPOSITED` inactives > 5 j (`dropoffAt`). Capture
+  `timeout_collection_<id>` hors tx → `DEPOSITED → VALIDATED` (le webhook finalise comme
+  pour la collecte manuelle). Nouveau code d'alerte `COLLECTION_TIMEOUT_CAPTURE_FAILED`
+  (**critical**) sur échec de capture. Aucun `transfers.create` ni écriture ledger dans le
+  worker (pattern outbox + invariant B préservés). Miroir capture du timeout douanier §6.
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **20 fichiers,
+122 tests verts** (107 douane + 7 dropoff + 5 collecte + 4 timeout collecte). Fichiers timeout
+collecte : `reconciliation.ts`, `alerts.ts`, `capture-lifecycle.test.ts` (stub fake),
+`reconciliation.test.ts` (nouveau), ce fichier.
