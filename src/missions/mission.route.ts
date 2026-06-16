@@ -130,6 +130,9 @@ class DropoffConflictError extends Error {}
 /** Transition DEPOSITED → VALIDATED perdue (course / double confirmation de collecte). */
 class CollectionConflictError extends Error {}
 
+/** Transition DEPOSITED → DISPUTED perdue (course / collecte confirmée entre-temps). */
+class DisputeConflictError extends Error {}
+
 interface CustomsReceiptBody {
   customsReceiptUrl: string
   customsReceiptSha256: string
@@ -180,6 +183,20 @@ const dropoffReceiptBodySchema = {
     dropoffReceiptUrl: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^https?://.+' },
     // Numéro de suivi transporteur — optionnel, borné (anti-abus de payload).
     dropoffTrackingNumber: { type: 'string', minLength: 1, maxLength: 200 },
+  },
+} as const
+
+interface DisputeBody {
+  disputeReason?: string
+}
+
+const disputeBodySchema = {
+  type: 'object',
+  required: [],
+  additionalProperties: false,
+  properties: {
+    // Motif libre OPTIONNEL — borné (anti-abus de payload). Pas d'URL ici : texte brut.
+    disputeReason: { type: 'string', minLength: 1, maxLength: 2000 },
   },
 } as const
 
@@ -939,6 +956,63 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     const confirmed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     return reply.code(200).send(confirmed)
   })
+
+  // POST /api/missions/:id/dispute — l'ACHETEUR ouvre un litige sur un colis déposé
+  // (depuis DEPOSITED). GÈLE la mission : DEPOSITED → DISPUTED. Effet de sécurité —
+  // DISPUTED n'est ciblé par AUCUN worker de timeout (ni la capture auto §7 collecte,
+  // ni le refund auto §6 douane) : plus aucune exécution automatique, arbitrage humain.
+  // Réservé à l'acheteur (404 masquant pour un tiers/voyageur — invariant IDOR).
+  app.post(
+    '/:id/dispute',
+    { schema: { params: missionIdParamsSchema, body: disputeBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'en est pas
+      // l'acheteur (voyageur/tiers) — les deux cas indistinguables.
+      const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+
+      // Garde d'état : le litige ne s'ouvre QUE depuis DEPOSITED (strict). Déjà
+      // VALIDATED/RELEASED (collecte confirmée, fonds en cours de versement) → 400.
+      if (mission.status !== MissionStatus.DEPOSITED) {
+        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+      }
+
+      const { disputeReason } = req.body as DisputeBody
+
+      // Transaction atomique : SEULE écriture = transition conditionnelle (anti-TOCTOU)
+      // DEPOSITED → DISPUTED + motif + horodatage SERVEUR. Aucun mouvement d'argent.
+      try {
+        await prisma.$transaction(async tx => {
+          const updated = await tx.mission.updateMany({
+            where: { id: mission.id, status: MissionStatus.DEPOSITED },
+            data: {
+              status: MissionStatus.DISPUTED,
+              disputeReason: disputeReason ?? null,
+              disputedAt: new Date(),
+            },
+          })
+          if (updated.count !== 1) throw new DisputeConflictError()
+        })
+      } catch (err) {
+        if (err instanceof DisputeConflictError) {
+          return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+        }
+        throw err
+      }
+
+      const disputed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+      // Alerte critique POST-COMMIT (hors transaction) : un sink défaillant ne casse
+      // jamais la route et n'annule pas le litige déjà committé (convention safeEmit).
+      // Bloque toute exécution automatique côté ops : arbitrage humain requis.
+      safeEmit(opts.onAlert, {
+        code: 'MISSION_DISPUTED_BY_BUYER',
+        message: 'Litige ouvert par l\'acheteur sur une mission déposée — fonds gelés, arbitrage humain requis',
+        details: { missionId: id, buyerId: mission.buyerId, travelerId: mission.travelerId },
+      })
+      return reply.code(200).send(disputed)
+    },
+  )
 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
   // Réservé aux comptes isAdmin. Retourne id, montants, quittance déposée par le

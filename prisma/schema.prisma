@@ -30,6 +30,7 @@ enum MissionStatus {
   AWAITING_VALIDATION
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   DEPOSITED // le voyageur a déposé/remis le colis (preuve de dépôt + tracking) ; atteint depuis MATCHED ou VALIDATED (post-douane) via /dropoff-receipt
+  DISPUTED // litige ouvert par l'acheteur depuis DEPOSITED (/dispute) ; GÈLE la mission : retirée des workers de timeout (capture/refund auto), résolution humaine requise
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
   REFUNDED
@@ -108,6 +109,8 @@ model Mission {
   dropoffReceiptUrl    String?   // preuve de dépôt du colis par le voyageur (posée via /dropoff-receipt) ; null = pas encore déposé
   dropoffTrackingNumber String?  // numéro de suivi optionnel du dépôt (transporteur)
   dropoffAt            DateTime? // horodatage serveur du dépôt (jamais l'horloge du device)
+  disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
+  disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt

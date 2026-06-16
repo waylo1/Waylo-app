@@ -42,6 +42,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/submit-receipt` | **voyageur** ; refuse montant > budget ; scelle Receipt |
 | POST | `/:id/dropoff-receipt` | **voyageur** assigné (404 masquant pour un tiers) ; garde d'état `{MATCHED, VALIDATED}` (400 `INVALID_MISSION_STATE`) ; → `DEPOSITED` (preuve + tracking + `dropoffAt` serveur) |
 | POST | `/:id/confirm-collection` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; escrow HELD check → capture Stripe hors tx (`capture_collection_<id>`) → `DEPOSITED → VALIDATED` (transitoire) ; webhook → `RELEASED`. Aucun `transfers.create` ni ledger direct (chemin outbox existant) |
+| POST | `/:id/dispute` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; motif optionnel (Ajv ≤ 2000) ; `$transaction` → `DISPUTED` + `disputeReason`/`disputedAt` ; alerte critique post-commit `MISSION_DISPUTED_BY_BUYER`. Gèle la mission (aucun mouvement d'argent) |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
@@ -124,6 +125,7 @@ PENDING_CUSTOMS_REVIEW ──/customs-reject (admin)──▶ ESCROW_LOCKED_CUST
 AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (transitoire)
 {MATCHED | VALIDATED} ──/dropoff-receipt (voyageur, preuve de dépôt)──▶ DEPOSITED
 DEPOSITED ──/confirm-collection (acheteur, capture Stripe)──▶ VALIDATED (transitoire)
+DEPOSITED ──/dispute (acheteur, motif optionnel)──▶ DISPUTED (gel, arbitrage humain)
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
 webhook capture sans compte Connect vérifié ──▶ AWAITING_TRAVELER_ACCOUNT
 charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCELLED
@@ -158,6 +160,12 @@ auto-libère toute mission `DEPOSITED` dont `dropoffAt` > 5 jours — même chem
 `/confirm-collection` (capture `timeout_collection_<id>` hors tx → `VALIDATED` → webhook →
 `RELEASED`). Échec de capture (carte expirée / erreur Stripe) → alerte **critique**
 `COLLECTION_TIMEOUT_CAPTURE_FAILED` (mission reste `DEPOSITED`, intervention humaine), boucle non interrompue.
+
+**Litige acheteur (gel)** : `/dispute` fait passer `DEPOSITED → DISPUTED` et enregistre
+`disputeReason?` + `disputedAt` (serveur). `DISPUTED` n'est ciblé par **aucun** worker de
+timeout (ni §7 collecte sur `DEPOSITED`, ni §6 douane sur `ESCROW_LOCKED_CUSTOMS`) : la
+transition gèle de facto toute exécution automatique. Alerte critique post-commit
+`MISSION_DISPUTED_BY_BUYER` (arbitrage humain). Aucun mouvement d'argent (escrow reste `HELD`).
 
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
@@ -284,7 +292,21 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   (**critical**) sur échec de capture. Aucun `transfers.create` ni écriture ledger dans le
   worker (pattern outbox + invariant B préservés). Miroir capture du timeout douanier §6.
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **20 fichiers,
-122 tests verts** (107 douane + 7 dropoff + 5 collecte + 4 timeout collecte). Fichiers timeout
-collecte : `reconciliation.ts`, `alerts.ts`, `capture-lifecycle.test.ts` (stub fake),
-`reconciliation.test.ts` (nouveau), ce fichier.
+### Module Litige Acheteur — statut `DISPUTED`
+- **Schéma** [`schema.prisma`](../prisma/schema.prisma) : valeur d'enum `MissionStatus.DISPUTED`
+  + colonnes nullable `disputeReason` / `disputedAt` sur `Mission`. Migration
+  `20260616205254_add_dispute_to_mission` (enum `ADD VALUE` + colonnes nullable, rétro-compatible).
+- **Route** [`mission.route.ts`](../src/missions/mission.route.ts) : `POST /:id/dispute`
+  réservée à l'**acheteur** (`findMissionForBuyer` → 404 masquant). Garde d'état strict
+  `DEPOSITED` (400 `INVALID_MISSION_STATE`). `$transaction` conditionnelle (anti-TOCTOU)
+  `DEPOSITED → DISPUTED` + motif/horodatage serveur. Alerte critique **post-commit**
+  `MISSION_DISPUTED_BY_BUYER` ([`alerts.ts`](../src/alerts.ts)) — convention safeEmit
+  (hors tx, ne casse pas la route). **Sécurité fonds** : `DISPUTED` gèle la mission (hors
+  périmètre des workers de timeout §6/§7), aucun mouvement d'argent (escrow reste `HELD`).
+  > Décision : migration (enum + 2 colonnes) autorisée par l'instruction §4 ; alerte émise
+  > post-commit (et non « dans la $transaction ») conformément à la convention safeEmit du codebase.
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **21 fichiers,
+128 tests verts** (+6 litige). Fichiers litige : `schema.prisma`, migration
+`20260616205254_add_dispute_to_mission`, `alerts.ts`, `mission.route.ts`, `dispute.test.ts`
+(nouveau), ce fichier.
