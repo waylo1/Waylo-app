@@ -41,6 +41,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/ship` | **voyageur** ; refuse `purchaseAmountCents > budget` |
 | POST | `/:id/submit-receipt` | **voyageur** ; refuse montant > budget ; scelle Receipt |
 | POST | `/:id/dropoff-receipt` | **voyageur** assigné (404 masquant pour un tiers) ; garde d'état `{MATCHED, VALIDATED}` (400 `INVALID_MISSION_STATE`) ; → `DEPOSITED` (preuve + tracking + `dropoffAt` serveur) |
+| POST | `/:id/confirm-collection` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; escrow HELD check → capture Stripe hors tx (`capture_collection_<id>`) → `DEPOSITED → VALIDATED` (transitoire) ; webhook → `RELEASED`. Aucun `transfers.create` ni ledger direct (chemin outbox existant) |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
@@ -122,6 +123,7 @@ PENDING_CUSTOMS_REVIEW ──/customs-approve (admin, capture Stripe)──▶ V
 PENDING_CUSTOMS_REVIEW ──/customs-reject (admin)──▶ ESCROW_LOCKED_CUSTOMS (receipt effacé)
 AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (transitoire)
 {MATCHED | VALIDATED} ──/dropoff-receipt (voyageur, preuve de dépôt)──▶ DEPOSITED
+DEPOSITED ──/confirm-collection (acheteur, capture Stripe)──▶ VALIDATED (transitoire)
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
 webhook capture sans compte Connect vérifié ──▶ AWAITING_TRAVELER_ACCOUNT
 charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCELLED
@@ -143,6 +145,14 @@ via `/dropoff-receipt`. Champs scellés sur `Mission` : `dropoffReceiptUrl` (pre
 http(s) requis), `dropoffTrackingNumber?` (suivi transporteur, optionnel), `dropoffAt`
 (horodatage **serveur**, jamais le device). État sans capture financière (purement logistique).
 
+**Collecte acheteur** : `/confirm-collection` libère le séquestre depuis `DEPOSITED` SANS
+appel `transfers.create` ni écriture ledger directe — il emprunte le chemin financier existant
+(même contrat que `/validate` / `/customs-approve`) : capture Stripe hors tx (`capture_collection_<id>`)
+→ transition `DEPOSITED → VALIDATED` (transitoire) → le webhook `payment_intent.succeeded`
+journalise `PAYOUT`/`COMMISSION` + crée le `TransferOutbox` PENDING → le transfer-worker
+(unique exécutant) exécute `transfers.create` → `RELEASED`. Aucune valeur d'enum `COMPLETED`
+ni champ `travelerRewardCents` : le gain voyageur = `PAYOUT = capturé − commission` (invariant §3).
+
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
 
@@ -162,6 +172,7 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
    | `checkout_<missionId>` | `checkout.sessions.create` | `/checkout-session` |
    | `capture_<missionId>` | `paymentIntents.capture` (T1) | `/validate`, `/receive`, `captureEscrowFunds` |
    | `capture_customs_<missionId>` | `paymentIntents.capture` (T1-douane) | `/customs-approve` — chemin admin, distinct du chemin buyer |
+   | `capture_collection_<missionId>` | `paymentIntents.capture` (T1-collecte) | `/confirm-collection` — chemin acheteur depuis `DEPOSITED` ; le transfert aval réutilise `transfer_marchand_<id>` (webhook → outbox → worker) |
    | `refund_customs_<missionId>` | `paymentIntents.cancel` (timeout) | worker `runReconciliation` section 6 (SLA > 7 j) |
    | `transfer_marchand_<missionId>` | `transfers.create` (T4) | `handleCapture` → réutilisée telle quelle par le worker |
 
@@ -243,7 +254,18 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   400 `INVALID_INPUT`). Transition conditionnelle `updateMany` dans `$transaction` (anti-TOCTOU),
   `dropoffAt` scellé serveur. Aucun appel Stripe (état logistique, pas financier).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **18 fichiers,
-113 tests verts** (107 sprints douane + 7 dropoff). Fichiers du module dépôt : `schema.prisma`,
-migration `20260616201254_add_dropoff_to_mission`, `mission.route.ts`, `dropoff-receipt.test.ts`,
-ce fichier.
+### Module Collecte Acheteur — `/confirm-collection`
+- **Route** [`mission.route.ts`](../src/missions/mission.route.ts) : `POST /:id/confirm-collection`
+  réservée à l'**acheteur** (lookup `findMissionForBuyer` → **404 masquant**). Garde d'état
+  strict `DEPOSITED` (sinon 400 `INVALID_MISSION_STATE`) + précondition escrow `HELD`
+  (sinon 400 `ESCROW_NOT_HELD`). Capture Stripe **hors tx** (`capture_collection_<id>`) →
+  `$transaction` transition conditionnelle `DEPOSITED → VALIDATED` (anti-TOCTOU). Le webhook
+  finalise → `RELEASED`. **Décision d'archi** (vs spec littérale) : pas de `transfers.create`
+  inline, pas d'écriture ledger directe, pas de statut `COMPLETED` ni champ `travelerRewardCents`
+  — le versement passe par le chemin outbox existant (invariant §5 : worker = unique exécutant)
+  et le gain voyageur reste `PAYOUT = capturé − commission` (préserve l'invariant ledger B).
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **19 fichiers,
+118 tests verts** (107 sprints douane + 7 dropoff + 5 collecte). Fichiers dépôt : `schema.prisma`,
+migration `20260616201254_add_dropoff_to_mission`, `mission.route.ts`, `dropoff-receipt.test.ts`.
+Fichiers collecte : `mission.route.ts`, `confirm-collection.test.ts`, ce fichier.

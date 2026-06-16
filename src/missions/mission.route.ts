@@ -127,6 +127,9 @@ class CustomsReviewConflictError extends Error {}
 /** Transition {MATCHED | VALIDATED} → DEPOSITED perdue (course / double dépôt de colis). */
 class DropoffConflictError extends Error {}
 
+/** Transition DEPOSITED → VALIDATED perdue (course / double confirmation de collecte). */
+class CollectionConflictError extends Error {}
+
 interface CustomsReceiptBody {
   customsReceiptUrl: string
   customsReceiptSha256: string
@@ -875,6 +878,67 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(200).send(deposited)
     },
   )
+
+  // POST /api/missions/:id/confirm-collection — l'ACHETEUR confirme la collecte du
+  // colis déposé (depuis DEPOSITED) et déclenche la libération du séquestre vers le
+  // voyageur. AUCUN transfers.create ni écriture ledger ici : on emprunte le chemin
+  // financier existant (même contrat que /validate et /customs-approve) —
+  //   capture Stripe HORS tx → webhook payment_intent.succeeded journalise
+  //   PAYOUT/COMMISSION + crée le TransferOutbox PENDING → transfer-worker (seul
+  //   exécutant) exécute transfers.create → mission RELEASED (final).
+  // La route pose seulement l'état transitoire VALIDATED ; le webhook finalise.
+  // Réservé à l'acheteur (404 masquant pour un tiers/voyageur — invariant IDOR).
+  app.post('/:id/confirm-collection', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'en est pas
+    // l'acheteur (voyageur/tiers) — les deux cas indistinguables.
+    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+
+    // Garde d'état : la collecte ne se confirme QUE depuis DEPOSITED (strict).
+    if (mission.status !== MissionStatus.DEPOSITED) {
+      return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+    }
+
+    // Précondition escrow — lecture HORS transaction (règle d'or). Le séquestre
+    // doit être HELD : s'il est déjà RELEASED (webhook passé), 400 sans re-capturer.
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: mission.id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB (règle d'or). Clé déterministe propre à ce
+    // chemin : un retry après crash re-présente la même clé → un seul débit Stripe.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `capture_collection_${mission.id}` },
+    )
+
+    // Transaction atomique : SEULE écriture = transition conditionnelle (anti-TOCTOU)
+    // DEPOSITED → VALIDATED (transitoire). Aucune écriture comptable ici — le ledger
+    // (PAYOUT/COMMISSION) et le TransferOutbox sont portés par le webhook.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.DEPOSITED },
+          data: { status: MissionStatus.VALIDATED },
+        })
+        if (updated.count !== 1) throw new CollectionConflictError()
+      })
+    } catch (err) {
+      if (err instanceof CollectionConflictError) {
+        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+      }
+      throw err
+    }
+
+    const confirmed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    return reply.code(200).send(confirmed)
+  })
 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
   // Réservé aux comptes isAdmin. Retourne id, montants, quittance déposée par le
