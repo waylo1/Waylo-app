@@ -274,6 +274,19 @@ describe('API missions — création, consultation, autorisation par ressource',
       expect((await customsPending()).statusCode).toBe(401)
       expect((await customsApprove(sharedMissionId)).statusCode).toBe(401)
     })
+
+    it('fail-closed : JWT valide mais sub inconnu (compte supprimé) → 403, pas 401 ni 500', async () => {
+      // Verrou anti-régression : isRequestAdmin doit échouer fermé si le sub du
+      // JWT ne correspond à aucun User (token encore valide après suppression du
+      // compte). user?.isAdmin === true ⇒ false ⇒ 403 — jamais 500 (findUniqueOrThrow)
+      // ni 200. Un refactor qui inverserait la garde casserait ici.
+      const ghostToken = app.jwt.sign({ sub: 'cmghostuserid000000000000' })
+      const pending = await customsPending(bearer(ghostToken))
+      expect(pending.statusCode).toBe(403)
+      expect(pending.json()).toEqual({ error: 'FORBIDDEN' })
+      expect((await customsApprove(sharedMissionId, bearer(ghostToken))).statusCode).toBe(403)
+      expect((await customsReject(sharedMissionId, bearer(ghostToken))).statusCode).toBe(403)
+    })
   })
 
   // ── Garde douane /validate (D4) ───────────────────────────────────────────
