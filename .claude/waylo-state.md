@@ -1,7 +1,7 @@
 # Waylo — État du système (source de vérité technique)
 
-> Snapshot factuel du backend après **Sprint 1 sécurité (D-a, D-c)**.
-> Branche : `fix/sprint1-security-d-a-d-c`. Généré depuis le code, pas des suppositions.
+> Snapshot factuel du backend après **Sprints 1–4 (module Douane complet)**.
+> Branche courante : `fix/sprint2-customs-receipt-sha256` (contient S1–S4).
 > En cas de divergence code ↔ doc, **le code prime** — mettre ce fichier à jour.
 
 ---
@@ -43,7 +43,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
-| POST | `/:id/customs-approve` | **admin** (`isAdmin`) ; **[D-c] transition+audit atomiques** |
+| POST | `/:id/customs-approve` | **admin** (`isAdmin`) ; escrow HELD check → capture Stripe hors tx (`capture_customs_<id>`) → **[D-c+S4] PENDING_CUSTOMS_REVIEW → VALIDATED + audit atomiques** ; webhook → RELEASED |
 | POST | `/:id/customs-reject` | **admin** ; **[D-c] atomique** + alerte post-commit |
 | GET | `/api/missions/customs-pending` | **admin** ; file de revue |
 
@@ -79,7 +79,9 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 - **JIT fail-safe** : doute / erreur DB / carte inconnue / escrow non `HELD` → `approved:false`.
 - **Auth** : argon2 ; JWT `{ sub }` (identité seule, aucun rôle) ; rate-limit register/login/receive/customs-receipt.
 - **Entrées** : schémas Ajv stricts ; URLs `^https?://` (anti-XSS stocké) ; pas de
-  fetch serveur des URLs (anti-SSRF) ; `destinationCountry` ISO-2 requis.
+  fetch serveur des URLs (anti-SSRF) ; `destinationCountry` ISO-2 requis ;
+  `customsReceiptSha256` : pattern `^[a-f0-9]{64}$` requis (**[D-b]** — hash des octets
+  du document calculé côté client avant upload ; scellement content-addressed).
 - **Webhooks** : `constructEvent()` obligatoire (signature), même en dev ; parser raw
   scopé à chaque plugin Stripe.
 
@@ -115,7 +117,7 @@ IN_PROGRESS ──/submit-receipt──▶ AWAITING_VALIDATION
 IN_PROGRESS ──/receive (sous seuil douanier)──▶ VALIDATED (transitoire)
 IN_PROGRESS ──/receive (≥ seuil, quittance absente)──▶ ESCROW_LOCKED_CUSTOMS
 ESCROW_LOCKED_CUSTOMS ──/customs-receipt (voyageur)──▶ PENDING_CUSTOMS_REVIEW
-PENDING_CUSTOMS_REVIEW ──/customs-approve (admin)──▶ IN_PROGRESS
+PENDING_CUSTOMS_REVIEW ──/customs-approve (admin, capture Stripe)──▶ VALIDATED (transitoire)
 PENDING_CUSTOMS_REVIEW ──/customs-reject (admin)──▶ ESCROW_LOCKED_CUSTOMS (receipt effacé)
 AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (transitoire)
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
@@ -124,8 +126,15 @@ charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCEL
 ```
 
 Tous les états douaniers (`ESCROW_LOCKED_CUSTOMS`, `PENDING_CUSTOMS_REVIEW`) gardent
-l'escrow **`HELD`** : la capture y est interdite (gardes §2). Seuils de minimis :
-[`customs.ts`](../src/missions/customs.ts) (US 800, GB 450, UE 430, reste 150 — unités entières).
+l'escrow **`HELD`** : la capture via `/validate` et `/api/escrow/:id/capture` y est
+interdite (gardes §2). La capture est déclenchée par `/customs-approve` (chemin admin)
+avec la clé `capture_customs_<missionId>` — distincte du chemin buyer (`capture_<missionId>`).
+Après `VALIDATED` (transitoire), le webhook `payment_intent.succeeded` écrit le ledger
+(CAPTURE + PAYOUT + COMMISSION), crée le `TransferOutbox` et finalise en **RELEASED**.
+Seuils de minimis : [`customs.ts`](../src/missions/customs.ts) (US 800, GB 450, UE 430,
+reste 150 — unités entières). **Timeout SLA** : missions bloquées en `ESCROW_LOCKED_CUSTOMS`
+> 7 jours → annulation PI Stripe (`refund_customs_<id>`) + mission `REFUNDED` par le
+worker de réconciliation (section 6).
 
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
@@ -145,6 +154,8 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
    | `fund_<missionId>` | `paymentIntents.create` (T0) | `/intent` |
    | `checkout_<missionId>` | `checkout.sessions.create` | `/checkout-session` |
    | `capture_<missionId>` | `paymentIntents.capture` (T1) | `/validate`, `/receive`, `captureEscrowFunds` |
+   | `capture_customs_<missionId>` | `paymentIntents.capture` (T1-douane) | `/customs-approve` — chemin admin, distinct du chemin buyer |
+   | `refund_customs_<missionId>` | `paymentIntents.cancel` (timeout) | worker `runReconciliation` section 6 (SLA > 7 j) |
    | `transfer_marchand_<missionId>` | `transfers.create` (T4) | `handleCapture` → réutilisée telle quelle par le worker |
 
 3. **Contraintes `@unique` DB** : `EscrowTransaction.{missionId, stripePaymentIntentId,
@@ -167,27 +178,52 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
 (jamais 2 runs concurrents) + arrêt gracieux :
 - **transfer-worker** (~1 min) : `PENDING|FAILED(backoff 2^n)|SUBMITTED(>15 min)` →
   `SUBMITTED` → `SETTLED | FAILED | ABANDONED` (terminal après M=5, alerte unique).
-- **reconciliation** (~24 h, boot différé 15 min) : invariants A/B/C + croisements Stripe.
+- **reconciliation** (~24 h, boot différé 15 min) : invariants A/B/C + croisements Stripe
+  + **section 6 timeout douanier** : `ESCROW_LOCKED_CUSTOMS` > 7 j → `paymentIntents.cancel`
+  (`refund_customs_<id>`) → `$transaction(mission→REFUNDED + LedgerEntry REFUND 0)` ;
+  échec Stripe → alerte `CUSTOMS_TIMEOUT_REFUND_FAILED` (ops) + `continue`.
 - **funding-reconciliation** (~15 min) : rollback financements abandonnés (uniquement
   PI `requires_payment_method|requires_confirmation` — jamais `requires_capture`) +
   réparation des missions `FUNDED` orphelines (sans escrow).
 
 ---
 
-## 7. Sprint 1 — correctifs appliqués
+## 7. Module Douane — correctifs Sprints 1–4
 
+### Sprint 1 — Sécurité (D-a, D-c) · commit `15d81f4`
 - **D-a** [`escrow.route.ts`](../src/escrow/escrow.route.ts) : `POST /api/escrow/:missionId/capture`
-  reçoit la garde acheteur (404 masquant, ferme l'IDOR) + garde douane (409
+  reçoit la garde acheteur (404 masquant, **ferme l'IDOR**) + garde douane (409
   `CUSTOMS_LOCK_ACTIVE`) avant toute capture.
 - **D-c** [`mission.route.ts`](../src/missions/mission.route.ts) : `customs-approve` et
   `customs-reject` écrivent la transition `Mission` **et** la ligne `AdminAuditLog`
   dans **une seule** `prisma.$transaction()` (plus de trou d'audit si le write échoue).
-  L'alerte `CUSTOMS_RECEIPT_REJECTED` reste **post-commit** (hors transaction).
+  L'alerte `CUSTOMS_RECEIPT_REJECTED` reste post-commit.
 
-> ⚠️ **Décision de convention** : la garde douane renvoie `{ error: 'CUSTOMS_LOCK_ACTIVE' }`
-> (clé `error`) et non `{ code: ... }` comme suggéré, pour rester cohérent avec le
-> contrat d'erreur du reste du codebase (CLAUDE.md). À rebasculer en `code` si voulu.
+> Convention : `{ error: 'CUSTOMS_LOCK_ACTIVE' }` (clé `error`, cohérent avec CLAUDE.md).
 
-**État de validation** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → 17 fichiers,
-106 tests verts. Périmètre des modifications : `escrow.route.ts`, `mission.route.ts`,
-+ ce fichier. Aucun autre fichier touché.
+### Sprint 2 — Intégrité preuve douanière (D-b) · commit `b7c4f03`
+- **D-b** [`mission.route.ts`](../src/missions/mission.route.ts) : `POST /:id/customs-receipt`
+  accepte `customsReceiptSha256` **du client** (sha256 des octets du document, calculé avant
+  upload) au lieu d'un hash serveur de la chaîne URL. Schema Ajv `^[a-f0-9]{64}$` requis.
+  Scellement content-addressed réel : l'admin peut vérifier le hash contre le document.
+
+### Sprint 3 — Timeout & refund douane (D-d) · commit `0ed03ce`
+- **D-d** [`reconciliation.ts`](../src/workers/reconciliation.ts) **section 6** :
+  détecte `ESCROW_LOCKED_CUSTOMS` > 7 jours → `paymentIntents.cancel` (PI non capturé,
+  `idempotencyKey: refund_customs_<id>`) → `$transaction(mission→REFUNDED + LedgerEntry REFUND 0)`.
+  Échec Stripe → alerte `CUSTOMS_TIMEOUT_REFUND_FAILED` (ops, persistante) + continue.
+  Nouveau code d'alerte ajouté dans [`alerts.ts`](../src/alerts.ts).
+
+### Sprint 4 — Clôture financière douane (D-e) · commit `91d9ea2`
+- **D-e** [`mission.route.ts`](../src/missions/mission.route.ts) : `POST /:id/customs-approve`
+  clôt désormais le flow financier : escrow lookup (HELD check) → `paymentIntents.capture`
+  **hors** `$transaction` (règle d'or) avec `idempotencyKey: capture_customs_<missionId>` →
+  `$transaction(PENDING_CUSTOMS_REVIEW → VALIDATED + AdminAuditLog)`. Le webhook
+  `payment_intent.succeeded` prend le relais : ledger CAPTURE + PAYOUT + COMMISSION +
+  TransferOutbox + escrow RELEASED + **mission RELEASED** (final). Un retry admin après crash
+  re-présente la même clé à Stripe (idempotent) puis réessaie la `$transaction`.
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → 17 fichiers,
+106 tests verts (après chaque sprint). Fichiers modifiés au total : `escrow.route.ts`,
+`mission.route.ts`, `reconciliation.ts`, `alerts.ts`, `capture-lifecycle.test.ts`,
+`customs-approve.test.ts`, `mission.route.test.ts`, ce fichier.
