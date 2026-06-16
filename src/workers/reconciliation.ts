@@ -3,6 +3,7 @@ import {
   AuthDecision,
   EscrowStatus,
   LedgerType,
+  MissionStatus,
   TransferStatus,
 } from '../generated/prisma'
 import { AlertSink, OpsAlert, OpsAlertInput, safeEmit } from '../alerts'
@@ -58,7 +59,11 @@ export type ReconciliationAlert = OpsAlert
 /** Surface Stripe minimale — confronte le ledger à l'état d'argent RÉEL. */
 export interface StripeReconciliationClient {
   transfers: { retrieve(id: string): Promise<unknown> }
-  paymentIntents: { retrieve(id: string): Promise<{ amount_received: number }> }
+  paymentIntents: {
+    retrieve(id: string): Promise<{ amount_received: number }>
+    /** Annule un PI non encore capturé (HELD). Utilisé pour le timeout douanier. */
+    cancel(id: string, opts?: { idempotencyKey?: string }): Promise<{ id: string }>
+  }
 }
 
 export interface ReconciliationDeps {
@@ -294,6 +299,61 @@ export async function runReconciliation(
         approvedAt: auth.createdAt.toISOString(),
       },
     })
+  }
+
+  // ── 6. Timeout douanier — missions ESCROW_LOCKED_CUSTOMS > 7 jours ─────────
+  // Une mission sans re-soumission de quittance pendant 7 jours dépasse le SLA
+  // (rules.md §2 : timeout = annulation/remboursement). Le PI est toujours en
+  // requires_capture (jamais capturé depuis ce statut) : on l'annule côté Stripe
+  // puis on clôt atomiquement mission + entrée REFUND (amountCents = 0 car pré-capture).
+  if (deps.stripe) {
+    const CUSTOMS_TIMEOUT_DAYS = 7
+    const customsTimeoutCutoff = new Date(Date.now() - CUSTOMS_TIMEOUT_DAYS * 24 * 3600 * 1000)
+    const stalledCustoms = await prisma.mission.findMany({
+      where: {
+        status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
+        updatedAt: { lt: customsTimeoutCutoff },
+      },
+      select: {
+        id: true,
+        escrow: { select: { id: true, stripePaymentIntentId: true } },
+      },
+    })
+
+    for (const mission of stalledCustoms) {
+      if (!mission.escrow) continue
+
+      try {
+        await deps.stripe.paymentIntents.cancel(mission.escrow.stripePaymentIntentId, {
+          idempotencyKey: `refund_customs_${mission.id}`,
+        })
+      } catch (err) {
+        emit({
+          code: 'CUSTOMS_TIMEOUT_REFUND_FAILED',
+          message: 'Annulation Stripe échouée pour timeout douanier — mission ESCROW_LOCKED_CUSTOMS > 7 j',
+          details: {
+            missionId: mission.id,
+            stripePaymentIntentId: mission.escrow.stripePaymentIntentId,
+            err: String(err),
+          },
+        })
+        continue
+      }
+
+      await prisma.$transaction(async tx => {
+        await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
+          data: { status: MissionStatus.REFUNDED },
+        })
+        await tx.ledgerEntry.create({
+          data: {
+            escrowId: mission.escrow!.id,
+            type: LedgerType.REFUND,
+            amountCents: 0,
+          },
+        })
+      })
+    }
   }
 
   return alerts

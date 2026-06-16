@@ -34,6 +34,7 @@ export type AlertCode =
   | 'ORPHAN_FUNDING_RECOVERED'
   | 'CUSTOMS_LOCK_CAPTURED'
   | 'CUSTOMS_RECEIPT_REJECTED'
+  | 'CUSTOMS_TIMEOUT_REFUND_FAILED'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -76,6 +77,7 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   ORPHAN_FUNDING_RECOVERED: 'ops', // mission FUNDED sans escrow (crash window) réparée depuis le PI Stripe — état financier restauré
   CUSTOMS_LOCK_CAPTURED: 'critical', // capture Stripe sur mission en verrou douanier : fonds pris sans libération possible
   CUSTOMS_RECEIPT_REJECTED: 'warn', // quittance douanière refusée par l'ops : voyageur à notifier (re-soumission) — argent sûr et bloqué, action connue
+  CUSTOMS_TIMEOUT_REFUND_FAILED: 'ops', // annulation PI échouée côté Stripe pour timeout douanier > 7 j : mission reste bloquée, action manuelle requise
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {
