@@ -126,11 +126,12 @@ class CustomsReviewConflictError extends Error {}
 
 interface CustomsReceiptBody {
   customsReceiptUrl: string
+  customsReceiptSha256: string
 }
 
 const customsReceiptBodySchema = {
   type: 'object',
-  required: ['customsReceiptUrl'],
+  required: ['customsReceiptUrl', 'customsReceiptSha256'],
   additionalProperties: false,
   properties: {
     // Sécurise l'upload : URL http(s) pointant un PDF ou une image
@@ -142,6 +143,13 @@ const customsReceiptBodySchema = {
       minLength: 1,
       maxLength: 2048,
       pattern: '^https?://.+\\.([pP][dD][fF]|[pP][nN][gG]|[jJ][pP][eE]?[gG]|[wW][eE][bB][pP])(\\?.*)?$',
+    },
+    // sha256 hex des octets du document calculé côté client avant upload —
+    // scellement content-addressed : l'admin peut vérifier le hash contre le
+    // document téléchargé depuis customsReceiptUrl.
+    customsReceiptSha256: {
+      type: 'string',
+      pattern: '^[a-f0-9]{64}$',
     },
   },
 } as const
@@ -661,8 +669,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
       }
 
-      const { customsReceiptUrl } = req.body as CustomsReceiptBody
-      const sha256 = createHash('sha256').update(`${mission.id}:${customsReceiptUrl}`).digest('hex')
+      const { customsReceiptUrl, customsReceiptSha256 } = req.body as CustomsReceiptBody
 
       try {
         await prisma.$transaction(async tx => {
@@ -671,7 +678,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
             data: {
               status: MissionStatus.PENDING_CUSTOMS_REVIEW,
               customsReceiptUrl,
-              customsReceiptSha256: sha256,
+              customsReceiptSha256,
             },
           })
           if (updated.count !== 1) throw new CustomsConflictError()
