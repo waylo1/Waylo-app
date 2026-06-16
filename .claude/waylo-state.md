@@ -40,6 +40,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/start-travel` | **voyageur** assigné |
 | POST | `/:id/ship` | **voyageur** ; refuse `purchaseAmountCents > budget` |
 | POST | `/:id/submit-receipt` | **voyageur** ; refuse montant > budget ; scelle Receipt |
+| POST | `/:id/dropoff-receipt` | **voyageur** assigné (404 masquant pour un tiers) ; garde d'état `{MATCHED, VALIDATED}` (400 `INVALID_MISSION_STATE`) ; → `DEPOSITED` (preuve + tracking + `dropoffAt` serveur) |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
@@ -120,6 +121,7 @@ ESCROW_LOCKED_CUSTOMS ──/customs-receipt (voyageur)──▶ PENDING_CUSTOMS
 PENDING_CUSTOMS_REVIEW ──/customs-approve (admin, capture Stripe)──▶ VALIDATED (transitoire)
 PENDING_CUSTOMS_REVIEW ──/customs-reject (admin)──▶ ESCROW_LOCKED_CUSTOMS (receipt effacé)
 AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (transitoire)
+{MATCHED | VALIDATED} ──/dropoff-receipt (voyageur, preuve de dépôt)──▶ DEPOSITED
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
 webhook capture sans compte Connect vérifié ──▶ AWAITING_TRAVELER_ACCOUNT
 charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCELLED
@@ -135,6 +137,11 @@ Seuils de minimis : [`customs.ts`](../src/missions/customs.ts) (US 800, GB 450, 
 reste 150 — unités entières). **Timeout SLA** : missions bloquées en `ESCROW_LOCKED_CUSTOMS`
 > 7 jours → annulation PI Stripe (`refund_customs_<id>`) + mission `REFUNDED` par le
 worker de réconciliation (section 6).
+
+**Dépôt voyageur** : `DEPOSITED` est atteint depuis `MATCHED` ou `VALIDATED` (post-douane)
+via `/dropoff-receipt`. Champs scellés sur `Mission` : `dropoffReceiptUrl` (preuve de dépôt,
+http(s) requis), `dropoffTrackingNumber?` (suivi transporteur, optionnel), `dropoffAt`
+(horodatage **serveur**, jamais le device). État sans capture financière (purement logistique).
 
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
@@ -223,7 +230,20 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   TransferOutbox + escrow RELEASED + **mission RELEASED** (final). Un retry admin après crash
   re-présente la même clé à Stripe (idempotent) puis réessaie la `$transaction`.
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → 17 fichiers,
-106 tests verts (après chaque sprint). Fichiers modifiés au total : `escrow.route.ts`,
-`mission.route.ts`, `reconciliation.ts`, `alerts.ts`, `capture-lifecycle.test.ts`,
-`customs-approve.test.ts`, `mission.route.test.ts`, ce fichier.
+### Module Dépôt Voyageur — statut `DEPOSITED`
+- **Schéma** [`schema.prisma`](../prisma/schema.prisma) : nouvelle valeur d'enum `MissionStatus.DEPOSITED`
+  + 3 colonnes nullable sur `Mission` (`dropoffReceiptUrl`, `dropoffTrackingNumber`, `dropoffAt`).
+  Migration `20260616201254_add_dropoff_to_mission` (enum `ADD VALUE` + colonnes nullable,
+  rétro-compatible : aucun backfill requis).
+- **Route** [`mission.route.ts`](../src/missions/mission.route.ts) : `POST /:id/dropoff-receipt`
+  réservée au **voyageur assigné** — lookup `findMissionForTraveler` → **404 masquant** pour
+  un tiers/acheteur (jamais 403 : pas d'oracle d'existence, même invariant IDOR que tout le
+  module). Garde d'état `{MATCHED, VALIDATED}` (sinon 400 `INVALID_MISSION_STATE`) ; body Ajv
+  `dropoffReceiptUrl` (http(s) requis, anti-XSS) + `dropoffTrackingNumber?` optionnel (sinon
+  400 `INVALID_INPUT`). Transition conditionnelle `updateMany` dans `$transaction` (anti-TOCTOU),
+  `dropoffAt` scellé serveur. Aucun appel Stripe (état logistique, pas financier).
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **18 fichiers,
+113 tests verts** (107 sprints douane + 7 dropoff). Fichiers du module dépôt : `schema.prisma`,
+migration `20260616201254_add_dropoff_to_mission`, `mission.route.ts`, `dropoff-receipt.test.ts`,
+ce fichier.

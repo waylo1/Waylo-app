@@ -29,6 +29,7 @@ enum MissionStatus {
   PENDING_CUSTOMS_REVIEW // quittance déposée par le voyageur : en attente de validation ops/admin (le bénéficiaire ne lève pas son propre verrou)
   AWAITING_VALIDATION
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
+  DEPOSITED // le voyageur a déposé/remis le colis (preuve de dépôt + tracking) ; atteint depuis MATCHED ou VALIDATED (post-douane) via /dropoff-receipt
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
   REFUNDED
@@ -104,6 +105,9 @@ model Mission {
   customsReceiptUrl  String? // preuve de paiement des taxes (posée par le voyageur via /customs-receipt) ; null = non fournie
   customsReceiptSha256 String? // scellé serveur de la quittance douanière
   saleSignature   String? // sha256 du certificat de revente (généré à la confirmation de réception, /receive)
+  dropoffReceiptUrl    String?   // preuve de dépôt du colis par le voyageur (posée via /dropoff-receipt) ; null = pas encore déposé
+  dropoffTrackingNumber String?  // numéro de suivi optionnel du dépôt (transporteur)
+  dropoffAt            DateTime? // horodatage serveur du dépôt (jamais l'horloge du device)
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt

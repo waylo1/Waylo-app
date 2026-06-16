@@ -124,6 +124,9 @@ class CustomsConflictError extends Error {}
 /** Transition PENDING_CUSTOMS_REVIEW → (IN_PROGRESS | ESCROW_LOCKED_CUSTOMS) perdue (course / double décision ops). */
 class CustomsReviewConflictError extends Error {}
 
+/** Transition {MATCHED | VALIDATED} → DEPOSITED perdue (course / double dépôt de colis). */
+class DropoffConflictError extends Error {}
+
 interface CustomsReceiptBody {
   customsReceiptUrl: string
   customsReceiptSha256: string
@@ -158,6 +161,24 @@ interface SubmitReceiptBody {
   urlRecu: string
   purchaseAmountCents: number
 }
+
+interface DropoffReceiptBody {
+  dropoffReceiptUrl: string
+  dropoffTrackingNumber?: string
+}
+
+const dropoffReceiptBodySchema = {
+  type: 'object',
+  required: ['dropoffReceiptUrl'],
+  additionalProperties: false,
+  properties: {
+    // Schéma http(s) obligatoire : rejette javascript:/data: (anti-XSS stocké,
+    // la preuve de dépôt est rendue en href). Pas de fetch serveur de l'URL (anti-SSRF).
+    dropoffReceiptUrl: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^https?://.+' },
+    // Numéro de suivi transporteur — optionnel, borné (anti-abus de payload).
+    dropoffTrackingNumber: { type: 'string', minLength: 1, maxLength: 200 },
+  },
+} as const
 
 interface ShipBody {
   trackingReference: string
@@ -798,6 +819,62 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     })
     return reply.code(200).send(rejected)
   })
+
+  // POST /api/missions/:id/dropoff-receipt — le VOYAGEUR enregistre le dépôt/la
+  // remise du colis (preuve de dépôt + numéro de suivi optionnel). Transition
+  // conditionnelle {MATCHED | VALIDATED} → DEPOSITED. Réservé au voyageur assigné
+  // (404 masquant pour un tiers, jamais 403 : on ne révèle pas l'existence d'une
+  // mission — même invariant IDOR que tout le module, cf. mission-access.ts).
+  const DROPOFF_ALLOWED_STATUSES: MissionStatus[] = [
+    MissionStatus.MATCHED,
+    MissionStatus.VALIDATED,
+  ]
+  app.post(
+    '/:id/dropoff-receipt',
+    { schema: { params: missionIdParamsSchema, body: dropoffReceiptBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'est pas le
+      // voyageur assigné (acheteur/tiers) — les deux cas indistinguables.
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+
+      // Garde de sécurité financière : un dépôt n'est légitime que depuis un état
+      // valide (MATCHED, ou VALIDATED post-douane) — sinon 400 explicite AVANT
+      // toute écriture. Bloque un dépôt sur une mission déjà soldée/refundée/etc.
+      if (!DROPOFF_ALLOWED_STATUSES.includes(mission.status)) {
+        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+      }
+
+      const { dropoffReceiptUrl, dropoffTrackingNumber } = req.body as DropoffReceiptBody
+
+      // Transaction atomique : transition conditionnelle (anti-TOCTOU) + métadonnées
+      // de dépôt. dropoffAt = horloge SERVEUR (jamais le device). Tout rollback
+      // ensemble si la mission a quitté l'état attendu entre la lecture et l'écriture.
+      try {
+        await prisma.$transaction(async tx => {
+          const updated = await tx.mission.updateMany({
+            where: { id: mission.id, status: { in: DROPOFF_ALLOWED_STATUSES } },
+            data: {
+              status: MissionStatus.DEPOSITED,
+              dropoffReceiptUrl,
+              dropoffTrackingNumber: dropoffTrackingNumber ?? null,
+              dropoffAt: new Date(),
+            },
+          })
+          if (updated.count !== 1) throw new DropoffConflictError()
+        })
+      } catch (err) {
+        if (err instanceof DropoffConflictError) {
+          return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+        }
+        throw err
+      }
+
+      const deposited = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+      return reply.code(200).send(deposited)
+    },
+  )
 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
   // Réservé aux comptes isAdmin. Retourne id, montants, quittance déposée par le
