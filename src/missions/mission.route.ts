@@ -121,6 +121,9 @@ class ReceiveConflictError extends Error {}
 /** Transition ESCROW_LOCKED_CUSTOMS → IN_PROGRESS perdue (course / double dépôt de quittance). */
 class CustomsConflictError extends Error {}
 
+/** Transition PENDING_CUSTOMS_REVIEW → (IN_PROGRESS | ESCROW_LOCKED_CUSTOMS) perdue (course / double décision ops). */
+class CustomsReviewConflictError extends Error {}
+
 interface CustomsReceiptBody {
   customsReceiptUrl: string
 }
@@ -693,17 +696,27 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const { id } = req.params as { id: string }
-    const updated = await prisma.mission.updateMany({
-      where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-      data: { status: MissionStatus.IN_PROGRESS },
-    })
-    if (updated.count !== 1) {
-      return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+    // Transition + audit ATOMIQUES (D-c) : la décision ops et sa trace
+    // AdminAuditLog committent ensemble ou pas du tout — un échec du write
+    // d'audit rollback la transition (plus de trou d'audit post-commit). La
+    // transition reste conditionnelle (anti-TOCTOU) : rowcount 0 → 400.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+          data: { status: MissionStatus.IN_PROGRESS },
+        })
+        if (updated.count !== 1) throw new CustomsReviewConflictError()
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'CUSTOMS_APPROVE', missionId: id },
+        })
+      })
+    } catch (err) {
+      if (err instanceof CustomsReviewConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+      }
+      throw err
     }
-    // Audit append-only de la décision ops/admin (après l'action réussie).
-    await prisma.adminAuditLog.create({
-      data: { adminId: req.user.sub, action: 'CUSTOMS_APPROVE', missionId: id },
-    })
     const approved = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(approved)
   })
@@ -716,25 +729,34 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const { id } = req.params as { id: string }
-    const updated = await prisma.mission.updateMany({
-      where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-      data: {
-        status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
-        customsReceiptUrl: null,
-        customsReceiptSha256: null,
-      },
-    })
-    if (updated.count !== 1) {
-      return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+    // Transition + audit ATOMIQUES (D-c), même motif que customs-approve : le
+    // nettoyage de la quittance, le retour en verrou et la trace d'audit
+    // committent ensemble ou pas du tout. Transition conditionnelle (anti-TOCTOU).
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+          data: {
+            status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
+            customsReceiptUrl: null,
+            customsReceiptSha256: null,
+          },
+        })
+        if (updated.count !== 1) throw new CustomsReviewConflictError()
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'CUSTOMS_REJECT', missionId: id },
+        })
+      })
+    } catch (err) {
+      if (err instanceof CustomsReviewConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+      }
+      throw err
     }
-    // Audit append-only de la décision ops/admin (après l'action réussie).
-    await prisma.adminAuditLog.create({
-      data: { adminId: req.user.sub, action: 'CUSTOMS_REJECT', missionId: id },
-    })
     const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
     // Notification voyageur (D5) : quittance refusée → re-soumission attendue.
-    // safeEmit dérive la sévérité du code (warn) et garantit qu'un sink défaillant
-    // ne casse jamais la route. travelerId = cible ; missionId = référence.
+    // safeEmit POST-COMMIT (hors transaction) : un sink défaillant ne casse jamais
+    // la route et n'annule pas la décision déjà committée. travelerId = cible.
     safeEmit(opts.onAlert, {
       code: 'CUSTOMS_RECEIPT_REJECTED',
       message: 'Quittance douanière refusée — voyageur à notifier (nouvelle soumission attendue)',

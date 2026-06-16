@@ -1,4 +1,7 @@
 import { FastifyPluginAsync } from 'fastify'
+import { prisma } from '../db'
+import { MissionStatus } from '../generated/prisma'
+import { findMissionForBuyer } from '../missions/mission-access'
 import type { PaymentIntentClient } from '../missions/mission.route'
 import { captureEscrowFunds, EscrowCaptureError } from '../services/escrow.service'
 
@@ -10,9 +13,20 @@ import { captureEscrowFunds, EscrowCaptureError } from '../services/escrow.servi
  * vérité (escrow → RELEASED, ledger, mission → RELEASED) reste portée par le
  * webhook payment_intent.succeeded — jamais dupliquée ici.
  *
- * Mapping des erreurs typées du service :
- *   ESCROW_NOT_FOUND → 404 (l'escrow n'existe pas)
- *   ESCROW_NOT_HELD  → 400 (statut non capturable)
+ * Gardes AVANT toute capture (D-a) — ce chemin hors tunnel partage la même
+ * exigence de sécurité que POST /api/missions/:id/validate :
+ *   1. Autorisation PAR RESSOURCE : seul l'ACHETEUR de la mission peut capturer.
+ *      Sans elle, tout utilisateur authentifié pouvait déclencher la capture du
+ *      séquestre de n'importe quelle mission (IDOR).
+ *   2. Garde douane : refus si la mission est sous verrou douanier — sinon la
+ *      capture contourne la garde de /validate et le webhook tape son backstop
+ *      CUSTOMS_LOCK_CAPTURED (fonds pris côté Stripe sans libération possible).
+ *
+ * Mapping des erreurs :
+ *   MISSION_NOT_FOUND   → 404 (mission inexistante OU appelant non-acheteur, indistinguables)
+ *   CUSTOMS_LOCK_ACTIVE → 409 (verrou douanier actif : ESCROW_LOCKED_CUSTOMS | PENDING_CUSTOMS_REVIEW)
+ *   ESCROW_NOT_FOUND    → 404 (l'escrow n'existe pas)
+ *   ESCROW_NOT_HELD     → 400 (statut non capturable)
  */
 export interface EscrowRouteOptions {
   stripe: PaymentIntentClient
@@ -40,6 +54,22 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
     { schema: { params: missionIdParamsSchema } },
     async (req, reply) => {
       const { missionId } = req.params as { missionId: string }
+
+      // Garde 1 — autorisation PAR RESSOURCE (D-a) : 404 si la mission n'existe
+      // pas OU si l'appelant n'en est pas l'acheteur (voyageur/tiers) — les deux
+      // cas indistinguables, l'existence n'est jamais révélée à un tiers.
+      const mission = await findMissionForBuyer(prisma, missionId, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+
+      // Garde 2 — verrou douanier (D-a) : une mission en revue douanière ne peut
+      // JAMAIS être capturée par ce chemin (cf. la même garde dans /validate).
+      if (
+        mission.status === MissionStatus.ESCROW_LOCKED_CUSTOMS ||
+        mission.status === MissionStatus.PENDING_CUSTOMS_REVIEW
+      ) {
+        return reply.code(409).send({ error: 'CUSTOMS_LOCK_ACTIVE' })
+      }
+
       try {
         const result = await captureEscrowFunds(missionId, opts.stripe)
         return reply.code(200).send(result)
