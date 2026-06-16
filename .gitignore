@@ -16,3 +16,7 @@ coverage/
 
 # Artefacts runtime (sink des alertes critiques, cf. src/alerts.ts)
 alerts-critical.ndjson
+
+# Snapshots & scripts de debug locaux (non versionnés)
+waylo-snapshot.zip
+scripts/test-real-webhook-failed.mts
