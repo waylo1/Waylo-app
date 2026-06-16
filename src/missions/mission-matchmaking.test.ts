@@ -45,6 +45,7 @@ describe('Matchmaking & cycle voyageur — match / start-travel', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-match@test.waylo' } })

@@ -40,6 +40,7 @@ describe('Réconciliation financements abandonnés', () => {
     prisma = (await import('../db')).prisma
     await prisma.escrowTransaction.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
     buyer = await prisma.user.create({ data: { email: 'buyer-fundingrecon@test.waylo' } })
   })

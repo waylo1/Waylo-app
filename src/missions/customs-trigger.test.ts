@@ -56,6 +56,7 @@ describe('Trigger douanier — POST /api/missions/:id/receive', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-customs@test.waylo' } })

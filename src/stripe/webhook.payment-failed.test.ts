@@ -43,6 +43,7 @@ describe('POST /api/stripe/webhook — payment_intent.payment_failed', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     const buyer = await prisma.user.create({

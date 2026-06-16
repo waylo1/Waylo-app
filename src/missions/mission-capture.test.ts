@@ -61,6 +61,7 @@ describe('Validation acheteur T1 — POST /api/missions/:id/validate', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-capture@test.waylo' } })

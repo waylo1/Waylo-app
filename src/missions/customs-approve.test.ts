@@ -50,6 +50,7 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-ca@test.waylo' } })
@@ -98,6 +99,11 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
 
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     expect(db.status).toBe('IN_PROGRESS')
+
+    // Audit append-only : la décision admin est tracée (adminId, action, missionId).
+    const audit = await prisma.adminAuditLog.findMany({ where: { missionId: mission.id } })
+    expect(audit).toHaveLength(1)
+    expect(audit[0]).toMatchObject({ adminId: admin.id, action: 'CUSTOMS_APPROVE', missionId: mission.id })
   })
 
   it('(B) approve sur mission non-PENDING → 400 MISSION_NOT_CUSTOMS_REVIEW', async () => {
@@ -122,6 +128,11 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     expect(db.status).toBe('ESCROW_LOCKED_CUSTOMS')
     expect(db.customsReceiptUrl).toBeNull()
+
+    // Audit append-only : le rejet admin est tracé.
+    const audit = await prisma.adminAuditLog.findMany({ where: { missionId: mission.id } })
+    expect(audit).toHaveLength(1)
+    expect(audit[0]).toMatchObject({ adminId: admin.id, action: 'CUSTOMS_REJECT', missionId: mission.id })
   })
 
   it('(D) reject sur mission non-PENDING → 400 MISSION_NOT_CUSTOMS_REVIEW', async () => {

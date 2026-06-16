@@ -79,6 +79,7 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-funding@test.waylo' } })

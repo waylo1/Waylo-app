@@ -700,6 +700,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     if (updated.count !== 1) {
       return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
     }
+    // Audit append-only de la décision ops/admin (après l'action réussie).
+    await prisma.adminAuditLog.create({
+      data: { adminId: req.user.sub, action: 'CUSTOMS_APPROVE', missionId: id },
+    })
     const approved = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(approved)
   })
@@ -723,6 +727,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     if (updated.count !== 1) {
       return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
     }
+    // Audit append-only de la décision ops/admin (après l'action réussie).
+    await prisma.adminAuditLog.create({
+      data: { adminId: req.user.sub, action: 'CUSTOMS_REJECT', missionId: id },
+    })
     const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
     // Notification voyageur (D5) : quittance refusée → re-soumission attendue.
     // safeEmit dérive la sévérité du code (warn) et garantit qu'un sink défaillant

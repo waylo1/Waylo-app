@@ -85,6 +85,7 @@ model User {
 
   missionsAsBuyer    Mission[] @relation("BuyerMissions")
   missionsAsTraveler Mission[] @relation("TravelerMissions")
+  adminAuditLogs     AdminAuditLog[]
 }
 
 model Mission {
@@ -222,5 +223,20 @@ model IssuingAuthorizationLog {
 
   // Audit KYC/AML : append-only, jamais purgé, pas de soft-delete
 
+  @@index([missionId])
+}
+
+model AdminAuditLog {
+  id        String   @id @default(cuid())
+  adminId   String
+  action    String // CUSTOMS_APPROVE | CUSTOMS_REJECT | … — décision ops/admin
+  missionId String? // référence de mission concernée (null si action globale)
+  at        DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id])
+
+  // Audit des décisions ops/admin : append-only, jamais d'UPDATE ni de DELETE.
+
+  @@index([adminId])
   @@index([missionId])
 }

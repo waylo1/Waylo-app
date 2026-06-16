@@ -32,6 +32,7 @@ describe('TransferOutbox — worker de transfert & réconciliation', () => {
     await prisma.escrowTransaction.deleteMany()
     await prisma.processedStripeEvent.deleteMany()
     await prisma.mission.deleteMany()
+    await prisma.adminAuditLog.deleteMany()
     await prisma.user.deleteMany()
 
     const buyer = await prisma.user.create({
