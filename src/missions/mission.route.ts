@@ -9,6 +9,7 @@ import {
 } from './mission-access'
 import { getCustomsThreshold } from './customs'
 import { isRateLimited } from '../rate-limit'
+import { safeEmit, type AlertSink } from '../alerts'
 
 /**
  * Garde ops/admin : autorisation par le flag `isAdmin` en base (source de
@@ -98,6 +99,8 @@ export interface PaymentIntentClient {
 
 export interface MissionRouteOptions {
   stripe: PaymentIntentClient
+  /** Hook d'alertes opérationnelles (cf. src/alerts.ts). Défaut : log structuré stderr. */
+  onAlert?: AlertSink
 }
 
 /** Transition AWAITING_VALIDATION → VALIDATED perdue (course / double validation). */
@@ -721,12 +724,14 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
     }
     const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
-    // Stub notification : log structuré consommable par un futur service d'alertes
-    // voyageur (email/push). Le travelerId est la cible ; missionId la référence.
-    req.log.info(
-      { missionId: id, travelerId: rejected.travelerId, event: 'CUSTOMS_RECEIPT_REJECTED' },
-      'customs: quittance refusée — voyageur à notifier',
-    )
+    // Notification voyageur (D5) : quittance refusée → re-soumission attendue.
+    // safeEmit dérive la sévérité du code (warn) et garantit qu'un sink défaillant
+    // ne casse jamais la route. travelerId = cible ; missionId = référence.
+    safeEmit(opts.onAlert, {
+      code: 'CUSTOMS_RECEIPT_REJECTED',
+      message: 'Quittance douanière refusée — voyageur à notifier (nouvelle soumission attendue)',
+      details: { missionId: id, travelerId: rejected.travelerId },
+    })
     return reply.code(200).send(rejected)
   })
 

@@ -74,7 +74,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
 
   await app.register(authRoute, { prefix: '/api/auth' })
-  await app.register(missionRoute, { prefix: '/api/missions', stripe: paymentClient })
+  await app.register(missionRoute, {
+    prefix: '/api/missions',
+    stripe: paymentClient,
+    onAlert: options.onAlert,
+  })
   await app.register(escrowRoute, { prefix: '/api/escrow', stripe: paymentClient })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
