@@ -487,6 +487,18 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     const mission = await findMissionForBuyer(prisma, id, req.user.sub)
     if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
 
+    // Garde douane (D4) : une mission en revue douanière (verrou posé par /receive
+    // ou quittance en attente de validation ops) ne peut JAMAIS être validée —
+    // 409 explicite AVANT tout appel Stripe : aucune capture tant que /customs-approve
+    // n'a pas levé le verrou. Précède le check de statut générique pour donner un
+    // code métier précis plutôt qu'un MISSION_NOT_AWAITING_VALIDATION trompeur.
+    if (
+      mission.status === MissionStatus.ESCROW_LOCKED_CUSTOMS ||
+      mission.status === MissionStatus.PENDING_CUSTOMS_REVIEW
+    ) {
+      return reply.code(409).send({ error: 'CUSTOMS_REVIEW_PENDING' })
+    }
+
     if (mission.status !== MissionStatus.AWAITING_VALIDATION) {
       // Inclut le 2e clic : la 1re validation a déjà posé VALIDATED.
       return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
+import type { PaymentIntentClient } from './mission.route'
 import { findMissionForBuyer, findMissionForParticipant } from './mission-access'
 
 /**
@@ -48,9 +49,24 @@ describe('API missions — création, consultation, autorisation par ressource',
   let adminToken: string
   let sharedMissionId: string
 
+  // Espion Stripe : prouve qu'une route bloquée n'a jamais tenté de capture.
+  const captureCalls: string[] = []
+  const fakeStripe: PaymentIntentClient = {
+    paymentIntents: {
+      create: async (params) => ({
+        id: `pi_mr_${params.metadata['missionId']}`,
+        client_secret: 'secret',
+      }),
+      capture: async (id) => {
+        captureCalls.push(id)
+        return { id }
+      },
+    },
+  }
+
   beforeAll(async () => {
     prisma = (await import('../db')).prisma
-    app = await (await import('../app')).buildApp()
+    app = await (await import('../app')).buildApp({ stripe: fakeStripe })
 
     await prisma.transferOutbox.deleteMany()
     await prisma.ledgerEntry.deleteMany()
@@ -256,6 +272,55 @@ describe('API missions — création, consultation, autorisation par ressource',
     it('non authentifié → 401 (avant la garde admin)', async () => {
       expect((await customsPending()).statusCode).toBe(401)
       expect((await customsApprove(sharedMissionId)).statusCode).toBe(401)
+    })
+  })
+
+  // ── Garde douane /validate (D4) ───────────────────────────────────────────
+  describe('garde douane — POST /:id/validate bloqué en revue douanière', () => {
+    const validate = (id: string, headers: Record<string, string> = {}) =>
+      app.inject({ method: 'POST', url: `/api/missions/${id}/validate`, headers })
+
+    async function seedCustoms(status: 'ESCROW_LOCKED_CUSTOMS' | 'PENDING_CUSTOMS_REVIEW') {
+      const mission = await prisma.mission.create({
+        data: {
+          buyerId: buyer.id,
+          travelerId: traveler.id,
+          status,
+          targetProduct: 'Article en douane',
+          budgetCents: 60_000,
+          commissionCents: 6_000,
+          destination: 'New York',
+          destinationCountry: 'US',
+          purchaseAmountCents: 60_000,
+          expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+        },
+      })
+      // Escrow HELD : si la garde échouait, /validate tenterait la capture Stripe.
+      await prisma.escrowTransaction.create({
+        data: {
+          missionId: mission.id,
+          stripePaymentIntentId: `pi_mr_${mission.id}`,
+          status: 'HELD',
+          spendingLimitCents: 60_000,
+          idempotencyKey: `escrow_fund_${mission.id}`,
+        },
+      })
+      return mission.id
+    }
+
+    it('statuts douane → 409 CUSTOMS_REVIEW_PENDING, aucune capture Stripe', async () => {
+      captureCalls.length = 0
+      for (const status of ['ESCROW_LOCKED_CUSTOMS', 'PENDING_CUSTOMS_REVIEW'] as const) {
+        const id = await seedCustoms(status)
+        const res = await validate(id, bearer(buyerToken))
+        expect(res.statusCode).toBe(409)
+        expect(res.json()).toEqual({ error: 'CUSTOMS_REVIEW_PENDING' })
+        // Le blocage est en lecture seule : statut inchangé.
+        const db = await prisma.mission.findUniqueOrThrow({ where: { id } })
+        expect(db.status).toBe(status)
+      }
+      // Aucune des deux requêtes n'a atteint Stripe (garde AVANT capture).
+      expect(captureCalls).toHaveLength(0)
     })
   })
 
