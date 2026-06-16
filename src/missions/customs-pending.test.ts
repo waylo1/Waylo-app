@@ -20,13 +20,11 @@ process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_async'
 process.env.STRIPE_ISSUING_WEBHOOK_SECRET = 'whsec_test_issuing'
 process.env.JWT_SECRET = 'jwt_test_secret_waylo'
 
-const ADMIN_ID = 'admin-customs-pending-test'
-process.env.ADMIN_USER_IDS = ADMIN_ID
-
 describe('GET /api/missions/customs-pending', () => {
   let app: FastifyInstance
   let prisma: PrismaClient
   let buyer: User
+  let admin: User
   let adminToken: string
   let buyerToken: string
 
@@ -55,7 +53,8 @@ describe('GET /api/missions/customs-pending', () => {
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-cp@test.waylo' } })
-    adminToken = app.jwt.sign({ sub: ADMIN_ID })
+    admin = await prisma.user.create({ data: { email: 'admin-cp@test.waylo', isAdmin: true } })
+    adminToken = app.jwt.sign({ sub: admin.id })
     buyerToken = app.jwt.sign({ sub: buyer.id })
   })
 

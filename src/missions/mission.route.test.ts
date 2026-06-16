@@ -41,9 +41,11 @@ describe('API missions — création, consultation, autorisation par ressource',
   let buyer: User
   let traveler: User
   let stranger: User
+  let admin: User
   let buyerToken: string
   let travelerToken: string
   let strangerToken: string
+  let adminToken: string
   let sharedMissionId: string
 
   beforeAll(async () => {
@@ -63,9 +65,11 @@ describe('API missions — création, consultation, autorisation par ressource',
     buyer = await prisma.user.create({ data: { email: 'buyer-mission@test.waylo' } })
     traveler = await prisma.user.create({ data: { email: 'traveler-mission@test.waylo' } })
     stranger = await prisma.user.create({ data: { email: 'stranger-mission@test.waylo' } })
+    admin = await prisma.user.create({ data: { email: 'admin-mission@test.waylo', isAdmin: true } })
     buyerToken = app.jwt.sign({ sub: buyer.id })
     travelerToken = app.jwt.sign({ sub: traveler.id })
     strangerToken = app.jwt.sign({ sub: stranger.id })
+    adminToken = app.jwt.sign({ sub: admin.id })
 
     // Mission partagée : buyer = acheteur, traveler = voyageur assigné.
     const shared = await prisma.mission.create({
@@ -219,6 +223,40 @@ describe('API missions — création, consultation, autorisation par ressource',
   it('GET liste — non authentifié → 401', async () => {
     const res = await listMissions()
     expect(res.statusCode).toBe(401)
+  })
+
+  // ── Garde admin (isAdmin en base, D1) ─────────────────────────────────────
+  describe('garde admin isAdmin — routes douane ops', () => {
+    const customsPending = (headers: Record<string, string> = {}) =>
+      app.inject({ method: 'GET', url: '/api/missions/customs-pending', headers })
+    const customsApprove = (id: string, headers: Record<string, string> = {}) =>
+      app.inject({ method: 'POST', url: `/api/missions/${id}/customs-approve`, headers })
+    const customsReject = (id: string, headers: Record<string, string> = {}) =>
+      app.inject({ method: 'POST', url: `/api/missions/${id}/customs-reject`, headers })
+
+    it('utilisateur isAdmin: false → 403 sur les trois routes admin', async () => {
+      // buyer/traveler/stranger sont tous isAdmin: false (défaut) — aucun ne franchit la garde.
+      const pending = await customsPending(bearer(buyerToken))
+      expect(pending.statusCode).toBe(403)
+      expect(pending.json()).toEqual({ error: 'FORBIDDEN' })
+      expect((await customsApprove(sharedMissionId, bearer(travelerToken))).statusCode).toBe(403)
+      expect((await customsReject(sharedMissionId, bearer(strangerToken))).statusCode).toBe(403)
+    })
+
+    it('utilisateur isAdmin: true → franchit la garde (jamais 403)', async () => {
+      // Contrôle positif : l'admin passe le 403. customs-pending répond 200 ;
+      // approve sur une mission non-PENDING répond 400 (règle métier), pas 403 —
+      // preuve que la garde discrimine bien sur isAdmin et non un refus global.
+      expect((await customsPending(bearer(adminToken))).statusCode).toBe(200)
+      const approve = await customsApprove(sharedMissionId, bearer(adminToken))
+      expect(approve.statusCode).toBe(400)
+      expect(approve.json()).toEqual({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+    })
+
+    it('non authentifié → 401 (avant la garde admin)', async () => {
+      expect((await customsPending()).statusCode).toBe(401)
+      expect((await customsApprove(sharedMissionId)).statusCode).toBe(401)
+    })
   })
 
   // ── Helper d’autorisation (direct) ────────────────────────────────────────

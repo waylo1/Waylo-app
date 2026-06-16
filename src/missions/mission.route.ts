@@ -10,13 +10,20 @@ import {
 import { getCustomsThreshold } from './customs'
 import { isRateLimited } from '../rate-limit'
 
-// Allowlist ops/admin (IDs utilisateur), via env. Hors-allowlist → pas d'approbation.
-const ADMIN_USER_IDS = new Set(
-  (process.env.ADMIN_USER_IDS ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean),
-)
+/**
+ * Garde ops/admin : autorisation par le flag `isAdmin` en base (source de
+ * vérité unique, auditable, modifiable à chaud) — remplace l'ancienne allowlist
+ * d'IDs portée par la variable d'environnement ADMIN_USER_IDS. Le voyageur
+ * bénéficiaire n'a jamais ce flag. true uniquement si l'utilisateur existe ET
+ * isAdmin === true ; tout autre cas (compte absent, flag false) → non-admin.
+ */
+async function isRequestAdmin(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { isAdmin: true },
+  })
+  return user?.isAdmin === true
+}
 
 /** preHandler de rate limit, clé par route + IP + utilisateur. 429 si dépassé. */
 const rateLimit =
@@ -664,10 +671,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   )
 
   // POST /api/missions/:id/customs-approve — validation ops/admin du verrou
-  // douanier : PENDING_CUSTOMS_REVIEW → IN_PROGRESS. Réservé à l'allowlist
-  // ADMIN_USER_IDS (le voyageur bénéficiaire en est exclu). 403 sinon.
+  // douanier : PENDING_CUSTOMS_REVIEW → IN_PROGRESS. Réservé aux comptes
+  // isAdmin (le voyageur bénéficiaire en est exclu). 403 sinon.
   app.post('/:id/customs-approve', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
-    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+    if (!(await isRequestAdmin(req.user.sub))) {
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const { id } = req.params as { id: string }
@@ -686,7 +693,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   // PENDING_CUSTOMS_REVIEW → ESCROW_LOCKED_CUSTOMS. Efface customsReceiptUrl/sha256
   // pour que le voyageur puisse soumettre un nouveau document. Admin-only.
   app.post('/:id/customs-reject', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
-    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+    if (!(await isRequestAdmin(req.user.sub))) {
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const { id } = req.params as { id: string }
@@ -712,10 +719,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   })
 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
-  // Réservé à l'allowlist ADMIN_USER_IDS. Retourne id, montants, quittance
-  // déposée par le voyageur (URL + sha256) et le pays de destination.
+  // Réservé aux comptes isAdmin. Retourne id, montants, quittance déposée par le
+  // voyageur (URL + sha256) et le pays de destination.
   app.get('/customs-pending', async (req, reply) => {
-    if (!ADMIN_USER_IDS.has(req.user.sub)) {
+    if (!(await isRequestAdmin(req.user.sub))) {
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const missions = await prisma.mission.findMany({
