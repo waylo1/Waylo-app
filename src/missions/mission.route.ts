@@ -696,22 +696,49 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   )
 
   // POST /api/missions/:id/customs-approve — validation ops/admin du verrou
-  // douanier : PENDING_CUSTOMS_REVIEW → IN_PROGRESS. Réservé aux comptes
-  // isAdmin (le voyageur bénéficiaire en est exclu). 403 sinon.
+  // douanier : PENDING_CUSTOMS_REVIEW → VALIDATED (transitoire, clôture financière).
+  // Réservé aux comptes isAdmin (le voyageur bénéficiaire en est exclu). 403 sinon.
+  //
+  // Le buyer a déjà confirmé la réception (/receive → ESCROW_LOCKED_CUSTOMS) : la
+  // résolution douanière déclenche directement la capture Stripe et positionne la
+  // mission en VALIDATED. Le webhook payment_intent.succeeded finalise en RELEASED
+  // (ledger CAPTURE/PAYOUT/COMMISSION + TransferOutbox) — jamais dupliqué ici.
+  //
+  // Ordre : escrow lookup → capture Stripe HORS tx (règle d'or) → $transaction
+  // atomique (transition + audit). Un retry admin après crash re-présente la même
+  // idempotencyKey à Stripe (idempotent, un seul débit) puis réessaie la $tx.
   app.post('/:id/customs-approve', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
       return reply.code(403).send({ error: 'FORBIDDEN' })
     }
     const { id } = req.params as { id: string }
+
+    // Vérification de l'escrow AVANT la capture — HORS transaction (règle d'or).
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB — même motif que /validate et /receive.
+    // Clé déterministe distincte du chemin buyer : un retry après un crash entre
+    // la capture et la $transaction ré-utilise la même clé → idempotent côté Stripe.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `capture_customs_${id}` },
+    )
+
     // Transition + audit ATOMIQUES (D-c) : la décision ops et sa trace
-    // AdminAuditLog committent ensemble ou pas du tout — un échec du write
-    // d'audit rollback la transition (plus de trou d'audit post-commit). La
-    // transition reste conditionnelle (anti-TOCTOU) : rowcount 0 → 400.
+    // AdminAuditLog committent ensemble ou pas du tout. Statut cible VALIDATED
+    // (transitoire) : le webhook payment_intent.succeeded finalise en RELEASED.
     try {
       await prisma.$transaction(async tx => {
         const updated = await tx.mission.updateMany({
           where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-          data: { status: MissionStatus.IN_PROGRESS },
+          data: { status: MissionStatus.VALIDATED },
         })
         if (updated.count !== 1) throw new CustomsReviewConflictError()
         await tx.adminAuditLog.create({

@@ -262,12 +262,12 @@ describe('API missions — création, consultation, autorisation par ressource',
 
     it('utilisateur isAdmin: true → franchit la garde (jamais 403)', async () => {
       // Contrôle positif : l'admin passe le 403. customs-pending répond 200 ;
-      // approve sur une mission non-PENDING répond 400 (règle métier), pas 403 —
+      // approve répond 400 (règle métier — mission sans escrow HELD), pas 403 —
       // preuve que la garde discrimine bien sur isAdmin et non un refus global.
       expect((await customsPending(bearer(adminToken))).statusCode).toBe(200)
       const approve = await customsApprove(sharedMissionId, bearer(adminToken))
       expect(approve.statusCode).toBe(400)
-      expect(approve.json()).toEqual({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
+      expect(approve.json()).toEqual({ error: 'ESCROW_NOT_HELD' })
     })
 
     it('non authentifié → 401 (avant la garde admin)', async () => {
