@@ -76,6 +76,7 @@ model User {
   // des relations Mission (buyerId / travelerId). Un même User peut être les deux.
   email            String    @unique
   passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
+  isAdmin          Boolean   @default(false) // flag ops/admin (source de vérité unique, auditable) — remplace l'allowlist ADMIN_USER_IDS via env
   kycStatus        KycStatus @default(PENDING)
   stripeCustomerId String?   @unique // acheteur
   stripeAccountId  String?   @unique // voyageur (Connect)
