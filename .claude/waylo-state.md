@@ -43,6 +43,8 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/dropoff-receipt` | **voyageur** assigné (404 masquant pour un tiers) ; garde d'état `{MATCHED, VALIDATED}` (400 `INVALID_MISSION_STATE`) ; → `DEPOSITED` (preuve + tracking + `dropoffAt` serveur) |
 | POST | `/:id/confirm-collection` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; escrow HELD check → capture Stripe hors tx (`capture_collection_<id>`) → `DEPOSITED → VALIDATED` (transitoire) ; webhook → `RELEASED`. Aucun `transfers.create` ni ledger direct (chemin outbox existant) |
 | POST | `/:id/dispute` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; motif optionnel (Ajv ≤ 2000) ; `$transaction` → `DISPUTED` + `disputeReason`/`disputedAt` ; alerte critique post-commit `MISSION_DISPUTED_BY_BUYER`. Gèle la mission (aucun mouvement d'argent) |
+| POST | `/:id/admin/resolve-refund` | **admin** (`isRequestAdmin`) ; garde état strict `DISPUTED` (400 `MISSION_NOT_DISPUTED`) ; escrow HELD check → `paymentIntents.cancel` hors tx (`admin_refund_<id>`) → `$transaction(DISPUTED → CANCELLED + AdminAuditLog)`. Arbitrage **faveur acheteur** : annule le hold non capturé |
+| POST | `/:id/admin/resolve-payout` | **admin** (`isRequestAdmin`) ; garde état strict `DISPUTED` (400 `MISSION_NOT_DISPUTED`) ; escrow HELD check → `paymentIntents.capture` hors tx (`admin_payout_<id>`) → `$transaction(DISPUTED → VALIDATED + AdminAuditLog)` ; webhook → RELEASED. Arbitrage **faveur voyageur** |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
@@ -126,6 +128,8 @@ AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (tran
 {MATCHED | VALIDATED} ──/dropoff-receipt (voyageur, preuve de dépôt)──▶ DEPOSITED
 DEPOSITED ──/confirm-collection (acheteur, capture Stripe)──▶ VALIDATED (transitoire)
 DEPOSITED ──/dispute (acheteur, motif optionnel)──▶ DISPUTED (gel, arbitrage humain)
+DISPUTED ──/admin/resolve-refund (admin, cancel PI HELD)──▶ CANCELLED (final)
+DISPUTED ──/admin/resolve-payout (admin, capture)──▶ VALIDATED (transitoire)
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
 webhook capture sans compte Connect vérifié ──▶ AWAITING_TRAVELER_ACCOUNT
 charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCELLED
@@ -167,6 +171,16 @@ timeout (ni §7 collecte sur `DEPOSITED`, ni §6 douane sur `ESCROW_LOCKED_CUSTO
 transition gèle de facto toute exécution automatique. Alerte critique post-commit
 `MISSION_DISPUTED_BY_BUYER` (arbitrage humain). Aucun mouvement d'argent (escrow reste `HELD`).
 
+**Arbitrage admin (résolution du gel)** : deux issues exclusives depuis `DISPUTED`, réservées
+aux comptes `isAdmin` (`isRequestAdmin`, lookup DB frais — JWT inchangé, identité seule). L'escrow
+est toujours `HELD` (litige ouvert depuis `DEPOSITED`, jamais capturé). `/admin/resolve-refund`
+(faveur acheteur) → `paymentIntents.cancel` du hold (clé `admin_refund_<id>`, miroir du timeout
+douane §6) → `DISPUTED → CANCELLED` (final). `/admin/resolve-payout` (faveur voyageur) →
+`paymentIntents.capture` (clé `admin_payout_<id>`) → `DISPUTED → VALIDATED` (transitoire) ; le webhook
+finalise en `RELEASED` (même aval que `/confirm-collection`). Décision + `AdminAuditLog` atomiques
+(D-c) ; capture/cancel **hors** `$transaction` (règle d'or). Mission non-`DISPUTED` → 400
+`MISSION_NOT_DISPUTED` ; escrow non `HELD` → 400 `ESCROW_NOT_HELD`.
+
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
 
@@ -188,6 +202,8 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
    | `capture_customs_<missionId>` | `paymentIntents.capture` (T1-douane) | `/customs-approve` — chemin admin, distinct du chemin buyer |
    | `capture_collection_<missionId>` | `paymentIntents.capture` (T1-collecte) | `/confirm-collection` — chemin acheteur depuis `DEPOSITED` ; le transfert aval réutilise `transfer_marchand_<id>` (webhook → outbox → worker) |
    | `timeout_collection_<missionId>` | `paymentIntents.capture` (T1-timeout) | `runReconciliation` §7 — auto-libération si `DEPOSITED` > 5 j (acheteur inactif) ; même aval que la collecte manuelle |
+   | `admin_refund_<missionId>` | `paymentIntents.cancel` (arbitrage) | `/admin/resolve-refund` — annule le hold HELD d'une mission `DISPUTED` (faveur acheteur, miroir du timeout douane) |
+   | `admin_payout_<missionId>` | `paymentIntents.capture` (arbitrage) | `/admin/resolve-payout` — capture le hold HELD d'une mission `DISPUTED` (faveur voyageur) ; même aval webhook que la collecte |
    | `refund_customs_<missionId>` | `paymentIntents.cancel` (timeout) | worker `runReconciliation` section 6 (SLA > 7 j) |
    | `transfer_marchand_<missionId>` | `transfers.create` (T4) | `handleCapture` → réutilisée telle quelle par le worker |
 
@@ -306,7 +322,25 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > Décision : migration (enum + 2 colonnes) autorisée par l'instruction §4 ; alerte émise
   > post-commit (et non « dans la $transaction ») conformément à la convention safeEmit du codebase.
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **21 fichiers,
-128 tests verts** (+6 litige). Fichiers litige : `schema.prisma`, migration
-`20260616205254_add_dispute_to_mission`, `alerts.ts`, `mission.route.ts`, `dispute.test.ts`
-(nouveau), ce fichier.
+### Sprint 8 — Arbitrage admin litige (`resolve-refund` / `resolve-payout`)
+- **Route** [`mission.route.ts`](../src/missions/mission.route.ts) : deux routes admin résolvant une
+  mission `DISPUTED`, gardées par `isRequestAdmin` (lookup DB frais ; **JWT inchangé** — décision
+  d'archi §2 préservée, pas de rôle dans le jeton). Garde d'état strict `DISPUTED` (400
+  `MISSION_NOT_DISPUTED`) + précondition escrow `HELD` (400 `ESCROW_NOT_HELD`).
+  - `resolve-refund` (faveur acheteur) : `paymentIntents.cancel` **hors tx** (`admin_refund_<id>`)
+    → `$transaction(DISPUTED → CANCELLED + AdminAuditLog ADMIN_RESOLVE_REFUND)`. Annule le hold
+    jamais capturé (≠ `refunds.create` : rien à rembourser) — miroir du timeout douane §6.
+  - `resolve-payout` (faveur voyageur) : `paymentIntents.capture` **hors tx** (`admin_payout_<id>`)
+    → `$transaction(DISPUTED → VALIDATED + AdminAuditLog ADMIN_RESOLVE_PAYOUT)` ; webhook finalise
+    → `RELEASED` (même aval que `/confirm-collection`, aucun ledger/transfer inline).
+  - Surface Stripe : `cancel?` ajouté à `PaymentIntentClient` (optionnel comme `checkout?`, signature
+    3-arg = SDK réel : idempotencyKey en options). Décision + audit atomiques (D-c).
+  > **Décisions (vs spec littérale)** : (1) garde RBAC via `isRequestAdmin` existant, **pas** d'ajout
+  > `isAdmin` au JWT (régression de sécurité : jeton 12 h ⇒ admin révoqué actif jusqu'à expiration ;
+  > le lookup DB révoque à chaud) ; (2) refund = `paymentIntents.cancel` (hold HELD non capturé), pas
+  > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
+  > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **22 fichiers,
+133 tests verts** (+5 arbitrage admin). Fichiers Sprint 8 : `mission.route.ts`, `admin-dispute.test.ts`
+(nouveau), ce fichier. Aucune migration (réutilise enum `MissionStatus` + `AdminAuditLog` existants).

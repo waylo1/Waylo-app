@@ -65,6 +65,19 @@ export interface PaymentIntentClient {
       params: { amount_to_capture?: number },
       options: { idempotencyKey: string },
     ): Promise<{ id: string }>
+    /**
+     * Annule un PaymentIntent HELD non capturé (arbitrage refund admin §8). Le
+     * hold n'a jamais été débité (litige ouvert depuis DEPOSITED) : on ANNULE,
+     * on ne rembourse pas une capture inexistante — miroir du timeout douanier
+     * (reconciliation.ts §6). OPTIONNELLE comme `checkout` : présente sur le SDK
+     * réel, omise par les fakes qui ne l'exercent pas. Signature 3-arg
+     * (id, params, options) = SDK Stripe réel : idempotencyKey en options.
+     */
+    cancel?(
+      id: string,
+      params: Record<string, never>,
+      options: { idempotencyKey: string },
+    ): Promise<{ id: string }>
   }
   /**
    * Surface Checkout — OPTIONNELLE : présente sur le SDK Stripe réel, omise par
@@ -132,6 +145,12 @@ class CollectionConflictError extends Error {}
 
 /** Transition DEPOSITED → DISPUTED perdue (course / collecte confirmée entre-temps). */
 class DisputeConflictError extends Error {}
+
+/** Transition DISPUTED → CANCELLED perdue (course / litige déjà arbitré). */
+class ResolveRefundConflictError extends Error {}
+
+/** Transition DISPUTED → VALIDATED perdue (course / litige déjà arbitré). */
+class ResolvePayoutConflictError extends Error {}
 
 interface CustomsReceiptBody {
   customsReceiptUrl: string
@@ -1013,6 +1032,126 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(200).send(disputed)
     },
   )
+
+  // POST /api/missions/:id/admin/resolve-refund — ARBITRAGE ADMIN (§8) d'un litige
+  // EN FAVEUR DE L'ACHETEUR : annule le séquestre HELD (jamais capturé) et solde la
+  // mission DISPUTED → CANCELLED. Réservé aux comptes isAdmin (403 sinon). L'escrow
+  // d'une mission DISPUTED est toujours HELD (litige ouvert depuis DEPOSITED) : on
+  // ANNULE le hold (paymentIntents.cancel), on ne rembourse pas une capture
+  // inexistante — miroir du timeout douanier (reconciliation.ts §6).
+  // Ordre : garde admin → garde état DISPUTED → escrow HELD → cancel Stripe HORS tx
+  // (règle d'or, clé admin_refund_<id>) → $transaction(transition + audit atomiques).
+  app.post('/:id/admin/resolve-refund', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    if (!(await isRequestAdmin(req.user.sub))) {
+      return reply.code(403).send({ error: 'FORBIDDEN' })
+    }
+    const { id } = req.params as { id: string }
+
+    // Garde d'état : l'arbitrage ne s'applique QU'À une mission gelée (DISPUTED).
+    // Mission absente ⇒ même 400 (route admin de confiance, pas de masquage IDOR).
+    const mission = await prisma.mission.findUnique({ where: { id }, select: { status: true } })
+    if (!mission || mission.status !== MissionStatus.DISPUTED) {
+      return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+    }
+
+    // Précondition escrow — lecture HORS transaction (règle d'or). HELD requis :
+    // un hold déjà RELEASED/CANCELLED ⇒ 400 (pas de double action sur l'argent).
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+    if (!opts.stripe.paymentIntents.cancel) {
+      return reply.code(500).send({ error: 'REFUND_UNAVAILABLE' }) // SDK sans cancel (fake)
+    }
+
+    // Annulation HORS transaction DB (règle d'or). Clé déterministe : un retry
+    // admin après crash ré-annule le MÊME PI une seule fois côté Stripe.
+    await opts.stripe.paymentIntents.cancel(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `admin_refund_${id}` },
+    )
+
+    // Transition + audit ATOMIQUES (D-c) : la décision admin et sa trace
+    // AdminAuditLog committent ensemble ou pas du tout. Transition conditionnelle
+    // (anti-TOCTOU) : un 2e appel voit count 0 (mission déjà CANCELLED) → 400.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.DISPUTED },
+          data: { status: MissionStatus.CANCELLED },
+        })
+        if (updated.count !== 1) throw new ResolveRefundConflictError()
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_REFUND', missionId: id },
+        })
+      })
+    } catch (err) {
+      if (err instanceof ResolveRefundConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+      }
+      throw err
+    }
+    const resolved = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(resolved)
+  })
+
+  // POST /api/missions/:id/admin/resolve-payout — ARBITRAGE ADMIN (§8) d'un litige
+  // EN FAVEUR DU VOYAGEUR : capture le séquestre HELD et solde la mission
+  // DISPUTED → VALIDATED (transitoire). Réservé aux comptes isAdmin (403 sinon).
+  // Le webhook payment_intent.succeeded prend le relais (ledger CAPTURE/PAYOUT/
+  // COMMISSION + TransferOutbox + RELEASED) — JAMAIS dupliqué ici. Même contrat
+  // que /validate, /customs-approve, /confirm-collection : capture HORS tx → webhook.
+  app.post('/:id/admin/resolve-payout', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    if (!(await isRequestAdmin(req.user.sub))) {
+      return reply.code(403).send({ error: 'FORBIDDEN' })
+    }
+    const { id } = req.params as { id: string }
+
+    const mission = await prisma.mission.findUnique({ where: { id }, select: { status: true } })
+    if (!mission || mission.status !== MissionStatus.DISPUTED) {
+      return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+    }
+
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB (règle d'or). Clé déterministe propre au chemin
+    // arbitrage : un retry admin re-présente la même clé → un seul débit Stripe.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `admin_payout_${id}` },
+    )
+
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.DISPUTED },
+          data: { status: MissionStatus.VALIDATED },
+        })
+        if (updated.count !== 1) throw new ResolvePayoutConflictError()
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_PAYOUT', missionId: id },
+        })
+      })
+    } catch (err) {
+      if (err instanceof ResolvePayoutConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+      }
+      throw err
+    }
+    const resolved = await prisma.mission.findUniqueOrThrow({ where: { id } })
+    return reply.code(200).send(resolved)
+  })
 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW.
   // Réservé aux comptes isAdmin. Retourne id, montants, quittance déposée par le
