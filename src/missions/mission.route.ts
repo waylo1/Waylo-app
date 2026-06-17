@@ -119,6 +119,9 @@ export interface MissionRouteOptions {
 /** Transition AWAITING_VALIDATION → VALIDATED perdue (course / double validation). */
 class ValidationConflictError extends Error {}
 
+/** Transition AWAITING_VALIDATION → VALIDATED perdue via /confirm-receipt (course / double confirmation). */
+class ConfirmReceiptConflictError extends Error {}
+
 /** Transition FUNDED → MATCHED perdue (course : un autre voyageur a pris la mission). */
 class MatchConflictError extends Error {}
 
@@ -662,6 +665,69 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
     const validated = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     return reply.code(200).send(validated)
+  })
+
+  // POST /api/missions/:id/confirm-receipt — confirmation de réception par l'ACHETEUR.
+  // JUMEAU de /validate (même état d'entrée AWAITING_VALIDATION, même effet) : déclenche
+  // la CAPTURE du séquestre, jamais le versement. Le ledger PAYOUT/COMMISSION, le
+  // TransferOutbox, escrow→RELEASED et mission→RELEASED sont portés par le webhook
+  // payment_intent.succeeded — JAMAIS dupliqués ici (règle d'or §5 + invariants ledger §3).
+  // Clé de capture PARTAGÉE `capture_<id>` : un acheteur qui appelle /validate ET
+  // /confirm-receipt ne capture qu'UNE fois côté Stripe (idempotence déterministe).
+  app.post('/:id/confirm-receipt', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' }) // tiers/voyageur/inexistante : indistinguables
+
+    // Garde douane (miroir de /validate) : une mission sous verrou douanier ne peut
+    // être confirmée — 409 explicite AVANT tout appel Stripe, code métier précis.
+    if (
+      mission.status === MissionStatus.ESCROW_LOCKED_CUSTOMS ||
+      mission.status === MissionStatus.PENDING_CUSTOMS_REVIEW
+    ) {
+      return reply.code(409).send({ error: 'CUSTOMS_REVIEW_PENDING' })
+    }
+
+    if (mission.status !== MissionStatus.AWAITING_VALIDATION) {
+      // Inclut le 2e clic : la 1re confirmation/validation a déjà posé VALIDATED.
+      return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
+    }
+    const escrow = await prisma.escrowTransaction.findUnique({
+      where: { missionId: mission.id },
+      select: { stripePaymentIntentId: true, status: true },
+    })
+    if (!escrow || escrow.status !== EscrowStatus.HELD) {
+      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    }
+
+    // Capture HORS transaction DB (règle d'or). Clé partagée avec /validate :
+    // capture idempotente du MÊME PaymentIntent quel que soit le chemin acheteur.
+    await opts.stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      {},
+      { idempotencyKey: `capture_${mission.id}` },
+    )
+
+    // Transaction atomique : SEULE écriture = transition conditionnelle (anti-TOCTOU).
+    // Aucune écriture comptable — le webhook journalise PAYOUT/COMMISSION + outbox.
+    // VALIDATED est transitoire : le webhook le finalisera en RELEASED.
+    try {
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.AWAITING_VALIDATION },
+          data: { status: MissionStatus.VALIDATED },
+        })
+        if (updated.count !== 1) throw new ConfirmReceiptConflictError()
+      })
+    } catch (err) {
+      if (err instanceof ConfirmReceiptConflictError) {
+        return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
+      }
+      throw err
+    }
+
+    const confirmed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    return reply.code(200).send(confirmed)
   })
 
   // POST /api/missions/:id/receive — l'ACHETEUR confirme la réception du colis

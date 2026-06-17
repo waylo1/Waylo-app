@@ -49,6 +49,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/reviews` | **participant** (buyer OU traveler) ; statut terminal (`RELEASED` ou `CANCELLED`) sinon 400 `MISSION_NOT_TERMINAL` ; targetId dérivé automatiquement (l'autre partie) ; doublon → 409 `REVIEW_ALREADY_SUBMITTED` ; tiers → 404 (invariant IDOR) |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
+| POST | `/:id/confirm-receipt` | **acheteur** (404 masquant) — **jumeau de `/validate`** ; garde douane (409 `CUSTOMS_REVIEW_PENDING`) ; garde état strict `AWAITING_VALIDATION` (400 `MISSION_NOT_AWAITING_VALIDATION`) ; escrow HELD check → capture Stripe hors tx (**clé partagée** `capture_<id>`) → `AWAITING_VALIDATION → VALIDATED` (transitoire) ; webhook → ledger PAYOUT/COMMISSION + TransferOutbox + `RELEASED`. Aucun `transfers.create` ni ledger direct |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
 | POST | `/:id/customs-approve` | **admin** (`isAdmin`) ; escrow HELD check → capture Stripe hors tx (`capture_customs_<id>`) → **[D-c+S4] PENDING_CUSTOMS_REVIEW → VALIDATED + audit atomiques** ; webhook → RELEASED |
 | POST | `/:id/customs-reject` | **admin** ; **[D-c] atomique** + alerte post-commit |
@@ -121,13 +122,13 @@ frais plateforme. **Argent en centimes `Int` partout.**
 CREATED ──/intent|/checkout-session (réservation atomique)──▶ FUNDED
         ◀── funding-recon (PI jamais autorisé, > stale) ─────┘
 FUNDED ──/match|/accept──▶ MATCHED ──/start-travel|/ship──▶ IN_PROGRESS
-IN_PROGRESS ──/submit-receipt──▶ AWAITING_VALIDATION
+IN_PROGRESS ──/submit-receipt | /drop-off (voyageur, dépôt logistique)──▶ AWAITING_VALIDATION
 IN_PROGRESS ──/receive (sous seuil douanier)──▶ VALIDATED (transitoire)
 IN_PROGRESS ──/receive (≥ seuil, quittance absente)──▶ ESCROW_LOCKED_CUSTOMS
 ESCROW_LOCKED_CUSTOMS ──/customs-receipt (voyageur)──▶ PENDING_CUSTOMS_REVIEW
 PENDING_CUSTOMS_REVIEW ──/customs-approve (admin, capture Stripe)──▶ VALIDATED (transitoire)
 PENDING_CUSTOMS_REVIEW ──/customs-reject (admin)──▶ ESCROW_LOCKED_CUSTOMS (receipt effacé)
-AWAITING_VALIDATION ──/validate (acheteur, capture)──▶ VALIDATED (transitoire)
+AWAITING_VALIDATION ──/validate | /confirm-receipt (acheteur, capture)──▶ VALIDATED (transitoire)
 {MATCHED | VALIDATED} ──/dropoff-receipt (voyageur, preuve de dépôt)──▶ DEPOSITED
 DEPOSITED ──/confirm-collection (acheteur, capture Stripe)──▶ VALIDATED (transitoire)
 DEPOSITED ──/dispute (acheteur, motif optionnel)──▶ DISPUTED (gel, arbitrage humain)
@@ -193,6 +194,8 @@ approuverait encore la carte (`WITHIN_BUDGET`). La garde lit le statut mission (
 journalisé dans `IssuingAuthorizationLog`. Aucune mutation d'état ni d'argent (webhook synchrone < 2 s,
 refus fail-safe). Le gel devient ainsi opposable à la dépense, pas seulement aux libérations.
 
+**Confirmation de réception (Sprint 12)** : `POST /:id/confirm-receipt` est le **jumeau architectural de `/validate`** — même état d'entrée (`AWAITING_VALIDATION`), même effet (déclenche la capture, jamais le versement). Acheteur uniquement (`findMissionForBuyer` → 404 masquant), garde douane (409 `CUSTOMS_REVIEW_PENDING`), garde état strict (400 `MISSION_NOT_AWAITING_VALIDATION`), escrow `HELD` requis (400 `ESCROW_NOT_HELD`). Capture **hors tx** via la **clé partagée** `capture_<missionId>` (un acheteur appelant `/validate` ET `/confirm-receipt` ne capture qu'une fois — idempotence Stripe déterministe). `$transaction` = unique `updateMany` conditionnel `AWAITING_VALIDATION → VALIDATED` (anti-TOCTOU). Le webhook `payment_intent.succeeded` porte **seul** le ledger PAYOUT/COMMISSION, le `TransferOutbox` et `RELEASED` — jamais dupliqués dans la route. **Décision (vs spec littérale)** : la spec demandait ledger PAYOUT/COMMISSION + `transfers.create` + `RELEASED` dans la route ; refusé car cela viole la règle d'or (§5), double les écritures du webhook et casse l'invariant ledger B (PAYOUT/COMMISSION sans CAPTURE à `AWAITING_VALIDATION`). Aucune modif `schema.prisma`.
+
 **Dépôt logistique asynchrone (Sprint 11)** : `POST /:id/drop-off` permet au voyageur de signaler qu'il a confié le colis à un réseau tiers (casier `LOCKER`, point relais `RELAY`, poste `POSTAL`). Réservé au voyageur assigné (404 masquant invariant IDOR). Transition atomique anti-TOCTOU `IN_PROGRESS → AWAITING_VALIDATION` dans `$transaction` avec `updateMany({ where: { status: IN_PROGRESS } })`. Champs `dropOffType` (enum `DropOffType`), `dropOffCarrier`, `dropOffTrackingId`, `dropOffAccessCode?` et `droppedAt` (horodatage serveur) scellés à la transition. Aucun appel Stripe.
 
 **Notation post-clôture (Sprint 10)** : `POST /:id/reviews` permet à chaque participant (buyer et traveler, séparément) de noter l'autre partie après clôture (`RELEASED` ou `CANCELLED`). Gardes dans `$transaction` : `findMissionForParticipant(tx, id, userId)` (404 masquant si tiers) + check statut terminal (400 `MISSION_NOT_TERMINAL`) + dérivation `targetId` (l'autre partie). Doublon absorbé par `@@unique([missionId, authorId])` → 409 `REVIEW_ALREADY_SUBMITTED`. `onDelete: Cascade` sur `Review.missionId` garantit la cohérence si une mission est supprimée (tests + production). Aucun appel Stripe, aucune écriture ledger.
@@ -214,7 +217,7 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
    |---|---|---|
    | `fund_<missionId>` | `paymentIntents.create` (T0) | `/intent` |
    | `checkout_<missionId>` | `checkout.sessions.create` | `/checkout-session` |
-   | `capture_<missionId>` | `paymentIntents.capture` (T1) | `/validate`, `/receive`, `captureEscrowFunds` |
+   | `capture_<missionId>` | `paymentIntents.capture` (T1) | `/validate`, `/confirm-receipt` (jumeau, clé partagée), `/receive`, `captureEscrowFunds` |
    | `capture_customs_<missionId>` | `paymentIntents.capture` (T1-douane) | `/customs-approve` — chemin admin, distinct du chemin buyer |
    | `capture_collection_<missionId>` | `paymentIntents.capture` (T1-collecte) | `/confirm-collection` — chemin acheteur depuis `DEPOSITED` ; le transfert aval réutilise `transfer_marchand_<id>` (webhook → outbox → worker) |
    | `timeout_collection_<missionId>` | `paymentIntents.capture` (T1-timeout) | `runReconciliation` §7 — auto-libération si `DEPOSITED` > 5 j (acheteur inactif) ; même aval que la collecte manuelle |
@@ -357,7 +360,7 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
   > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **25 fichiers,
-143 tests verts** (+3 dépôt logistique). Fichiers Sprint 11 : `prisma/schema.prisma` (enum `DropOffType` +
-5 champs Mission, migration `add_mission_dropoff_fields`), `mission.route.ts`, `drop-off.test.ts` (nouveau),
-ce fichier.
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **26 fichiers,
+146 tests verts** (+3 confirmation de réception). Fichiers Sprint 12 : `mission.route.ts` (route `/confirm-receipt`,
+jumeau de `/validate`), `confirm-receipt.test.ts` (nouveau), ce fichier. Aucune migration, aucune modif
+`schema.prisma` (ledger/outbox existants ; effet financier porté par le webhook).
