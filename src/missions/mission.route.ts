@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { prisma } from '../db'
-import { EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
+import { DropOffType, EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
 import {
   findMissionForBuyer,
   findMissionForParticipant,
@@ -152,12 +152,38 @@ class ResolveRefundConflictError extends Error {}
 /** Transition DISPUTED → VALIDATED perdue (course / litige déjà arbitré). */
 class ResolvePayoutConflictError extends Error {}
 
+/** Mission introuvable ou appelant non voyageur assigné lors du drop-off (404 masquant). */
+class LogisticsDropOffNotFoundError extends Error {}
+/** Mission pas IN_PROGRESS lors du drop-off logistique. */
+class LogisticsDropOffStatusError extends Error {}
+/** Transition IN_PROGRESS → AWAITING_VALIDATION (drop-off logistique) perdue (course). */
+class LogisticsDropOffConflictError extends Error {}
 /** Mission introuvable ou appelant non participant (404 masquant). */
 class ReviewNotFoundError extends Error {}
 /** Mission pas dans un statut terminal (RELEASED ou CANCELLED). */
 class ReviewNotTerminalError extends Error {}
 /** Acheteur essaie de noter alors qu'aucun voyageur n'est assigné. */
 class ReviewNoTravelerError extends Error {}
+
+interface DropOffBody {
+  dropOffType: DropOffType
+  dropOffCarrier: string
+  dropOffTrackingId: string
+  dropOffAccessCode?: string
+}
+
+const dropOffBodySchema = {
+  type: 'object',
+  required: ['dropOffType', 'dropOffCarrier', 'dropOffTrackingId'],
+  additionalProperties: false,
+  properties: {
+    dropOffType: { type: 'string', enum: ['LOCKER', 'RELAY', 'POSTAL'] },
+    dropOffCarrier: { type: 'string', minLength: 1, maxLength: 200 },
+    dropOffTrackingId: { type: 'string', minLength: 1, maxLength: 200 },
+    // Optionnel : code secret d'un casier. Borné (anti-abus de payload).
+    dropOffAccessCode: { type: 'string', minLength: 1, maxLength: 100 },
+  },
+} as const
 
 interface ReviewBody {
   rating: number
@@ -1394,6 +1420,66 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const receipt = await prisma.receipt.findUniqueOrThrow({ where: { missionId: mission.id } })
       return reply.code(201).send(receipt)
+    },
+  )
+
+  // ── POST /:id/drop-off ────────────────────────────────────────────────────
+  // Dépôt logistique asynchrone : le voyageur confie le colis à un réseau tiers
+  // (casier, point relais, bureau de poste). Réservé au voyageur assigné (404
+  // masquant pour l'acheteur ou un tiers — invariant IDOR). Transition atomique
+  // IN_PROGRESS → AWAITING_VALIDATION ; `droppedAt` scellé serveur.
+  app.post<{ Params: { id: string }; Body: DropOffBody }>(
+    '/:id/drop-off',
+    { schema: { body: dropOffBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params
+      const userId = req.user.sub
+      const { dropOffType, dropOffCarrier, dropOffTrackingId, dropOffAccessCode } = req.body
+
+      try {
+        await prisma.$transaction(async tx => {
+          // findMissionForTraveler retourne null si l'appelant est l'acheteur ou
+          // un tiers → 404 masquant (invariant IDOR, comme /dropoff-receipt).
+          const mission = await findMissionForTraveler(tx, id, userId)
+          if (!mission) throw new LogisticsDropOffNotFoundError()
+
+          if (mission.status !== MissionStatus.IN_PROGRESS) {
+            throw new LogisticsDropOffStatusError()
+          }
+
+          // Transition conditionnelle anti-TOCTOU : si la mission a quitté
+          // IN_PROGRESS entre le findUnique et l'update, count === 0 → abort.
+          const updated = await tx.mission.updateMany({
+            where: { id, status: MissionStatus.IN_PROGRESS },
+            data: {
+              dropOffType,
+              dropOffCarrier,
+              dropOffTrackingId,
+              dropOffAccessCode,
+              droppedAt: new Date(),
+              status: MissionStatus.AWAITING_VALIDATION,
+            },
+          })
+          if (updated.count !== 1) throw new LogisticsDropOffConflictError()
+        })
+      } catch (err) {
+        if (err instanceof LogisticsDropOffNotFoundError) {
+          return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+        }
+        if (err instanceof LogisticsDropOffStatusError || err instanceof LogisticsDropOffConflictError) {
+          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+        }
+        throw err
+      }
+
+      const mission = await prisma.mission.findUniqueOrThrow({ where: { id } })
+      return reply.code(200).send({
+        status: mission.status,
+        droppedAt: mission.droppedAt,
+        dropOffType: mission.dropOffType,
+        dropOffCarrier: mission.dropOffCarrier,
+        dropOffTrackingId: mission.dropOffTrackingId,
+      })
     },
   )
 

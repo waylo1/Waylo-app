@@ -72,6 +72,12 @@ enum AuthDecision {
   DECLINED
 }
 
+enum DropOffType {
+  LOCKER  // casier automatique (InPost, DHL Packstation…)
+  RELAY   // point relais commerçant (Mondial Relay, UPS Access Point…)
+  POSTAL  // dépôt bureau de poste / service postal standard
+}
+
 model User {
   id               String    @id @default(cuid())
   // Pas de rôle de compte : « acheteur » / « voyageur » est CONTEXTUEL, dérivé
@@ -111,6 +117,11 @@ model Mission {
   dropoffReceiptUrl    String?   // preuve de dépôt du colis par le voyageur (posée via /dropoff-receipt) ; null = pas encore déposé
   dropoffTrackingNumber String?  // numéro de suivi optionnel du dépôt (transporteur)
   dropoffAt            DateTime? // horodatage serveur du dépôt (jamais l'horloge du device)
+  dropOffType          DropOffType? // mode de dépôt logistique (posé via /drop-off depuis IN_PROGRESS)
+  dropOffCarrier       String?      // nom du transporteur / réseau (ex: "InPost", "La Poste")
+  dropOffTrackingId    String?      // numéro de colis ou identifiant de casier
+  dropOffAccessCode    String?      // code secret optionnel pour ouvrir le casier / retirer le colis
+  droppedAt            DateTime?    // horodatage serveur du dépôt logistique (jamais l'horloge du device)
   disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
   expiresAt       DateTime
