@@ -31,6 +31,7 @@ enum MissionStatus {
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   DEPOSITED // le voyageur a déposé/remis le colis (preuve de dépôt + tracking) ; atteint depuis MATCHED ou VALIDATED (post-douane) via /dropoff-receipt
   DISPUTED // litige ouvert par l'acheteur depuis DEPOSITED (/dispute) ; GÈLE la mission : retirée des workers de timeout (capture/refund auto), résolution humaine requise
+  DISPUTED_FRAUD // arbitrage admin : vol/fraude voyageur avéré (depuis DISPUTED) — état gelé terminal ; déclenche la ponction 200% (PenaltyDebitOutbox) + journalisation compensation acheteur 120% (LedgerEntry). Aucune libération, aucun versement voyageur.
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
   REFUNDED
@@ -50,6 +51,8 @@ enum LedgerType {
   PAYOUT
   COMMISSION
   REFUND
+  FRAUD_PENALTY_COLLECTED // ponction du voyageur fraudeur : 200% de (Valeur Objet + Frais Service). Flux SÉPARÉ de l'escrow acheteur — EXCLU des invariants A/B/C (la réconciliation ne somme que CAPTURE/PAYOUT/COMMISSION/REFUND).
+  BUYER_REFUND_COMPENSATION // compensation versée à l'acheteur : 120% de (Valeur Objet + Frais Service), financée par la ponction. EXCLUE des invariants A/B/C — magnitude positive, le TYPE porte la direction (sortie vers l'acheteur).
 }
 
 enum TransferStatus {
@@ -97,6 +100,7 @@ model User {
   adminAuditLogs     AdminAuditLog[]
   reviewsAuthored    Review[]  @relation("ReviewsAuthored")
   reviewsReceived    Review[]  @relation("ReviewsReceived")
+  penaltyDebits      PenaltyDebitOutbox[]
 }
 
 model Mission {
@@ -137,6 +141,7 @@ model Mission {
   receipt         Receipt?
   issuingAuthLogs IssuingAuthorizationLog[]
   reviews         Review[]
+  penaltyDebit    PenaltyDebitOutbox?
 
   @@index([buyerId])
   @@index([travelerId])
@@ -180,6 +185,30 @@ model TransferOutbox {
 
   @@index([status])
   @@index([escrowId])
+}
+
+// Outbox transactionnel de la PONCTION DE PÉNALITÉ (vol/fraude voyageur, Sprint 14).
+// L'intention de débit de la carte de garantie du voyageur (`User.stripePaymentMethodId`)
+// commit AVEC la décision d'arbitrage (même $transaction que la transition + le ledger).
+// L'exécution Stripe réelle (charge off-session de la carte) sera portée par un worker
+// dédié — JAMAIS dans une transaction DB (règle d'or). Une seule ponction par mission
+// (@unique) : idempotence stricte, miroir de l'unicité TransferOutbox par escrow.
+model PenaltyDebitOutbox {
+  id          String         @id @default(cuid())
+  missionId   String         @unique // une seule ponction par mission (idempotence)
+  userId      String // voyageur fraudeur dont la carte de garantie sera débitée
+  amountCents Int // (Valeur Objet + Frais Service) * 2 = 200%, centimes Int
+  status      TransferStatus @default(PENDING) // réutilise le cycle outbox PENDING → SUBMITTED → SETTLED|FAILED|ABANDONED
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // onDelete: Cascade — une mission supprimée emporte son intention de ponction
+  // (cohérence + isolation des tests : mission.deleteMany() ne bute pas sur la FK).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
 }
 
 model LedgerEntry {

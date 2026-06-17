@@ -9,7 +9,7 @@
 ## 1. Routes Fastify actives
 
 Préfixes montés dans [`src/app.ts`](../src/app.ts) : `/api/auth`, `/api/missions`,
-`/api/escrow`, `/api/stripe`. Toutes les routes hors `/health` et `/api/stripe/*`
+`/api/escrow`, `/api/admin`, `/api/stripe`. Toutes les routes hors `/health` et `/api/stripe/*`
 sont protégées par JWT (`authenticate` : Bearer **ou** cookie HttpOnly).
 Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 
@@ -59,6 +59,11 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | Méthode | Route | Garde / note |
 |---|---|---|
 | POST | `/api/escrow/:missionId/capture` | **[D-a] acheteur** (404 masquant) + **garde douane** (409 `CUSTOMS_LOCK_ACTIVE`) ; délègue à `captureEscrowFunds` (capture Stripe seule, 0 écriture DB) |
+
+### Admin (JWT, `onRequest: authenticate`) — [`src/admin/arbitrage.route.ts`](../src/admin/arbitrage.route.ts)
+| Méthode | Route | Garde / note |
+|---|---|---|
+| POST | `/api/admin/missions/:id/arbitrate-fraud` | **admin** (`isRequestAdmin`, 403 sinon) ; garde état strict `DISPUTED` (400 `MISSION_NOT_DISPUTED`) ; escrow requis (400 `ESCROW_NOT_FOUND`). `$transaction` (**aucun appel Stripe**) : `updateMany` anti-TOCTOU `DISPUTED → DISPUTED_FRAUD` + `PenaltyDebitOutbox` PENDING voyageur (200% de Objet+Frais) + `LedgerEntry` `FRAUD_PENALTY_COLLECTED` (200%) / `BUYER_REFUND_COMPENSATION` (120%) + `AdminAuditLog` `ADMIN_ARBITRATE_FRAUD`. Idempotent (transition unique + `PenaltyDebitOutbox.missionId @unique`). Exécution monétaire **différée** à un worker dédié |
 
 ### Stripe (signature `constructEvent`, **JAMAIS** JWT)
 | Méthode | Route | Note |
@@ -110,6 +115,12 @@ Vérifiés (lecture seule, n'altèrent jamais le ledger) par
 - **B.** `Σ(PAYOUT + COMMISSION + REFUND) ≤ Σ(CAPTURE)` — pour **tout** escrow.
 - **C.** `status ∈ {RELEASED, REFUNDED} ⇒ Σ(PAYOUT+COMMISSION+REFUND) == Σ(CAPTURE)`.
 
+> **Types pénalité hors invariants (S14)** : `FRAUD_PENALTY_COLLECTED` et `BUYER_REFUND_COMPENSATION`
+> sont **EXCLUS** des sommes A/B/C — `runReconciliation` ne somme que `CAPTURE/PAYOUT/COMMISSION/REFUND`
+> ([`reconciliation.ts`](../src/workers/reconciliation.ts) `sumOf`). Ils sont ancrés à l'escrow pour la FK
+> mais représentent un **flux séparé** (ponction carte voyageur / compensation acheteur), pas un mouvement
+> du séquestre. Magnitudes positives ; le **type** porte la direction. Aucune corruption de l'escrow acheteur.
+
 Écritures par phase : `CAPTURE` + `capturedAmountCents` → **T2** (webhook
 `payment_intent.succeeded`) ; `PAYOUT` + `COMMISSION` → **T3** (libération, même
 transaction) ; `REFUND` (delta vs cumul Stripe) → **T2'** (`charge.refunded`, sous
@@ -139,6 +150,7 @@ DEPOSITED ──/confirm-collection (acheteur, capture Stripe)──▶ VALIDATE
 DEPOSITED ──/dispute (acheteur, motif optionnel)──▶ DISPUTED (gel, arbitrage humain)
 DISPUTED ──/admin/resolve-refund (admin, cancel PI HELD)──▶ CANCELLED (final)
 DISPUTED ──/admin/resolve-payout (admin, capture)──▶ VALIDATED (transitoire)
+DISPUTED ──/api/admin/.../arbitrate-fraud (admin, vol voyageur)──▶ DISPUTED_FRAUD (gelé terminal : ponction 200% + compensation 120%)
 {AWAITING_VALIDATION | VALIDATED} ──webhook capture──▶ RELEASED (final)
 webhook capture sans compte Connect vérifié ──▶ AWAITING_TRAVELER_ACCOUNT
 charge.refunded (total) ──▶ REFUNDED   |   payment_failed ──▶ CANCELLED
@@ -201,6 +213,8 @@ refus fail-safe). Le gel devient ainsi opposable à la dépense, pas seulement a
 
 **Hardening voyageur — carte de garantie (Sprint 13)** : l'acceptation d'une mission (`/match`, `/accept`) exige désormais une carte enregistrée (`User.stripePaymentMethodId`, vérifiée à l'inscription) — sinon 400 `TRAVELER_CARD_MISSING`, aucune assignation. La garde (`travelerHasGuaranteeCard`, lookup DB frais) s'insère **après** les checks own-mission et statut `FUNDED`. Cette carte est la garantie qui adossera la **ponction de pénalité asymétrique 120/200** (débit voyageur 200% / restitution acheteur 120% / marge plateforme 80%) en cas d'arbitrage de fraude. **Décision (vs spec littérale)** : le moteur de pénalité a été **délibérément reporté à un sprint dédié**, car écrire le 120/200 en `LedgerEntry` sur l'escrow acheteur + débit via `TransferOutbox` (comme demandé) **casse plusieurs invariants verrouillés** : (1) restituer 120% = REFUND > Σ(CAPTURE) → viole l'invariant ledger B (§3) et déclenche l'alerte `runReconciliation` ; (2) `LedgerEntry` est ancré sur `escrowId` et `LedgerType` n'a aucun type « pénalité/compensation » ; le débit voyageur n'a aucun escrow ; (3) `TransferOutbox` est un *Connect transfer sortant* (`transfers.create`, clé `@unique` une seule par escrow), pas un débit carte ; (4) `PaymentIntentClient` n'a **aucune** primitive de charge off-session de la carte voyageur. Architecture cible : nouveaux `LedgerType` (`PENALTY_DEBIT`/`COMPENSATION`/`PENALTY_MARGIN`) hors invariant B, table `PenaltyDebitOutbox` + worker de charge dédié, escrow acheteur annulé (miroir `resolve-refund`), maj `reconciliation.ts`. À concevoir avec le PDF « Stratégie de Souveraineté Logistique » (base du calcul, modèle de compte voyageur). **Migration** `20260617130000_add_traveler_stripe_fields` : seule colonne `User.stripePaymentMethodId` (nullable, `@unique`) — `stripeCustomerId` existait déjà (réutilisé côté voyageur).
 
+**Moteur de pénalité 120/200 — arbitrage de fraude (Sprint 14)** : `POST /api/admin/missions/:id/arbitrate-fraud` ([`src/admin/arbitrage.route.ts`](../src/admin/arbitrage.route.ts), nouveau plugin monté sous `/api/admin`) matérialise le moteur reporté en S13, avec la base de calcul fixée : **(budget [Valeur Objet] + commission [Frais Service])**. Réservé aux admins (`isRequestAdmin`, exporté de `mission.route.ts` — source unique). Sur une mission `DISPUTED`, **une seule `$transaction` sans aucun appel Stripe** : transition anti-TOCTOU `DISPUTED → DISPUTED_FRAUD` (gelé terminal) + `PenaltyDebitOutbox` PENDING (ponction voyageur = base × 2 = **200%**) + `LedgerEntry` `FRAUD_PENALTY_COLLECTED` (200%) & `BUYER_REFUND_COMPENSATION` (base × 1,2 = **120%**) + `AdminAuditLog` (D-c). Marge plateforme **80%** implicite (200 − 120). Idempotence : la transition unique + `PenaltyDebitOutbox.missionId @unique` garantissent une seule ponction (double appel → 400 `MISSION_NOT_DISPUTED`, sans doublon). **Décisions (vs spec littérale)** : (1) `LedgerType` réels = `FRAUD_PENALTY_COLLECTED`/`BUYER_REFUND_COMPENSATION` (noms du spec), stockés en **magnitudes positives** (convention `amountCents ≥ 0`, le type porte la direction « +200% / −120% »), **exclus des invariants A/B/C** (cf. §3) — aucune corruption de l'escrow ; (2) ajout de `MissionStatus.DISPUTED_FRAUD` (implicite dans le spec) ; (3) `PenaltyDebitOutbox` enrichi des champs spec (id, userId, amountCents, status, createdAt) + `missionId @unique` (idempotence) + `onDelete: Cascade` (isolation tests, miroir `Review`) + `updatedAt`/relations/index (cycle outbox du futur worker) ; (4) `AdminAuditLog` ajouté (invariant D-c — toute décision admin est tracée) ; (5) **aucun mouvement d'argent dans ce sprint** : la route journalise l'intention (outbox) + le ledger et gèle la mission ; l'EXÉCUTION Stripe (débit carte voyageur, sortie du hold acheteur, versement de la compensation) relève d'un **worker dédié non encore implémenté** — l'escrow reste `HELD`, règle d'or trivialement respectée. **Migration** `20260617140000_add_fraud_penalty_engine` (enum `ADD VALUE` ×3 + table `PenaltyDebitOutbox`).
+
 **Confirmation de réception (Sprint 12)** : `POST /:id/confirm-receipt` est le **jumeau architectural de `/validate`** — même état d'entrée (`AWAITING_VALIDATION`), même effet (déclenche la capture, jamais le versement). Acheteur uniquement (`findMissionForBuyer` → 404 masquant), garde douane (409 `CUSTOMS_REVIEW_PENDING`), garde état strict (400 `MISSION_NOT_AWAITING_VALIDATION`), escrow `HELD` requis (400 `ESCROW_NOT_HELD`). Capture **hors tx** via la **clé partagée** `capture_<missionId>` (un acheteur appelant `/validate` ET `/confirm-receipt` ne capture qu'une fois — idempotence Stripe déterministe). `$transaction` = unique `updateMany` conditionnel `AWAITING_VALIDATION → VALIDATED` (anti-TOCTOU). Le webhook `payment_intent.succeeded` porte **seul** le ledger PAYOUT/COMMISSION, le `TransferOutbox` et `RELEASED` — jamais dupliqués dans la route. **Décision (vs spec littérale)** : la spec demandait ledger PAYOUT/COMMISSION + `transfers.create` + `RELEASED` dans la route ; refusé car cela viole la règle d'or (§5), double les écritures du webhook et casse l'invariant ledger B (PAYOUT/COMMISSION sans CAPTURE à `AWAITING_VALIDATION`). Aucune modif `schema.prisma`.
 
 **Dépôt logistique asynchrone (Sprint 11)** : `POST /:id/drop-off` permet au voyageur de signaler qu'il a confié le colis à un réseau tiers (casier `LOCKER`, point relais `RELAY`, poste `POSTAL`). Réservé au voyageur assigné (404 masquant invariant IDOR). Transition atomique anti-TOCTOU `IN_PROGRESS → AWAITING_VALIDATION` dans `$transaction` avec `updateMany({ where: { status: IN_PROGRESS } })`. Champs `dropOffType` (enum `DropOffType`), `dropOffCarrier`, `dropOffTrackingId`, `dropOffAccessCode?` et `droppedAt` (horodatage serveur) scellés à la transition. Aucun appel Stripe.
@@ -236,8 +250,9 @@ dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCT
 3. **Contraintes `@unique` DB** : `EscrowTransaction.{missionId, stripePaymentIntentId,
    idempotencyKey (escrow_fund_<missionId>), stripeIssuingCardId}` ;
    `TransferOutbox.{idempotencyKey, stripeTransferId}` ;
+   `PenaltyDebitOutbox.missionId` (une seule ponction de fraude par mission) ;
    `IssuingAuthorizationLog.stripeAuthorizationId` ; `Receipt.missionId` ;
-   `ProcessedStripeEvent.stripeEventId`.
+   `ProcessedStripeEvent.stripeEventId` ; `User.stripePaymentMethodId`.
 4. **Verrous de ligne** `SELECT … FOR UPDATE` (capture/refund concurrents sur un même
    escrow) et `FOR UPDATE SKIP LOCKED` (claim du transfer-worker).
 
@@ -367,8 +382,12 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
   > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **27 fichiers,
-150 tests verts** (+4 hardening voyageur). Fichiers Sprint 13 : `schema.prisma` (colonne `User.stripePaymentMethodId`),
-`mission.route.ts` (helper `travelerHasGuaranteeCard` + garde sur `/match` et `/accept`), `traveler-hardening.test.ts`
-(nouveau), `mission-matchmaking.test.ts` (fixtures voyageurs dotés d'une carte), ce fichier. Migration
-`20260617130000_add_traveler_stripe_fields`. **Moteur de pénalité 120/200 reporté** (sprint dédié — voir §4).
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **28 fichiers,
+153 tests verts** (+3 arbitrage fraude). Fichiers Sprint 14 : `schema.prisma` (enums `MissionStatus.DISPUTED_FRAUD`,
+`LedgerType.FRAUD_PENALTY_COLLECTED`/`BUYER_REFUND_COMPENSATION` + modèle `PenaltyDebitOutbox`),
+`src/admin/arbitrage.route.ts` (nouveau), `src/app.ts` (montage `/api/admin`), `mission.route.ts` (`export isRequestAdmin`),
+`admin-arbitrage-fraud.test.ts` (nouveau), ce fichier. Migration `20260617140000_add_fraud_penalty_engine`.
+**Worker d'exécution de la ponction (charge carte voyageur + compensation acheteur) : non encore implémenté** (voir §4).
+
+> Sprint 13 (rappel) : hardening voyageur (`User.stripePaymentMethodId` requis sur `/match` et `/accept`,
+> 400 `TRAVELER_CARD_MISSING`). Migration `20260617130000_add_traveler_stripe_fields`.

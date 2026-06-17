@@ -18,7 +18,7 @@ import { safeEmit, type AlertSink } from '../alerts'
  * bénéficiaire n'a jamais ce flag. true uniquement si l'utilisateur existe ET
  * isAdmin === true ; tout autre cas (compte absent, flag false) → non-admin.
  */
-async function isRequestAdmin(userId: string): Promise<boolean> {
+export async function isRequestAdmin(userId: string): Promise<boolean> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { isAdmin: true },
