@@ -26,6 +26,21 @@ async function isRequestAdmin(userId: string): Promise<boolean> {
   return user?.isAdmin === true
 }
 
+/**
+ * Garde « carte de garantie » voyageur : un voyageur ne peut prendre/accepter une
+ * mission que si une carte (payment method Stripe) a été enregistrée à l'inscription.
+ * Cette carte est la garantie qui adossera la ponction de pénalité en cas de fraude
+ * (arbitrage admin, sprint dédié). Absence ⇒ acceptation refusée (400
+ * TRAVELER_CARD_MISSING). Lookup frais en base, comme isRequestAdmin.
+ */
+async function travelerHasGuaranteeCard(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { stripePaymentMethodId: true },
+  })
+  return Boolean(user?.stripePaymentMethodId)
+}
+
 /** preHandler de rate limit, clé par route + IP + utilisateur. 429 si dépassé. */
 const rateLimit =
   (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -1310,6 +1325,12 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(400).send({ error: code })
     }
 
+    // Hardening voyageur (Sprint 13) : pas de carte de garantie enregistrée ⇒
+    // acceptation refusée AVANT toute assignation. Aucun mouvement, mission intacte.
+    if (!(await travelerHasGuaranteeCard(userId))) {
+      return reply.code(400).send({ error: 'TRAVELER_CARD_MISSING' })
+    }
+
     // Transaction atomique : assignation conditionnelle (anti-TOCTOU). Deux
     // voyageurs concurrents : le 1er commit FUNDED → MATCHED, le 2nd voit
     // rowcount 0 (statut/travelerId ne matchent plus) → 400.
@@ -1349,6 +1370,11 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       const code =
         mission.status === MissionStatus.CREATED ? 'MISSION_NOT_MATCHABLE' : 'MISSION_ALREADY_MATCHED'
       return reply.code(400).send({ error: code })
+    }
+
+    // Hardening voyageur (Sprint 13) : carte de garantie obligatoire pour accepter.
+    if (!(await travelerHasGuaranteeCard(userId))) {
+      return reply.code(400).send({ error: 'TRAVELER_CARD_MISSING' })
     }
 
     try {

@@ -86,8 +86,9 @@ model User {
   passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
   isAdmin          Boolean   @default(false) // flag ops/admin (source de vérité unique, auditable) — remplace l'allowlist ADMIN_USER_IDS via env
   kycStatus        KycStatus @default(PENDING)
-  stripeCustomerId String?   @unique // acheteur
+  stripeCustomerId String?   @unique // acheteur (réutilisé comme customer de garantie côté voyageur)
   stripeAccountId  String?   @unique // voyageur (Connect)
+  stripePaymentMethodId String? @unique // carte de garantie voyageur (pm_…), vérifiée à l'inscription : adosse la future ponction de pénalité ; requise pour accepter/prendre une mission
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 

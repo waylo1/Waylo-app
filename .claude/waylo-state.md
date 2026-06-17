@@ -36,7 +36,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | GET | `/api/missions/:id` | **participant** (404 masquant pour un tiers) |
 | POST | `/:id/intent` | **acheteur** — financement T0 |
 | POST | `/:id/checkout-session` | **acheteur** — financement T0 (Checkout) |
-| POST | `/:id/match` · `/:id/accept` | non-acheteur, statut `FUNDED` |
+| POST | `/:id/match` · `/:id/accept` | non-acheteur, statut `FUNDED` ; **hardening voyageur (S13)** : `stripePaymentMethodId` requis sinon 400 `TRAVELER_CARD_MISSING` (carte de garantie, après les checks own-mission/statut) |
 | POST | `/:id/start-travel` | **voyageur** assigné |
 | POST | `/:id/ship` | **voyageur** ; refuse `purchaseAmountCents > budget` |
 | POST | `/:id/submit-receipt` | **voyageur** ; refuse montant > budget ; scelle Receipt |
@@ -86,6 +86,11 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
   atteint malgré tout une mission verrouillée (rollback intégral).
 - **JIT fail-safe** : doute / erreur DB / carte inconnue / escrow non `HELD` / **mission `DISPUTED`
   ou `CANCELLED`** (gel des fonds Sprint 9, contrôle AVANT budget, motif explicite journalisé) → `approved:false`.
+- **Hardening voyageur (S13)** ([`mission.route.ts`](../src/missions/mission.route.ts) `travelerHasGuaranteeCard`) :
+  `/match` et `/accept` refusent l'assignation (400 `TRAVELER_CARD_MISSING`) si le voyageur n'a pas de
+  `stripePaymentMethodId` (carte de garantie vérifiée à l'inscription) — *fail-closed*, lookup DB frais.
+  La garde s'applique **après** les checks own-mission/statut (un acheteur ou un statut non-`FUNDED`
+  garde sa réponse propre). Cette carte adossera la future ponction de pénalité (moteur 120/200, sprint dédié).
 - **Auth** : argon2 ; JWT `{ sub }` (identité seule, aucun rôle) ; rate-limit register/login/receive/customs-receipt.
 - **Entrées** : schémas Ajv stricts ; URLs `^https?://` (anti-XSS stocké) ; pas de
   fetch serveur des URLs (anti-SSRF) ; `destinationCountry` ISO-2 requis ;
@@ -193,6 +198,8 @@ approuverait encore la carte (`WITHIN_BUDGET`). La garde lit le statut mission (
 `status ∈ {DISPUTED, CANCELLED}` → `approved:false`, motif `MISSION_DISPUTED`/`MISSION_CANCELLED`
 journalisé dans `IssuingAuthorizationLog`. Aucune mutation d'état ni d'argent (webhook synchrone < 2 s,
 refus fail-safe). Le gel devient ainsi opposable à la dépense, pas seulement aux libérations.
+
+**Hardening voyageur — carte de garantie (Sprint 13)** : l'acceptation d'une mission (`/match`, `/accept`) exige désormais une carte enregistrée (`User.stripePaymentMethodId`, vérifiée à l'inscription) — sinon 400 `TRAVELER_CARD_MISSING`, aucune assignation. La garde (`travelerHasGuaranteeCard`, lookup DB frais) s'insère **après** les checks own-mission et statut `FUNDED`. Cette carte est la garantie qui adossera la **ponction de pénalité asymétrique 120/200** (débit voyageur 200% / restitution acheteur 120% / marge plateforme 80%) en cas d'arbitrage de fraude. **Décision (vs spec littérale)** : le moteur de pénalité a été **délibérément reporté à un sprint dédié**, car écrire le 120/200 en `LedgerEntry` sur l'escrow acheteur + débit via `TransferOutbox` (comme demandé) **casse plusieurs invariants verrouillés** : (1) restituer 120% = REFUND > Σ(CAPTURE) → viole l'invariant ledger B (§3) et déclenche l'alerte `runReconciliation` ; (2) `LedgerEntry` est ancré sur `escrowId` et `LedgerType` n'a aucun type « pénalité/compensation » ; le débit voyageur n'a aucun escrow ; (3) `TransferOutbox` est un *Connect transfer sortant* (`transfers.create`, clé `@unique` une seule par escrow), pas un débit carte ; (4) `PaymentIntentClient` n'a **aucune** primitive de charge off-session de la carte voyageur. Architecture cible : nouveaux `LedgerType` (`PENALTY_DEBIT`/`COMPENSATION`/`PENALTY_MARGIN`) hors invariant B, table `PenaltyDebitOutbox` + worker de charge dédié, escrow acheteur annulé (miroir `resolve-refund`), maj `reconciliation.ts`. À concevoir avec le PDF « Stratégie de Souveraineté Logistique » (base du calcul, modèle de compte voyageur). **Migration** `20260617130000_add_traveler_stripe_fields` : seule colonne `User.stripePaymentMethodId` (nullable, `@unique`) — `stripeCustomerId` existait déjà (réutilisé côté voyageur).
 
 **Confirmation de réception (Sprint 12)** : `POST /:id/confirm-receipt` est le **jumeau architectural de `/validate`** — même état d'entrée (`AWAITING_VALIDATION`), même effet (déclenche la capture, jamais le versement). Acheteur uniquement (`findMissionForBuyer` → 404 masquant), garde douane (409 `CUSTOMS_REVIEW_PENDING`), garde état strict (400 `MISSION_NOT_AWAITING_VALIDATION`), escrow `HELD` requis (400 `ESCROW_NOT_HELD`). Capture **hors tx** via la **clé partagée** `capture_<missionId>` (un acheteur appelant `/validate` ET `/confirm-receipt` ne capture qu'une fois — idempotence Stripe déterministe). `$transaction` = unique `updateMany` conditionnel `AWAITING_VALIDATION → VALIDATED` (anti-TOCTOU). Le webhook `payment_intent.succeeded` porte **seul** le ledger PAYOUT/COMMISSION, le `TransferOutbox` et `RELEASED` — jamais dupliqués dans la route. **Décision (vs spec littérale)** : la spec demandait ledger PAYOUT/COMMISSION + `transfers.create` + `RELEASED` dans la route ; refusé car cela viole la règle d'or (§5), double les écritures du webhook et casse l'invariant ledger B (PAYOUT/COMMISSION sans CAPTURE à `AWAITING_VALIDATION`). Aucune modif `schema.prisma`.
 
@@ -360,7 +367,8 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
   > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **26 fichiers,
-146 tests verts** (+3 confirmation de réception). Fichiers Sprint 12 : `mission.route.ts` (route `/confirm-receipt`,
-jumeau de `/validate`), `confirm-receipt.test.ts` (nouveau), ce fichier. Aucune migration, aucune modif
-`schema.prisma` (ledger/outbox existants ; effet financier porté par le webhook).
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **27 fichiers,
+150 tests verts** (+4 hardening voyageur). Fichiers Sprint 13 : `schema.prisma` (colonne `User.stripePaymentMethodId`),
+`mission.route.ts` (helper `travelerHasGuaranteeCard` + garde sur `/match` et `/accept`), `traveler-hardening.test.ts`
+(nouveau), `mission-matchmaking.test.ts` (fixtures voyageurs dotés d'une carte), ce fichier. Migration
+`20260617130000_add_traveler_stripe_fields`. **Moteur de pénalité 120/200 reporté** (sprint dédié — voir §4).
