@@ -60,7 +60,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 ### Stripe (signature `constructEvent`, **JAMAIS** JWT)
 | Méthode | Route | Note |
 |---|---|---|
-| POST | `/api/stripe/issuing-authorization` | secret dédié `STRIPE_ISSUING_WEBHOOK_SECRET` ; JIT < 2 s ; **refus par défaut** (fail-safe) ; 1 lecture indexée + comparaison |
+| POST | `/api/stripe/issuing-authorization` | secret dédié `STRIPE_ISSUING_WEBHOOK_SECRET` ; JIT < 2 s ; **refus par défaut** (fail-safe) ; 1 lecture indexée (+ jointure statut mission) + comparaison ; **gel** mission `DISPUTED`/`CANCELLED` → `approved:false` (§4) |
 | POST | `/api/stripe/webhook` | secret `STRIPE_WEBHOOK_SECRET` ; events async ; idempotent (cf. §5) |
 
 ---
@@ -81,7 +81,8 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
   possible tant que `status ∈ {ESCROW_LOCKED_CUSTOMS, PENDING_CUSTOMS_REVIEW}`.
 - **Backstop webhook** : `handleCapture` abort `CUSTOMS_LOCK_CAPTURED` si une capture
   atteint malgré tout une mission verrouillée (rollback intégral).
-- **JIT fail-safe** : doute / erreur DB / carte inconnue / escrow non `HELD` → `approved:false`.
+- **JIT fail-safe** : doute / erreur DB / carte inconnue / escrow non `HELD` / **mission `DISPUTED`
+  ou `CANCELLED`** (gel des fonds Sprint 9, contrôle AVANT budget, motif explicite journalisé) → `approved:false`.
 - **Auth** : argon2 ; JWT `{ sub }` (identité seule, aucun rôle) ; rate-limit register/login/receive/customs-receipt.
 - **Entrées** : schémas Ajv stricts ; URLs `^https?://` (anti-XSS stocké) ; pas de
   fetch serveur des URLs (anti-SSRF) ; `destinationCountry` ISO-2 requis ;
@@ -180,6 +181,15 @@ douane §6) → `DISPUTED → CANCELLED` (final). `/admin/resolve-payout` (faveu
 finalise en `RELEASED` (même aval que `/confirm-collection`). Décision + `AdminAuditLog` atomiques
 (D-c) ; capture/cancel **hors** `$transaction` (règle d'or). Mission non-`DISPUTED` → 400
 `MISSION_NOT_DISPUTED` ; escrow non `HELD` → 400 `ESCROW_NOT_HELD`.
+
+**Gel des fonds — enforcement carte JIT (Sprint 9)** : une mission gelée garde son escrow `HELD`
+(`DISPUTED` : invariant Sprint 7 ; `CANCELLED` : hold pas encore finalisé). Sans garde, l'autorisation
+Issuing temps réel ([`issuing-authorization.route.ts`](../src/stripe/issuing-authorization.route.ts))
+approuverait encore la carte (`WITHIN_BUDGET`). La garde lit le statut mission (jointure PK dans la
+**même** lecture indexée par `stripeIssuingCardId`) et refuse l'achat **AVANT** le contrôle de budget :
+`status ∈ {DISPUTED, CANCELLED}` → `approved:false`, motif `MISSION_DISPUTED`/`MISSION_CANCELLED`
+journalisé dans `IssuingAuthorizationLog`. Aucune mutation d'état ni d'argent (webhook synchrone < 2 s,
+refus fail-safe). Le gel devient ainsi opposable à la dépense, pas seulement aux libérations.
 
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).

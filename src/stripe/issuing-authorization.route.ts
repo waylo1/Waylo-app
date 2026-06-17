@@ -1,7 +1,7 @@
 import { FastifyPluginAsync } from 'fastify'
 import Stripe from 'stripe'
 import { prisma } from '../db'
-import { AuthDecision, EscrowStatus } from '../generated/prisma'
+import { AuthDecision, EscrowStatus, MissionStatus } from '../generated/prisma'
 import { AlertSink, safeEmit } from '../alerts'
 
 export interface IssuingAuthorizationOptions {
@@ -69,16 +69,31 @@ const issuingAuthorizationRoute: FastifyPluginAsync<IssuingAuthorizationOptions>
       if (requestedCents === null || requestedCents <= 0) {
         reason = 'NO_PENDING_AMOUNT'
       } else {
-        // Chemin critique : UNE lecture indexée (stripeIssuingCardId @unique).
+        // Chemin critique : UNE lecture indexée (stripeIssuingCardId @unique) +
+        // jointure mission sur sa PK (statut de gel) — toujours un seul aller-retour.
         const escrow = await prisma.escrowTransaction.findUnique({
           where: { stripeIssuingCardId: cardId },
-          select: { missionId: true, status: true, spendingLimitCents: true },
+          select: {
+            missionId: true,
+            status: true,
+            spendingLimitCents: true,
+            mission: { select: { status: true } },
+          },
         })
         if (!escrow) {
           reason = 'UNKNOWN_CARD'
         } else {
           missionId = escrow.missionId
-          if (escrow.status !== EscrowStatus.HELD) {
+          // Gel des fonds (Sprints 7-8) : une mission DISPUTED garde son escrow
+          // HELD, et une mission CANCELLED peut conserver un hold non encore
+          // finalisé — dans les deux cas l'achat doit être BLOQUÉ ici, AVANT le
+          // contrôle de budget, sinon la carte resterait utilisable sur une
+          // mission gelée (l'escrow HELD passerait le test ESCROW_NOT_HELD).
+          if (escrow.mission.status === MissionStatus.DISPUTED) {
+            reason = 'MISSION_DISPUTED'
+          } else if (escrow.mission.status === MissionStatus.CANCELLED) {
+            reason = 'MISSION_CANCELLED'
+          } else if (escrow.status !== EscrowStatus.HELD) {
             reason = 'ESCROW_NOT_HELD'
           } else if (requestedCents > escrow.spendingLimitCents) {
             // Le cumul multi-autorisations est borné par les Spending Controls
