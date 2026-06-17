@@ -199,6 +199,11 @@ model PenaltyDebitOutbox {
   userId      String // voyageur fraudeur dont la carte de garantie sera débitée
   amountCents Int // (Valeur Objet + Frais Service) * 2 = 200%, centimes Int
   status      TransferStatus @default(PENDING) // réutilise le cycle outbox PENDING → SUBMITTED → SETTLED|FAILED|ABANDONED
+  // PI de la charge off-session de la carte voyageur (peuplé à SETTLED). @unique :
+  // un seul débit Stripe réussi par ponction — miroir de TransferOutbox.stripeTransferId.
+  stripePaymentIntentId String? @unique
+  attempts    Int            @default(0) // backoff exponentiel : ré-éligible après 2^attempts minutes (Sprint 15)
+  lastError   String? // dernière erreur Stripe (carte refusée…) — diagnostic, jamais le secret
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 

@@ -1,6 +1,7 @@
 import Stripe from 'stripe'
 import { safeEmit } from './alerts'
 import { startTransferWorkerLoop } from './workers/transfer-worker'
+import { startPenaltyWorkerLoop } from './workers/penalty.worker'
 import { runReconciliation } from './workers/reconciliation'
 import type { ReconciliationDeps } from './workers/reconciliation'
 import { startFundingReconciliationLoop } from './workers/funding-reconciliation'
@@ -147,6 +148,9 @@ async function main(): Promise<void> {
   await app.listen({ port, host })
 
   const workerTimer = startTransferWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
+  // Worker de ponction de pénalité (Sprint 15) — même cadence que les transferts :
+  // débite la carte de garantie du voyageur fraudeur puis libère le hold acheteur.
+  const penaltyTimer = startPenaltyWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
   const reconciliation = startReconciliationCron(
     { prisma, stripe },
     { intervalMs: reconciliationIntervalMs, bootDelayMs: reconciliationBootDelayMs, log },
@@ -164,7 +168,7 @@ async function main(): Promise<void> {
       reconciliationBootDelayMs,
       fundingReconciliationIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + cron réconciliation + cron financements abandonnés',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés',
   )
 
   let shuttingDown = false
@@ -176,6 +180,7 @@ async function main(): Promise<void> {
     // si le process meurt en plein appel Stripe, la ligne SUBMITTED rassise
     // est reprise par un prochain tick et l'idempotencyKey rend le rejeu sûr.
     clearInterval(workerTimer)
+    clearInterval(penaltyTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol
