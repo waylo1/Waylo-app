@@ -88,6 +88,8 @@ model User {
   missionsAsBuyer    Mission[] @relation("BuyerMissions")
   missionsAsTraveler Mission[] @relation("TravelerMissions")
   adminAuditLogs     AdminAuditLog[]
+  reviewsAuthored    Review[]  @relation("ReviewsAuthored")
+  reviewsReceived    Review[]  @relation("ReviewsReceived")
 }
 
 model Mission {
@@ -122,6 +124,7 @@ model Mission {
   substitutions   SubstitutionRequest[]
   receipt         Receipt?
   issuingAuthLogs IssuingAuthorizationLog[]
+  reviews         Review[]
 
   @@index([buyerId])
   @@index([travelerId])
@@ -231,6 +234,28 @@ model IssuingAuthorizationLog {
   // Audit KYC/AML : append-only, jamais purgé, pas de soft-delete
 
   @@index([missionId])
+}
+
+// Notation mutuelle après clôture de mission (statut RELEASED ou CANCELLED).
+// Un auteur ne peut noter qu'une seule fois par mission (@@unique missionId+authorId).
+// Immuable : pas d'updatedAt, pas de soft-delete — un avis soumis ne se modifie pas.
+model Review {
+  id        String   @id @default(cuid())
+  missionId String
+  authorId  String
+  targetId  String
+  rating    Int      // 1–5, validé par la route (Ajv minimum:1 maximum:5)
+  comment   String?  // commentaire libre optionnel
+  createdAt DateTime @default(now())
+
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  author  User    @relation("ReviewsAuthored", fields: [authorId], references: [id])
+  target  User    @relation("ReviewsReceived", fields: [targetId], references: [id])
+
+  @@unique([missionId, authorId]) // un auteur ne note qu'une fois par mission
+  @@index([missionId])
+  @@index([authorId])
+  @@index([targetId])
 }
 
 model AdminAuditLog {

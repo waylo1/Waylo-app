@@ -152,6 +152,29 @@ class ResolveRefundConflictError extends Error {}
 /** Transition DISPUTED → VALIDATED perdue (course / litige déjà arbitré). */
 class ResolvePayoutConflictError extends Error {}
 
+/** Mission introuvable ou appelant non participant (404 masquant). */
+class ReviewNotFoundError extends Error {}
+/** Mission pas dans un statut terminal (RELEASED ou CANCELLED). */
+class ReviewNotTerminalError extends Error {}
+/** Acheteur essaie de noter alors qu'aucun voyageur n'est assigné. */
+class ReviewNoTravelerError extends Error {}
+
+interface ReviewBody {
+  rating: number
+  comment?: string
+}
+
+const reviewBodySchema = {
+  type: 'object',
+  required: ['rating'],
+  additionalProperties: false,
+  properties: {
+    rating: { type: 'integer', minimum: 1, maximum: 5 },
+    // Commentaire libre borné (anti-abus de payload ; texte brut, pas d'URL stockée).
+    comment: { type: 'string', minLength: 1, maxLength: 2000 },
+  },
+} as const
+
 interface CustomsReceiptBody {
   customsReceiptUrl: string
   customsReceiptSha256: string
@@ -1371,6 +1394,67 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const receipt = await prisma.receipt.findUniqueOrThrow({ where: { missionId: mission.id } })
       return reply.code(201).send(receipt)
+    },
+  )
+
+  // ── POST /:id/reviews ─────────────────────────────────────────────────────
+  // Notation mutuelle post-clôture. Statuts terminaux acceptés : RELEASED (fin
+  // normale) et CANCELLED (fin par arbitrage ou paiement échoué). L'auteur doit
+  // être participant (buyer ou traveler) ; targetId est l'autre partie, dérivé
+  // automatiquement. Doublon (@@unique missionId+authorId) → 409.
+  app.post<{ Params: { id: string }; Body: ReviewBody }>(
+    '/:id/reviews',
+    { schema: { body: reviewBodySchema } },
+    async (req, reply) => {
+      const { id } = req.params
+      const userId = req.user.sub
+      const { rating, comment } = req.body
+
+      let review
+      try {
+        review = await prisma.$transaction(async tx => {
+          // findMissionForParticipant accepte tout objet { mission: { findUnique } } —
+          // la transaction interactive `tx` satisfait ce contrat (même API que PrismaClient).
+          const access = await findMissionForParticipant(tx, id, userId)
+          if (!access) throw new ReviewNotFoundError()
+
+          const { mission, relation } = access
+          if (
+            mission.status !== MissionStatus.RELEASED &&
+            mission.status !== MissionStatus.CANCELLED
+          ) {
+            throw new ReviewNotTerminalError()
+          }
+
+          let targetId: string
+          if (relation === 'buyer') {
+            if (!mission.travelerId) throw new ReviewNoTravelerError()
+            targetId = mission.travelerId
+          } else {
+            targetId = mission.buyerId
+          }
+
+          return tx.review.create({
+            data: { missionId: id, authorId: userId, targetId, rating, comment },
+          })
+        })
+      } catch (err) {
+        if (err instanceof ReviewNotFoundError) {
+          return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+        }
+        if (err instanceof ReviewNotTerminalError) {
+          return reply.code(400).send({ error: 'MISSION_NOT_TERMINAL' })
+        }
+        if (err instanceof ReviewNoTravelerError) {
+          return reply.code(400).send({ error: 'NO_TRAVELER_ASSIGNED' })
+        }
+        if (isUniqueViolation(err)) {
+          return reply.code(409).send({ error: 'REVIEW_ALREADY_SUBMITTED' })
+        }
+        throw err
+      }
+
+      return reply.code(201).send(review)
     },
   )
 }

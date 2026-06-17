@@ -45,6 +45,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | POST | `/:id/dispute` | **acheteur** (404 masquant) ; garde d'état strict `DEPOSITED` (400 `INVALID_MISSION_STATE`) ; motif optionnel (Ajv ≤ 2000) ; `$transaction` → `DISPUTED` + `disputeReason`/`disputedAt` ; alerte critique post-commit `MISSION_DISPUTED_BY_BUYER`. Gèle la mission (aucun mouvement d'argent) |
 | POST | `/:id/admin/resolve-refund` | **admin** (`isRequestAdmin`) ; garde état strict `DISPUTED` (400 `MISSION_NOT_DISPUTED`) ; escrow HELD check → `paymentIntents.cancel` hors tx (`admin_refund_<id>`) → `$transaction(DISPUTED → CANCELLED + AdminAuditLog)`. Arbitrage **faveur acheteur** : annule le hold non capturé |
 | POST | `/:id/admin/resolve-payout` | **admin** (`isRequestAdmin`) ; garde état strict `DISPUTED` (400 `MISSION_NOT_DISPUTED`) ; escrow HELD check → `paymentIntents.capture` hors tx (`admin_payout_<id>`) → `$transaction(DISPUTED → VALIDATED + AdminAuditLog)` ; webhook → RELEASED. Arbitrage **faveur voyageur** |
+| POST | `/:id/reviews` | **participant** (buyer OU traveler) ; statut terminal (`RELEASED` ou `CANCELLED`) sinon 400 `MISSION_NOT_TERMINAL` ; targetId dérivé automatiquement (l'autre partie) ; doublon → 409 `REVIEW_ALREADY_SUBMITTED` ; tiers → 404 (invariant IDOR) |
 | POST | `/:id/receive` | **acheteur** + rate-limit ; **déclencheur douane** |
 | POST | `/:id/validate` | **acheteur** + **garde douane** (409 `CUSTOMS_REVIEW_PENDING`) |
 | POST | `/:id/customs-receipt` | **voyageur** + rate-limit ; verrou → revue |
@@ -190,6 +191,8 @@ approuverait encore la carte (`WITHIN_BUDGET`). La garde lit le statut mission (
 `status ∈ {DISPUTED, CANCELLED}` → `approved:false`, motif `MISSION_DISPUTED`/`MISSION_CANCELLED`
 journalisé dans `IssuingAuthorizationLog`. Aucune mutation d'état ni d'argent (webhook synchrone < 2 s,
 refus fail-safe). Le gel devient ainsi opposable à la dépense, pas seulement aux libérations.
+
+**Notation post-clôture (Sprint 10)** : `POST /:id/reviews` permet à chaque participant (buyer et traveler, séparément) de noter l'autre partie après clôture (`RELEASED` ou `CANCELLED`). Gardes dans `$transaction` : `findMissionForParticipant(tx, id, userId)` (404 masquant si tiers) + check statut terminal (400 `MISSION_NOT_TERMINAL`) + dérivation `targetId` (l'autre partie). Doublon absorbé par `@@unique([missionId, authorId])` → 409 `REVIEW_ALREADY_SUBMITTED`. `onDelete: Cascade` sur `Review.missionId` garantit la cohérence si une mission est supprimée (tests + production). Aucun appel Stripe, aucune écriture ledger.
 
 Toute transition = `updateMany` **conditionnel** (`where: { status: <attendu> }`)
 dans `prisma.$transaction()` ; `count !== 1` → abort + code métier (anti-TOCTOU).
@@ -351,6 +354,7 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
   > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **22 fichiers,
-133 tests verts** (+5 arbitrage admin). Fichiers Sprint 8 : `mission.route.ts`, `admin-dispute.test.ts`
-(nouveau), ce fichier. Aucune migration (réutilise enum `MissionStatus` + `AdminAuditLog` existants).
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **24 fichiers,
+140 tests verts** (+4 notation post-clôture). Fichiers Sprint 10 : `prisma/schema.prisma` (modèle `Review` +
+2 migrations `add_reviews_model` + `add_reviews_cascade`), `mission.route.ts`, `reviews.test.ts` (nouveau),
+ce fichier.
