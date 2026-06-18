@@ -1,0 +1,41 @@
+name: reconciliation-cron
+
+# Réconciliation ledger quotidienne (lecture seule : détecte et alerte, ne mute
+# jamais le ledger). Process court, distinct du cron in-process du serveur.
+on:
+  schedule:
+    - cron: "0 0 * * *" # tous les jours à 00:00 UTC
+  workflow_dispatch: # déclenchement manuel
+
+# Une seule réconciliation à la fois : un run en cours n'est pas doublé par un
+# déclenchement manuel concurrent.
+concurrency:
+  group: reconciliation-cron
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install deps + Prisma client
+        run: |
+          npm ci || npm install
+          npx prisma generate
+      - name: Run reconciliation
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+        run: npm run reconcile
+      - name: Upload critical alerts (NDJSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconciliation-critical-alerts
+          path: alerts-critical.ndjson
+          if-no-files-found: ignore
+          retention-days: 30
