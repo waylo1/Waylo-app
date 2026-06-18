@@ -1,6 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify'
 import { Prisma } from '../generated/prisma'
 import { isRateLimited, maskIp } from '../rate-limit'
+import type { AlertSink } from '../alerts'
 
 export async function isRequestAdmin(userId: string): Promise<boolean> {
   const { prisma } = await import('../db')
@@ -107,7 +108,7 @@ export interface PaymentIntentClient {
 
 export interface MissionRouteOptions {
   stripe: PaymentIntentClient
-  onAlert?: any
+  onAlert?: AlertSink
 }
 
 // Type bodies

@@ -61,13 +61,4 @@ export const crudRoutes: FastifyPluginAsync = async app => {
     })
     return reply.code(200).send(mission)
   })
-
-  // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW
-  app.get('/customs-pending', async (_req, reply) => {
-    const missions = await prisma.mission.findMany({
-      where: { status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-      orderBy: { createdAt: 'desc' },
-    })
-    return reply.code(200).send(missions)
-  })
 }
