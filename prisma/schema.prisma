@@ -396,3 +396,17 @@ model AdminAuditLog {
   @@index([adminId])
   @@index([missionId])
 }
+
+// Rate-limiting DISTRIBUÉ (store Postgres) — remplace la Map en mémoire mono-process :
+// partagé entre toutes les instances Fly et persistant aux redémarrages. Fenêtre fixe :
+// au plus N requêtes par clé jusqu'à `expiresAt`, puis réinitialisation. Écriture par
+// UPSERT atomique (INSERT … ON CONFLICT) — sûr en concurrence. Pas de FK ni d'updatedAt
+// (incompatible avec l'écriture en SQL brut) ; purge possible via l'index expiresAt.
+model RateLimit {
+  key       String   @id // ex. "login:203.0.113.0/24:user@example.com"
+  count     Int      @default(0)
+  expiresAt DateTime // fin de la fenêtre courante
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt]) // balayage des fenêtres expirées (purge périodique)
+}

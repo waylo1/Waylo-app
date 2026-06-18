@@ -2,14 +2,14 @@ import { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from '
 import argon2 from 'argon2'
 import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
-import { isRateLimited } from '../rate-limit'
+import { isRateLimited, maskIp } from '../rate-limit'
 import { clearAuthCookie, serializeAuthCookie } from './cookie'
 
 /** Anti-brute-force : 429 au-delà du seuil, clé par route + IP + email. */
 const authRateLimit =
   (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const email = ((req.body as { email?: string } | undefined)?.email ?? '').toLowerCase()
-    if (isRateLimited(`${name}:${req.ip}:${email}`)) {
+    if (await isRateLimited(`${name}:${maskIp(req.ip)}:${email}`)) {
       await reply.code(429).send({ error: 'RATE_LIMITED' })
     }
   }
