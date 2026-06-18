@@ -2,6 +2,7 @@ import Stripe from 'stripe'
 import { safeEmit } from './alerts'
 import { startTransferWorkerLoop } from './workers/transfer-worker'
 import { startPenaltyWorkerLoop } from './workers/penalty.worker'
+import { startBuyerCompensationWorkerLoop } from './workers/buyer-compensation.worker'
 import { runReconciliation } from './workers/reconciliation'
 import type { ReconciliationDeps } from './workers/reconciliation'
 import { startFundingReconciliationLoop } from './workers/funding-reconciliation'
@@ -151,6 +152,9 @@ async function main(): Promise<void> {
   // Worker de ponction de pénalité (Sprint 15) — même cadence que les transferts :
   // débite la carte de garantie du voyageur fraudeur puis libère le hold acheteur.
   const penaltyTimer = startPenaltyWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
+  // Worker de compensation acheteur (S20) — même cadence : crédite le Wallet interne
+  // de l'acheteur des intentions de restitution 120% posées par /arbitrate-fraud.
+  const buyerCompensationTimer = startBuyerCompensationWorkerLoop(workerIntervalMs, log)
   const reconciliation = startReconciliationCron(
     { prisma, stripe },
     { intervalMs: reconciliationIntervalMs, bootDelayMs: reconciliationBootDelayMs, log },
@@ -181,6 +185,7 @@ async function main(): Promise<void> {
     // est reprise par un prochain tick et l'idempotencyKey rend le rejeu sûr.
     clearInterval(workerTimer)
     clearInterval(penaltyTimer)
+    clearInterval(buyerCompensationTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol

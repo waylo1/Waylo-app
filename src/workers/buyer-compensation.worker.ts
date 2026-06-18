@@ -45,3 +45,19 @@ export async function processBuyerCompensations() {
     }
   }
 }
+
+/**
+ * Boucle cron explicite (~1 min) — miroir de `startPenaltyWorkerLoop`. Le `.catch`
+ * de niveau tick garantit qu'une exception du batch (ex. DB injoignable au `findMany`)
+ * n'effondre PAS le process scheduler : on log et le prochain tick reprend.
+ */
+export function startBuyerCompensationWorkerLoop(
+  intervalMs = 60_000,
+  log: { error(details: Record<string, unknown>, message?: string): void } = console,
+): NodeJS.Timeout {
+  return setInterval(() => {
+    void processBuyerCompensations().catch(err =>
+      log.error({ err: String(err) }, 'buyer compensation worker tick failed'),
+    )
+  }, intervalMs)
+}
