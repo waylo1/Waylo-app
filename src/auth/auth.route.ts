@@ -1,4 +1,4 @@
-import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
+import { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import argon2 from 'argon2'
 import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
@@ -65,7 +65,7 @@ const isUniqueViolation = (err: unknown): boolean =>
 
 const authRoute: FastifyPluginAsync = async app => {
   // Erreurs de validation au format maison { error: SNAKE_CASE } (encapsulé).
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) {
       return reply.code(400).send({ error: 'INVALID_INPUT' })
     }
