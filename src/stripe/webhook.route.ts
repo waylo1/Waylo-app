@@ -252,7 +252,10 @@ async function handleCapture(
       capturedAmountCents: true,
       mission: {
         select: {
+          buyerId: true,
           commissionCents: true,
+          substitutionAuthorized: true,
+          purchaseAmountCents: true,
           traveler: { select: { stripeAccountId: true, kycStatus: true } },
         },
       },
@@ -350,8 +353,10 @@ async function handleCapture(
   }
 
   const commissionCents = escrow.mission.commissionCents
-  const payoutCents = capturedCents - commissionCents
-  if (payoutCents < 0) {
+  // Reste après le frais plateforme — réparti entre le versement voyageur et, le cas
+  // échéant, le reliquat recrédité au Wallet acheteur (modèle « Drive », S18).
+  const spendableCents = capturedCents - commissionCents
+  if (spendableCents < 0) {
     abortAlert({
       code: 'WEBHOOK_ABORT_NON_RECOVERABLE',
       message: 'Commission supérieure au montant capturé',
@@ -360,12 +365,48 @@ async function handleCapture(
     throw new WebhookAbortError('NEGATIVE_PAYOUT')
   }
 
+  // Modèle « Drive » (S18) : sur une mission à substitution pré-autorisée, le séquestre
+  // a été capturé à 120% du budget. Le voyageur n'est remboursé QUE de sa dépense réelle
+  // (`purchaseAmountCents`) ; le reliquat NON consommé est recrédité au Wallet interne de
+  // l'acheteur — AUCUN remboursement Stripe (zéro décaissement plateforme). La décomposition
+  // est exacte (spendable = payout + reliquat) → CAPTURE = PAYOUT + COMMISSION +
+  // BUYER_WALLET_CREDIT : invariants B/C préservés (cf. reconciliation.ts). Hors substitution
+  // (ou purchaseAmountCents absent), comportement historique : payout = capturé − commission.
+  const purchaseAmountCents = escrow.mission.purchaseAmountCents
+  let payoutCents = spendableCents
+  let walletCreditCents = 0
+  if (
+    escrow.mission.substitutionAuthorized &&
+    purchaseAmountCents !== null &&
+    purchaseAmountCents < spendableCents
+  ) {
+    payoutCents = purchaseAmountCents
+    walletCreditCents = spendableCents - purchaseAmountCents
+  }
+
   await tx.ledgerEntry.createMany({
     data: [
       { escrowId: escrow.id, type: LedgerType.PAYOUT, amountCents: payoutCents },
       { escrowId: escrow.id, type: LedgerType.COMMISSION, amountCents: commissionCents },
+      ...(walletCreditCents > 0
+        ? [{ escrowId: escrow.id, type: LedgerType.BUYER_WALLET_CREDIT, amountCents: walletCreditCents }]
+        : []),
     ],
   })
+
+  // Crédit Wallet interne acheteur (reliquat) — upsert du wallet (créé à la volée si
+  // absent) + écriture append-only idempotente (`WalletTransaction.missionId @unique`).
+  // Aucun appel Stripe : mouvement purement interne.
+  if (walletCreditCents > 0) {
+    const wallet = await tx.wallet.upsert({
+      where: { userId: escrow.mission.buyerId },
+      create: { userId: escrow.mission.buyerId, balanceCents: walletCreditCents },
+      update: { balanceCents: { increment: walletCreditCents } },
+    })
+    await tx.walletTransaction.create({
+      data: { walletId: wallet.id, missionId: escrow.missionId, amountCents: walletCreditCents },
+    })
+  }
 
   // Intention de versement, committée avec le PAYOUT. idempotencyKey
   // DÉTERMINISTE par mission (transfer_marchand_<missionId>) + @unique :

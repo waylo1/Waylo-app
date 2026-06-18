@@ -40,9 +40,10 @@ import { AlertSink, OpsAlert, OpsAlertInput, safeEmit } from '../alerts'
  * REFUND → T2'. Ledger append-only : jamais d'UPDATE/DELETE.
  *
  * INVARIANTS (uniformes — AUCUN relâchement par statut) :
- *   A. Σ(CAPTURE) == capturedAmountCents                     (tout escrow)
- *   B. Σ(PAYOUT + COMMISSION + REFUND) ≤ Σ(CAPTURE)          (tout escrow)
- *   C. statut ∈ {RELEASED, REFUNDED} ⇒ Σ(PAYOUT+COMMISSION+REFUND) == Σ(CAPTURE)
+ *   A. Σ(CAPTURE) == capturedAmountCents                                 (tout escrow)
+ *   B. Σ(PAYOUT + COMMISSION + REFUND + BUYER_WALLET_CREDIT) ≤ Σ(CAPTURE) (tout escrow)
+ *   C. statut ∈ {RELEASED, REFUNDED} ⇒ Σ(PAYOUT+COMMISSION+REFUND+BUYER_WALLET_CREDIT) == Σ(CAPTURE)
+ *   (BUYER_WALLET_CREDIT = reliquat de substitution « Drive », S18 — part de la capture.)
  * Un escrow pré-capture (HELD, capturedAmountCents 0, ledger vide) satisfait
  * A et B trivialement — un seul chemin de code, pas de cas particulier.
  * ═════════════════════════════════════════════════════════════════════════════
@@ -128,7 +129,10 @@ export async function runReconciliation(
     const outflow =
       sumOf(escrow.id, LedgerType.PAYOUT) +
       sumOf(escrow.id, LedgerType.COMMISSION) +
-      sumOf(escrow.id, LedgerType.REFUND)
+      sumOf(escrow.id, LedgerType.REFUND) +
+      // Reliquat de substitution recrédité au Wallet acheteur (S18) : part de la
+      // capture, comptée dans la décomposition (CAPTURE = PAYOUT+COMMISSION+WALLET).
+      sumOf(escrow.id, LedgerType.BUYER_WALLET_CREDIT)
     const details = {
       escrowId: escrow.id,
       status: escrow.status,

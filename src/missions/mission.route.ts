@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { prisma } from '../db'
-import { DropOffType, EscrowStatus, MissionStatus, Prisma } from '../generated/prisma'
+import { DropOffType, EscrowStatus, MissionStatus, Prisma, SubstitutionStatus } from '../generated/prisma'
 import {
   findMissionForBuyer,
   findMissionForParticipant,
@@ -317,6 +317,15 @@ const submitReceiptBodySchema = {
 const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
 
+/**
+ * Plafond « Drive » (S16/S17) : 120% du budget, centimes Int strict (Math.floor,
+ * jamais Float). Source unique pour (a) le plafond de reçu de substitution
+ * (/submit-receipt), (b) le dimensionnement du séquestre acheteur + du Spending
+ * Control JIT au financement quand la substitution est pré-autorisée.
+ */
+export const substitutionCeilingCents = (budgetCents: number): number =>
+  Math.floor((budgetCents * 12) / 10)
+
 interface CreateMissionBody {
   targetProduct: string
   budgetCents: number
@@ -325,6 +334,7 @@ interface CreateMissionBody {
   destination: string
   destinationCountry: string
   expiresAt: string
+  substitutionAuthorized?: boolean
 }
 
 // budgetCents > 0, commissionCents ≥ 0 ; tous deux FIGÉS à la création
@@ -352,6 +362,9 @@ const createMissionBodySchema = {
     // (fail-safe, plus de contrôle inerte). Normalisé en majuscules côté route.
     destinationCountry: { type: 'string', pattern: '^[A-Za-z]{2}$' },
     expiresAt: { type: 'string', minLength: 1 },
+    // Pré-autorisation « Drive » (S16) — OPTIONNELLE, défaut false côté route/DB :
+    // l'acheteur consent dès la commande à un reçu de substitution jusqu'à 120% du budget.
+    substitutionAuthorized: { type: 'boolean' },
   },
 } as const
 
@@ -402,6 +415,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         destination: body.destination,
         destinationCountry: body.destinationCountry.toUpperCase(),
         expiresAt: new Date(expiresAtMs),
+        substitutionAuthorized: body.substitutionAuthorized ?? false, // pré-autorisation Drive (S16)
         // status : défaut CREATED. travelerId : null (assignation = matchmaking, plus tard).
       },
     })
@@ -478,7 +492,13 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
     // Montant séquestré = budget + commission : la commission EST le frais
     // plateforme (le webhook de capture verse capturé − commission au voyageur).
-    const totalAmountCents = mission.budgetCents + mission.commissionCents
+    // Modèle « Drive » (S17) : si la substitution est pré-autorisée, l'acheteur
+    // consent à un surcoût jusqu'à 120% du budget → le hold ET le plafond carte JIT
+    // sont dimensionnés à 120%. La commission (frais plateforme) reste INCHANGÉE.
+    const heldBudgetCents = mission.substitutionAuthorized
+      ? substitutionCeilingCents(mission.budgetCents)
+      : mission.budgetCents
+    const totalAmountCents = heldBudgetCents + mission.commissionCents
 
     // RÉSERVATION ATOMIQUE avant tout appel Stripe. /intent et /checkout-session
     // se disputent la MÊME transition CREATED → FUNDED : le perdant échoue ICI,
@@ -506,7 +526,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         data: {
           missionId: mission.id,
           stripePaymentIntentId: intent.id,
-          spendingLimitCents: mission.budgetCents, // plafond carte JIT = budget, figé
+          spendingLimitCents: heldBudgetCents, // plafond carte JIT = budget (ou 120% si substitution pré-autorisée), figé
           idempotencyKey: `escrow_fund_${mission.id}`,
           // status HELD et capturedAmountCents 0 : défauts du schéma (T0)
         },
@@ -554,7 +574,12 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       if (!opts.stripe.checkout) return reply.code(500).send({ error: 'CHECKOUT_UNAVAILABLE' })
 
       // Prix = budget + commission (frais plateforme), centimes Int — miroir de /intent.
-      const totalAmountCents = mission.budgetCents + mission.commissionCents
+      // Modèle « Drive » (S17) : hold dimensionné à 120% du budget si substitution
+      // pré-autorisée (commission inchangée).
+      const heldBudgetCents = mission.substitutionAuthorized
+        ? substitutionCeilingCents(mission.budgetCents)
+        : mission.budgetCents
+      const totalAmountCents = heldBudgetCents + mission.commissionCents
       const frontendBaseUrl = process.env.FRONTEND_BASE_URL ?? 'http://localhost:3001'
 
       // Réservation atomique AVANT l'appel Stripe (cf. /intent) : exclut tout
@@ -600,7 +625,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
           data: {
             missionId: mission.id,
             stripePaymentIntentId: piId,
-            spendingLimitCents: mission.budgetCents,
+            spendingLimitCents: heldBudgetCents, // = budget, ou 120% si substitution pré-autorisée
             idempotencyKey: `escrow_fund_${mission.id}`,
           },
         })
@@ -1469,10 +1494,23 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       }
 
       const { urlRecu, purchaseAmountCents } = req.body as SubmitReceiptBody
-      // Un reçu ne peut pas dépasser le budget figé de la mission (le plafond
-      // carte JIT l'aurait d'ailleurs refusé à l'achat — défense en profondeur).
-      if (purchaseAmountCents > mission.budgetCents) {
-        return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+
+      // Modèle « Drive » (Sprint 16) — pas d'attente synchrone en rayon. L'acheteur
+      // pré-autorise (ou non) la substitution dès la commande (mission.substitutionAuthorized) :
+      //   • reçu ≤ budget figé           → achat nominal, aucune substitution.
+      //   • reçu > budget SANS pré-autorisation → refus (comportement historique inchangé).
+      //   • reçu > budget AVEC pré-autorisation → toléré jusqu'à un PLAFOND STRICT de 120%
+      //     du budget (centimes Int, jamais Float) ; au-delà → refus. La SubstitutionRequest
+      //     est scellée APPROVED dans la MÊME transaction que le reçu (la « validation humaine »
+      //     est le consentement acheteur en amont — jamais un auto-accept déclenché en caisse).
+      const isSubstitution = purchaseAmountCents > mission.budgetCents
+      if (isSubstitution) {
+        if (!mission.substitutionAuthorized) {
+          return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+        }
+        if (purchaseAmountCents > substitutionCeilingCents(mission.budgetCents)) {
+          return reply.code(400).send({ error: 'SUBSTITUTION_PRICE_EXCEEDS_LIMIT' })
+        }
       }
       // Hash content-addressed déterministe : scellé serveur (source de vérité).
       const sha256Server = createHash('sha256')
@@ -1494,6 +1532,24 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
               sealedAt: new Date(), // horloge serveur, jamais le device
             },
           })
+          if (isSubstitution) {
+            // Substitution pré-validée par l'acheteur (Drive) → scellée APPROVED dans la
+            // même transaction que le reçu (atomicité : reçu + substitution committent ou
+            // rollback ensemble). Mission mono-produit → une seule ligne (`lineItemRef: 'MAIN'`) ;
+            // le justificatif réel est le reçu scellé (urlRecu). `APPROVED` est la valeur
+            // d'enum existante pour « accepté par l'acheteur » (terme métier « ACCEPTED » du
+            // workflow substitution) — réutilisée, pas de synonyme ajouté.
+            await tx.substitutionRequest.create({
+              data: {
+                missionId: mission.id,
+                lineItemRef: 'MAIN',
+                proposedProduct: mission.targetProduct,
+                proposedPriceCents: purchaseAmountCents,
+                status: SubstitutionStatus.APPROVED,
+                resolvedAt: new Date(),
+              },
+            })
+          }
           const updated = await tx.mission.updateMany({
             where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
             data: { status: MissionStatus.AWAITING_VALIDATION },

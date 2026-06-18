@@ -34,8 +34,8 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 | GET | `/api/missions` | auth (ses missions : buyer OU traveler) |
 | GET | `/api/missions/available` | auth (FUNDED, pas les siennes) |
 | GET | `/api/missions/:id` | **participant** (404 masquant pour un tiers) |
-| POST | `/:id/intent` | **acheteur** — financement T0 |
-| POST | `/:id/checkout-session` | **acheteur** — financement T0 (Checkout) |
+| POST | `/:id/intent` | **acheteur** — financement T0 ; **Drive (S17)** : si `substitutionAuthorized`, hold PaymentIntent + `spendingLimitCents` dimensionnés à `floor(budget×1,2)` (commission inchangée) |
+| POST | `/:id/checkout-session` | **acheteur** — financement T0 (Checkout) ; même dimensionnement 120% que `/intent` si `substitutionAuthorized` |
 | POST | `/:id/match` · `/:id/accept` | non-acheteur, statut `FUNDED` ; **hardening voyageur (S13)** : `stripePaymentMethodId` requis sinon 400 `TRAVELER_CARD_MISSING` (carte de garantie, après les checks own-mission/statut) |
 | POST | `/:id/start-travel` | **voyageur** assigné |
 | POST | `/:id/ship` | **voyageur** ; refuse `purchaseAmountCents > budget` |
@@ -68,7 +68,7 @@ Format d'erreur uniforme : `{ error: 'SNAKE_CASE_CODE' }`.
 ### Stripe (signature `constructEvent`, **JAMAIS** JWT)
 | Méthode | Route | Note |
 |---|---|---|
-| POST | `/api/stripe/issuing-authorization` | secret dédié `STRIPE_ISSUING_WEBHOOK_SECRET` ; JIT < 2 s ; **refus par défaut** (fail-safe) ; 1 lecture indexée (+ jointure statut mission) + comparaison ; **gel** mission `DISPUTED`/`CANCELLED` → `approved:false` (§4) |
+| POST | `/api/stripe/issuing-authorization` | secret dédié `STRIPE_ISSUING_WEBHOOK_SECRET` ; JIT < 2 s ; **refus par défaut** (fail-safe) ; 1 lecture indexée (+ jointure statut/budget/`substitutionAuthorized` mission) + comparaison ; **gel** mission `DISPUTED`/`CANCELLED` → `approved:false` (§4) ; **plafond unitaire (S17)** : `floor(budget×1,2)` si `substitutionAuthorized`, sinon `spendingLimitCents` |
 | POST | `/api/stripe/webhook` | secret `STRIPE_WEBHOOK_SECRET` ; events async ; idempotent (cf. §5) |
 
 ---
@@ -112,8 +112,10 @@ Vérifiés (lecture seule, n'altèrent jamais le ledger) par
 [`runReconciliation`](../src/workers/reconciliation.ts) ; tout écart = alerte, pas une correction.
 
 - **A.** `Σ(CAPTURE) == EscrowTransaction.capturedAmountCents` — pour **tout** escrow.
-- **B.** `Σ(PAYOUT + COMMISSION + REFUND) ≤ Σ(CAPTURE)` — pour **tout** escrow.
-- **C.** `status ∈ {RELEASED, REFUNDED} ⇒ Σ(PAYOUT+COMMISSION+REFUND) == Σ(CAPTURE)`.
+- **B.** `Σ(PAYOUT + COMMISSION + REFUND + BUYER_WALLET_CREDIT) ≤ Σ(CAPTURE)` — pour **tout** escrow.
+- **C.** `status ∈ {RELEASED, REFUNDED} ⇒ Σ(PAYOUT+COMMISSION+REFUND+BUYER_WALLET_CREDIT) == Σ(CAPTURE)`.
+
+> **`BUYER_WALLET_CREDIT` INCLUS dans les invariants (S18)** : à la différence des types pénalité (ci-dessous, exclus), le reliquat de substitution recrédité au Wallet acheteur **décompose la capture** (`CAPTURE = PAYOUT + COMMISSION + BUYER_WALLET_CREDIT`) — il est donc compté dans les sommes B/C ([`reconciliation.ts`](../src/workers/reconciliation.ts) `outflow`). Sans cela, une capture à 120% solderait l'escrow en déséquilibre apparent.
 
 > **Types pénalité hors invariants (S14)** : `FRAUD_PENALTY_COLLECTED` et `BUYER_REFUND_COMPENSATION`
 > sont **EXCLUS** des sommes A/B/C — `runReconciliation` ne somme que `CAPTURE/PAYOUT/COMMISSION/REFUND`
@@ -395,14 +397,16 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
   > `refunds.create` ; (3) `AdminAuditLog` tracé dans la `$transaction` (invariant D-c, comme
   > `customs-approve/reject`). Test : `admin-dispute.test.ts` (happy paths, 403/401, 400, idempotence).
 
-**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **29 fichiers,
-156 tests verts** (+3 penalty-worker). Fichiers Sprint 15 : `schema.prisma` (`PenaltyDebitOutbox` +
-`attempts`/`lastError`/`stripePaymentIntentId @unique`), `src/workers/penalty.worker.ts` (nouveau),
-`src/server.ts` (montage du worker + arrêt gracieux), `src/alerts.ts` (`PENALTY_DEBIT_ABANDONED` critical),
-`src/workers/penalty-worker.test.ts` (nouveau, 3 tests), ce fichier. Migration `20260617150000_penalty_outbox_retry_fields`.
-**Reste hors scope** : le **versement effectif des 120% à l'acheteur** (la compensation est journalisée en `LedgerEntry`
-`BUYER_REFUND_COMPENSATION` mais l'acheteur n'a pas de compte Connect — canal de restitution à décider) ; le worker
-libère le hold (acheteur non débité) mais ne pousse pas encore les 120% sortants.
+**Substitution « Drive » (Sprint 16)** : `Mission.substitutionAuthorized` (`Boolean @default(false)`, pré-autorisation à la commande) — modèle Drive, **pas d'attente synchrone PENDING en rayon, aucun nouveau `MissionStatus`**. À `/submit-receipt` ([`mission.route.ts`](../src/missions/mission.route.ts)) : reçu ≤ budget = nominal ; reçu > budget **sans** pré-autorisation → 400 `RECEIPT_AMOUNT_EXCEEDS_BUDGET` (comportement historique inchangé) ; reçu > budget **avec** pré-autorisation et ≤ 120% (`Math.floor(budget×12/10)`, centimes Int) → `SubstitutionRequest` scellée **`APPROVED`** (valeur d'enum existante = « accepté acheteur » du workflow ; pas de synonyme `ACCEPTED` ajouté) dans la **même `$transaction`** que le reçu, mission `IN_PROGRESS → AWAITING_VALIDATION` ; reçu > 120% → 400 `SUBSTITUTION_PRICE_EXCEEDS_LIMIT`. `POST /` accepte `substitutionAuthorized` (optionnel). Migration `20260617160000_add_substitution_authorized` (colonne `BOOLEAN NOT NULL DEFAULT false`, rétro-compatible). Test : `mission-substitution-drive.test.ts` (6 cas).
+
+**Alignement webhook JIT & dimensionnement 120% (Sprint 17)** : ferme la « moitié avant » du Drive. Au financement (`/intent`, `/checkout-session`), si `substitutionAuthorized` : le hold PaymentIntent **et** `EscrowTransaction.spendingLimitCents` (= Spending Control de la carte JIT) sont dimensionnés à `floor(budget×1,2)` via le helper `substitutionCeilingCents` (source unique, réutilisé par `/submit-receipt`) ; **commission inchangée → zéro régression** (flag false ⇒ valeurs identiques à l'historique). La garde JIT ([`issuing-authorization.route.ts`](../src/stripe/issuing-authorization.route.ts)) lit désormais `substitutionAuthorized`/`budgetCents` et autorise unitairement jusqu'à `floor(budget×1,2)` (sinon `spendingLimitCents`). Test : `issuing-substitution-jit.test.ts` (115% ✓, 120% pile ✓, 125% ✗, non-autorisé 115% ✗). L'écart de capture (capture ne tirait que le budget) est **fermé par le close-out S18 ci-dessous**.
+
+**Close-out capture & Wallet acheteur — « zéro décaissement » (Sprint 18)** : ferme la « moitié arrière » du Drive. (1) **Capture intégrale** : `captureEscrowFunds` capture désormais `substitutionCeilingCents(budget) + commission` (= 120%) si `substitutionAuthorized` ; les chemins `/validate` & `/confirm-receipt` capturaient déjà le **montant autorisé complet** (= 120% post-S17). (2) **Décomposition au webhook** ([`webhook.route.ts`](../src/stripe/webhook.route.ts) `handleCapture`, source de vérité) : `spendable = capturé − commission` se répartit en `PAYOUT = purchaseAmountCents` (dépense réelle voyageur → `TransferOutbox`) + `BUYER_WALLET_CREDIT = spendable − dépense` (reliquat → Wallet interne acheteur, **aucun remboursement Stripe**). `CAPTURE = PAYOUT + COMMISSION + BUYER_WALLET_CREDIT` (invariants B/C, §3). Hors substitution / `purchaseAmountCents` absent → `payout = capturé − commission` (non-régression stricte). (3) **Wallet** : nouveaux modèles `Wallet` (`userId @unique`, `balanceCents`) + `WalletTransaction` (`missionId @unique` → idempotence) ; crédit via `upsert` du wallet + écriture, dans la `$transaction` du webhook (aucun appel Stripe). `LedgerType.BUYER_WALLET_CREDIT` ajouté, **inclus** dans `outflow` de la réconciliation. Migration `20260617170000_add_buyer_wallet`. Test : `wallet-drive-capture.test.ts` (capture 120% décomposée + Wallet crédité du reliquat + invariant sain ; non-substitution sans Wallet). **Reste** : exposition du solde Wallet (lecture/usage à l'achat futur) — non demandé. *(Numérotation : ce close-out était nommé « Sprint 17 » côté demande ; documenté S18 ici car S17 désignait déjà l'alignement JIT.)*
+
+**État de validation global** : `npx tsc --noEmit` → 0 erreur ; `npx vitest run` → **32 fichiers,
+168 tests verts** (S16 +6 substitution Drive, S17 +4 JIT 120%, S18 +2 close-out Wallet). Fichiers Sprint 16 : `schema.prisma` (`Mission.substitutionAuthorized`), `mission.route.ts` (logique Drive `/submit-receipt` + création), `mission-substitution-drive.test.ts`, migration `20260617160000_add_substitution_authorized`. Fichiers Sprint 17 : `mission.route.ts` (helper `substitutionCeilingCents` + dimensionnement 120% `/intent` & `/checkout-session`), `issuing-authorization.route.ts` (plafond JIT 120%), `issuing-substitution-jit.test.ts`. Fichiers Sprint 18 : `schema.prisma` (`Wallet`/`WalletTransaction` + `LedgerType.BUYER_WALLET_CREDIT`), `services/escrow.service.ts` (capture 120%), `stripe/webhook.route.ts` (décomposition + crédit Wallet), `workers/reconciliation.ts` (invariant inclut le reliquat), `wallet-drive-capture.test.ts`, ce fichier. Migration `20260617170000_add_buyer_wallet`.
+
+> Sprint 15 (rappel) : penalty-worker (`penalty.worker.ts`) — charge off-session 200% + libération du hold sur succès. **Reste hors scope S15** : versement effectif des 120% à l'acheteur (compensation journalisée `BUYER_REFUND_COMPENSATION`, mais acheteur sans compte Connect — canal de restitution à décider). Migration `20260617150000_penalty_outbox_retry_fields`.
 
 > Sprint 14 (rappel) : moteur 120/200 — `POST /api/admin/missions/:id/arbitrate-fraud`, `DISPUTED → DISPUTED_FRAUD`,
 > `PenaltyDebitOutbox` + ledger `FRAUD_PENALTY_COLLECTED`/`BUYER_REFUND_COMPENSATION`. Migration `20260617140000_add_fraud_penalty_engine`.

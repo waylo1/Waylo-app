@@ -51,6 +51,7 @@ enum LedgerType {
   PAYOUT
   COMMISSION
   REFUND
+  BUYER_WALLET_CREDIT // reliquat de substitution « Drive » (S18) : part du séquestre capturé NON dépensée en magasin, recréditée au Wallet interne acheteur. INCLUS dans les invariants B/C (décompose la capture : CAPTURE = PAYOUT + COMMISSION + BUYER_WALLET_CREDIT) — zéro décaissement Stripe.
   FRAUD_PENALTY_COLLECTED // ponction du voyageur fraudeur : 200% de (Valeur Objet + Frais Service). Flux SÉPARÉ de l'escrow acheteur — EXCLU des invariants A/B/C (la réconciliation ne somme que CAPTURE/PAYOUT/COMMISSION/REFUND).
   BUYER_REFUND_COMPENSATION // compensation versée à l'acheteur : 120% de (Valeur Objet + Frais Service), financée par la ponction. EXCLUE des invariants A/B/C — magnitude positive, le TYPE porte la direction (sortie vers l'acheteur).
 }
@@ -101,6 +102,7 @@ model User {
   reviewsAuthored    Review[]  @relation("ReviewsAuthored")
   reviewsReceived    Review[]  @relation("ReviewsReceived")
   penaltyDebits      PenaltyDebitOutbox[]
+  wallet             Wallet?   // solde interne acheteur (reliquat de substitution « Drive », S18)
 }
 
 model Mission {
@@ -111,6 +113,7 @@ model Mission {
   targetProduct   String
   budgetCents     Int // figé après MATCHED — toute modification post-MATCHED est interdite côté service
   commissionCents Int // figé
+  substitutionAuthorized Boolean @default(false) // pré-autorisation acheteur (modèle « Drive », S16) : le voyageur peut sceller un reçu > budget jusqu'à 120% sans attente synchrone ; défaut false = comportement historique (reçu > budget refusé)
   origin          String   @default("") // lieu d'origine (acheteur) ; @default("") pour backfill des lignes existantes — jamais vide via l'API (validation min 1)
   destination     String
   trackingReference String? // référence de suivi du dépôt/expédition (posée à MATCHED → IN_PROGRESS via /ship)
@@ -142,6 +145,7 @@ model Mission {
   issuingAuthLogs IssuingAuthorizationLog[]
   reviews         Review[]
   penaltyDebit    PenaltyDebitOutbox?
+  walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
 
   @@index([buyerId])
   @@index([travelerId])
@@ -214,6 +218,39 @@ model PenaltyDebitOutbox {
 
   @@index([userId])
   @@index([status])
+}
+
+// Wallet interne acheteur (Sprint 18, modèle « Drive »). Solde alimenté par le
+// reliquat de substitution : la part du séquestre capturé NON dépensée en magasin
+// (substitutionCeilingCents(budget) − purchaseAmountCents) est recréditée ICI plutôt
+// que remboursée via Stripe → zéro décaissement plateforme. `balanceCents` Int (centimes).
+model Wallet {
+  id          String   @id @default(cuid())
+  userId      String   @unique // un seul wallet par utilisateur
+  balanceCents Int     @default(0) // solde courant, centimes Int (jamais négatif : seuls des crédits ici en S18)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id])
+  transactions WalletTransaction[]
+}
+
+// Écriture de mouvement Wallet (append-only, miroir LedgerEntry). En S18 le seul
+// producteur est le reliquat de substitution à la capture. `missionId @unique` :
+// idempotence stricte (un seul crédit par mission, même si le webhook rejoue).
+model WalletTransaction {
+  id          String   @id @default(cuid())
+  walletId    String
+  missionId   String   @unique // une seule écriture de reliquat par mission
+  amountCents Int // crédit (centimes Int, positif)
+  reason      String   @default("SUBSTITUTION_RESIDUAL") // motif métier (extensible)
+  createdAt   DateTime @default(now())
+
+  wallet  Wallet  @relation(fields: [walletId], references: [id])
+  // onDelete: Cascade — une mission supprimée emporte son écriture wallet (isolation tests).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
 }
 
 model LedgerEntry {

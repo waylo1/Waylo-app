@@ -77,7 +77,7 @@ const issuingAuthorizationRoute: FastifyPluginAsync<IssuingAuthorizationOptions>
             missionId: true,
             status: true,
             spendingLimitCents: true,
-            mission: { select: { status: true } },
+            mission: { select: { status: true, substitutionAuthorized: true, budgetCents: true } },
           },
         })
         if (!escrow) {
@@ -95,13 +95,21 @@ const issuingAuthorizationRoute: FastifyPluginAsync<IssuingAuthorizationOptions>
             reason = 'MISSION_CANCELLED'
           } else if (escrow.status !== EscrowStatus.HELD) {
             reason = 'ESCROW_NOT_HELD'
-          } else if (requestedCents > escrow.spendingLimitCents) {
-            // Le cumul multi-autorisations est borné par les Spending Controls
-            // posés à l'émission ; ici contrôle unitaire contre le budget mission.
-            reason = 'OVER_BUDGET'
           } else {
-            approved = true
-            reason = 'WITHIN_BUDGET'
+            // Plafond unitaire. Modèle « Drive » (S17) : si l'acheteur a pré-autorisé
+            // la substitution, on autorise jusqu'à 120% du budget (Math.floor, centimes
+            // Int) — cohérent avec le séquestre + le Spending Control dimensionnés à 120%
+            // au financement. Sinon, plafond figé de l'escrow (= budget). Le cumul
+            // multi-autorisations reste borné par les Spending Controls posés à l'émission.
+            const ceilingCents = escrow.mission.substitutionAuthorized
+              ? Math.floor((escrow.mission.budgetCents * 12) / 10)
+              : escrow.spendingLimitCents
+            if (requestedCents > ceilingCents) {
+              reason = 'OVER_BUDGET'
+            } else {
+              approved = true
+              reason = 'WITHIN_BUDGET'
+            }
           }
         }
       }
