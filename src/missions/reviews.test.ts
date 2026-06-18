@@ -32,7 +32,6 @@ describe('POST /api/missions/:id/reviews — notation post-clôture (Sprint 10)'
   let traveler: User
   let outsider: User
   let buyerToken: string
-  let travelerToken: string
   let outsiderToken: string
 
   beforeAll(async () => {
@@ -56,7 +55,6 @@ describe('POST /api/missions/:id/reviews — notation post-clôture (Sprint 10)'
     outsider = await prisma.user.create({ data: { email: 'outsider-review@test.waylo' } })
 
     buyerToken = app.jwt.sign({ sub: buyer.id })
-    travelerToken = app.jwt.sign({ sub: traveler.id })
     outsiderToken = app.jwt.sign({ sub: outsider.id })
   })
 

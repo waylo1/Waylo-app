@@ -2,7 +2,7 @@ import { FastifyError, FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { MissionStatus } from '../generated/prisma'
 import { findMissionForBuyer } from '../missions/mission-access'
-import type { PaymentIntentClient } from '../missions/mission.route'
+import type { PaymentIntentClient } from '../missions/mission-common'
 import { captureEscrowFunds, EscrowCaptureError } from '../services/escrow.service'
 
 /**

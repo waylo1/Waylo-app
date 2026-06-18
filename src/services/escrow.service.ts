@@ -1,6 +1,6 @@
 import { prisma } from '../db'
 import { EscrowStatus } from '../generated/prisma'
-import { substitutionCeilingCents, type PaymentIntentClient } from '../missions/mission.route'
+import { substitutionCeilingCents, type PaymentIntentClient } from '../missions/mission-common'
 
 /**
  * Service escrow — capture du séquestre (T1) réutilisable hors route.
