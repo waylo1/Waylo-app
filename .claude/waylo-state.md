@@ -1,7 +1,7 @@
 # Waylo — État du système (source de vérité technique)
 
-> Snapshot factuel du backend après **Sprints 1–4 (module Douane complet)**.
-> Branche courante : `fix/sprint2-customs-receipt-sha256` (contient S1–S4).
+> Snapshot factuel du backend après **Sprints 1–20 (Wallet Gate + Reconciliation Cron + BuyerCompensationOutbox)**.
+> Branche courante : `feat/reconciliation-cron` (contient S1–S20 + schéma S21+).
 > En cas de divergence code ↔ doc, **le code prime** — mettre ce fichier à jour.
 
 ---
@@ -413,3 +413,116 @@ Démarrés côte à côte dans [`server.ts`](../src/server.ts), chacun avec gard
 
 > Sprint 13 (rappel) : hardening voyageur (`User.stripePaymentMethodId` requis sur `/match` et `/accept`,
 > 400 `TRAVELER_CARD_MISSING`). Migration `20260617130000_add_traveler_stripe_fields`.
+
+---
+
+## 8. Sprints 19–20 — Wallet Gate, Reconciliation CLI & Compensation Schema
+
+### Sprint 19 — Garde capacité acheteur au checkout
+
+**Fichiers** : [`src/checkout/wallet-validation.ts`](../src/checkout/wallet-validation.ts),
+[`src/missions/mission.route.ts`](../src/missions/mission.route.ts),
+[`src/missions/mission-funding.test.ts`](../src/missions/mission-funding.test.ts).
+
+**Invariant ajouté** : avant tout engagement escrow (`/intent`, `/checkout-session`), la
+capacité de paiement de l'acheteur doit couvrir 120% du prix total mission (`budget + commission`).
+Capacité = autorisation Stripe (hold carte) + solde Wallet interne (S18). En dessous → 400
+`INSUFFICIENT_FUNDS_FOR_MISSION` (avant la réservation atomique, aucune écriture financière).
+
+Calcul : `requiredCapacityCents(total) = Math.floor((total × 12) / 10)` — miroir exact de
+`substitutionCeilingCents` (S17), mais appliqué au **total** (pas au seul budget).
+
+**Helper route** `checkFundingCapacity(missionId, body)` : appelle `validateMissionFunding`,
+intercepte `CheckoutValidationError`, retourne `{status, code}` pré-formaté ou `null` (OK).
+S'insère **avant** le calcul `spendingLimitCents` dans les deux routes, zéro régression
+(appel non substituable court-circuit proprement).
+
+Wallet absent = solde 0 (pas d'erreur) ; seul le cumul (carte + wallet) compte.
+
+### Sprint 20 — UI : erreur capacité + CTA Recharger le Wallet
+
+**Fichiers** : [`frontend/lib/api-errors.ts`](../frontend/lib/api-errors.ts),
+[`frontend/app/missions/[id]/pay/page.tsx`](../frontend/app/missions/[id]/pay/page.tsx).
+
+Catch `INSUFFICIENT_FUNDS_FOR_MISSION` dans `handleCreateIntent` → état `errorCode` dédié
+→ alerte UX avec bouton **« Recharger le Wallet »** (`/wallet/recharge`). Conditionnel :
+bouton affiché UNIQUEMENT pour cette erreur, pas pour les autres codes 400/500.
+
+### Reconciliation CLI standalone
+
+**Fichier** : [`src/scripts/trigger-reconciliation.ts`](../src/scripts/trigger-reconciliation.ts).
+
+Entrypoint court (sans serveur HTTP, sans boucle setInterval) — destiné aux crons externes
+(GitHub Actions, crontab, Fly Machines scheduled, k8s CronJob). Réutilise `runReconciliation`
+existant ; Stripe optionnel (`STRIPE_SECRET_KEY` absente → invariants DB seuls).
+
+**Contrat de sortie (non négociable)** :
+| Code | Signification |
+|---|---|
+| `0` | Run OK — ledger sain (avec ou sans alertes si flag OFF) |
+| `1` | Run échoué (exception) — détection morte |
+| `2` | Run OK + alertes détectées **et** `RECONCILIATION_FAIL_ON_ALERT=1` (ou `--fail-on-alert`) |
+
+Script npm : `"reconcile": "tsx src/scripts/trigger-reconciliation.ts"`.
+Guard `require.main === module` → import de tests sans effet de bord.
+
+### CI/CD — workflow nightly
+
+**Fichier** : [`.github/workflows/reconciliation-cron.yml`](../.github/workflows/reconciliation-cron.yml).
+
+- Cron `0 0 * * *` (00:00 UTC) + `workflow_dispatch`.
+- Concurrency group `reconciliation-cron`, `cancel-in-progress: false` (jamais deux runs concurrents).
+- Steps : `checkout@v4`, `setup-node@v4` (Node 20, cache npm), `npm ci || npm install`, `npx prisma generate`, `npm run reconcile`.
+- Secrets : `DATABASE_URL`, `STRIPE_SECRET_KEY`.
+- Artifact `alerts-critical.ndjson` uploadé `if: always()`, 30 j de rétention.
+
+### BuyerCompensationOutbox — schéma Sprint 21+
+
+**Fichiers** : [`prisma/schema.prisma`](../prisma/schema.prisma),
+migration `20260618084138_add_buyer_compensation_outbox`.
+
+Nouveau modèle outbox pour le futur canal de restitution acheteur (compensation post-arbitrage fraude
+journalisée en `BUYER_REFUND_COMPENSATION` depuis S14, non encore exécutée — acheteur sans compte Connect).
+
+```prisma
+enum OutboxStatus { PENDING  SETTLED  FAILED }
+
+model BuyerCompensationOutbox {
+  id             String       @id @default(cuid())
+  missionId      String
+  buyerId        String
+  amountCents    Int                          -- centimes Int, jamais Float
+  status         OutboxStatus @default(PENDING)
+  idempotencyKey String       @unique         -- replay-safe
+  attempts       Int          @default(0)    -- backoff exponentiel 2^n
+  lastError      String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  mission        Mission      @relation(onDelete: Cascade)  -- isolation tests
+  buyer          User         @relation(fields: [buyerId], references: [id])
+  @@index([status])   @@index([buyerId])   @@index([missionId])
+}
+```
+
+Back-relations : `User.buyerCompensations[]` + `Mission.buyerCompensations[]`.
+
+**Canal de restitution non décidé** : Wallet-crédit (le plus simple, réutilise S18), virement bancaire,
+ou Stripe Connect payout. Le worker sera écrit quand le canal est arrêté. Les champs `attempts`/`lastError`
+permettent le backoff miroir des workers existants.
+
+**Note** : `OutboxStatus` manque `SUBMITTED` (claim in-flight) et `ABANDONED` (terminal)
+présents dans `TransferStatus`. À ajouter via `ADD VALUE` migration au moment d'écrire le worker
+(cheap, rétro-compatible — cf. pattern penalty-worker).
+
+---
+
+## 9. État de validation global (branche feat/reconciliation-cron)
+
+`npx tsc --noEmit` → **0 erreur** ; `npx vitest run` → **34 fichiers, 178 tests verts**.
+
+Nouveaux fichiers de test S19–S20 :
+- `src/checkout/wallet-validation.test.ts` — 4 cas (success, alertes sans flag, alertes + flag, fonds insuffisants)
+- `src/missions/mission-funding.test.ts` — 8 cas HTTP (`/intent` + `/checkout-session`, capacité insuffisante, seuil exact, flag exit 2)
+- `src/scripts/__tests__/trigger-reconciliation.test.ts` — 4 cas (exit 0/0/2/1)
+
+Migration DB appliquée sur `waylo_test` : `20260618084138_add_buyer_compensation_outbox`.
