@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
+import { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { prisma } from '../db'
 import { DropOffType, EscrowStatus, MissionStatus, Prisma, SubstitutionStatus } from '../generated/prisma'
 import {
@@ -428,7 +428,7 @@ const availableQuerySchema = {
 } as const
 
 const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
     req.log.error({ err }, 'mission route error')
     return reply.code(500).send({ error: 'INTERNAL_ERROR' })

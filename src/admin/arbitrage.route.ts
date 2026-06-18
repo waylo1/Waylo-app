@@ -1,4 +1,4 @@
-import { FastifyPluginAsync } from 'fastify'
+import { FastifyError, FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { LedgerType, MissionStatus } from '../generated/prisma'
 import { isRequestAdmin } from '../missions/mission.route'
@@ -42,7 +42,7 @@ const missionIdParamsSchema = {
 class ArbitrateFraudConflictError extends Error {}
 
 const arbitrageRoute: FastifyPluginAsync = async app => {
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
     req.log.error({ err }, 'admin arbitrage route error')
     return reply.code(500).send({ error: 'INTERNAL_ERROR' })

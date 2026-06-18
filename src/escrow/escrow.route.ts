@@ -1,4 +1,4 @@
-import { FastifyPluginAsync } from 'fastify'
+import { FastifyError, FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { MissionStatus } from '../generated/prisma'
 import { findMissionForBuyer } from '../missions/mission-access'
@@ -39,7 +39,7 @@ const missionIdParamsSchema = {
 } as const
 
 const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) => {
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
     req.log.error({ err }, 'escrow route error')
     return reply.code(500).send({ error: 'INTERNAL_ERROR' })
