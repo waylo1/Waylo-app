@@ -12,8 +12,9 @@ import { isRequestAdmin } from '../missions/mission.route'
  * appel Stripe — règle d'or trivialement respectée) :
  *   1. transition conditionnelle anti-TOCTOU `DISPUTED → DISPUTED_FRAUD` (gelé terminal) ;
  *   2. `PenaltyDebitOutbox` PENDING pour le voyageur : ponction 200% de (Objet + Frais) ;
- *   3. `LedgerEntry` `FRAUD_PENALTY_COLLECTED` (200%) + `BUYER_REFUND_COMPENSATION` (120%) ;
- *   4. `AdminAuditLog` (invariant D-c : toute décision admin tracée atomiquement).
+ *   3. `BuyerCompensationOutbox` PENDING pour l'acheteur : compensation 120% (exécution différée) ;
+ *   4. `LedgerEntry` `FRAUD_PENALTY_COLLECTED` (200%) + `BUYER_REFUND_COMPENSATION` (120%) ;
+ *   5. `AdminAuditLog` (invariant D-c : toute décision admin tracée atomiquement).
  *
  * Base de calcul : (`budgetCents` [Valeur Objet] + `commissionCents` [Frais Service]) ;
  * ponction = base × 2 (200%), compensation acheteur = base × 1,2 (120%). La marge
@@ -66,6 +67,7 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
         where: { id },
         select: {
           status: true,
+          buyerId: true,
           travelerId: true,
           budgetCents: true,
           commissionCents: true,
@@ -86,6 +88,7 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
 
       const escrowId = mission.escrow.id
       const travelerId = mission.travelerId
+      const buyerId = mission.buyerId // bénéficiaire de la compensation 120% (non-null en DB)
       // Base = Valeur Objet (budget) + Frais Service Plateforme (commission).
       const baseCents = mission.budgetCents + mission.commissionCents
       const penaltyCents = baseCents * 2 // 200% — ponction voyageur
@@ -102,6 +105,17 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
           // Intention de ponction (exécution Stripe différée au worker dédié).
           await tx.penaltyDebitOutbox.create({
             data: { missionId: id, userId: travelerId, amountCents: penaltyCents },
+          })
+
+          // Intention de compensation acheteur 120% (exécution Wallet/payout différée au
+          // worker dédié). idempotencyKey @unique = une seule restitution par mission.
+          await tx.buyerCompensationOutbox.create({
+            data: {
+              missionId: id,
+              buyerId,
+              amountCents: compensationCents,
+              idempotencyKey: `buyer_compensation_${id}`,
+            },
           })
 
           // Journal comptable du flux pénalité — hors invariant escrow (cf. en-tête).

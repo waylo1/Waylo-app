@@ -53,6 +53,7 @@ describe('Arbitrage admin fraude voyageur — POST /api/admin/missions/:id/arbit
     app = await (await import('../app')).buildApp()
 
     await prisma.penaltyDebitOutbox.deleteMany()
+    await prisma.buyerCompensationOutbox.deleteMany()
     await prisma.transferOutbox.deleteMany()
     await prisma.ledgerEntry.deleteMany()
     await prisma.issuingAuthorizationLog.deleteMany()
@@ -128,6 +129,15 @@ describe('Arbitrage admin fraude voyageur — POST /api/admin/missions/:id/arbit
     expect(outbox.amountCents).toBe(PENALTY_CENTS) // 23_000
     expect(outbox.status).toBe('PENDING')
 
+    // BuyerCompensationOutbox : acheteur bénéficiaire, montant 120%, PENDING, clé idempotente.
+    const compensationOutbox = await prisma.buyerCompensationOutbox.findFirstOrThrow({
+      where: { missionId: mission.id },
+    })
+    expect(compensationOutbox.buyerId).toBe(buyer.id)
+    expect(compensationOutbox.amountCents).toBe(COMPENSATION_CENTS) // 13_800 (120%)
+    expect(compensationOutbox.status).toBe('PENDING')
+    expect(compensationOutbox.idempotencyKey).toBe(`buyer_compensation_${mission.id}`)
+
     // Ledger : 200% collecté + 120% compensation, ancrés à l'escrow de la mission.
     const escrow = await prisma.escrowTransaction.findUniqueOrThrow({
       where: { missionId: mission.id },
@@ -166,6 +176,7 @@ describe('Arbitrage admin fraude voyageur — POST /api/admin/missions/:id/arbit
 
     // Aucun effet : ni outbox, ni ledger, mission toujours DISPUTED.
     expect(await prisma.penaltyDebitOutbox.count({ where: { missionId: mission.id } })).toBe(0)
+    expect(await prisma.buyerCompensationOutbox.count({ where: { missionId: mission.id } })).toBe(0)
     const escrow = await prisma.escrowTransaction.findUniqueOrThrow({
       where: { missionId: mission.id },
     })
@@ -187,8 +198,9 @@ describe('Arbitrage admin fraude voyageur — POST /api/admin/missions/:id/arbit
     expect(second.statusCode).toBe(400)
     expect(second.json()).toEqual({ error: 'MISSION_NOT_DISPUTED' })
 
-    // Exactement une ponction + deux lignes de ledger (idempotence anti-TOCTOU).
+    // Exactement une ponction + une compensation + deux lignes de ledger (idempotence anti-TOCTOU).
     expect(await prisma.penaltyDebitOutbox.count({ where: { missionId: mission.id } })).toBe(1)
+    expect(await prisma.buyerCompensationOutbox.count({ where: { missionId: mission.id } })).toBe(1)
     const escrow = await prisma.escrowTransaction.findUniqueOrThrow({
       where: { missionId: mission.id },
     })
