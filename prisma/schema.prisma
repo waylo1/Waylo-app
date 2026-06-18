@@ -29,6 +29,9 @@ enum MissionStatus {
   PENDING_CUSTOMS_REVIEW // quittance déposée par le voyageur : en attente de validation ops/admin (le bénéficiaire ne lève pas son propre verrou)
   AWAITING_VALIDATION
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
+  DEPOSITED // le voyageur a déposé/remis le colis (preuve de dépôt + tracking) ; atteint depuis MATCHED ou VALIDATED (post-douane) via /dropoff-receipt
+  DISPUTED // litige ouvert par l'acheteur depuis DEPOSITED (/dispute) ; GÈLE la mission : retirée des workers de timeout (capture/refund auto), résolution humaine requise
+  DISPUTED_FRAUD // arbitrage admin : vol/fraude voyageur avéré (depuis DISPUTED) — état gelé terminal ; déclenche la ponction 200% (PenaltyDebitOutbox) + journalisation compensation acheteur 120% (LedgerEntry). Aucune libération, aucun versement voyageur.
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
   REFUNDED
@@ -48,6 +51,9 @@ enum LedgerType {
   PAYOUT
   COMMISSION
   REFUND
+  BUYER_WALLET_CREDIT // reliquat de substitution « Drive » (S18) : part du séquestre capturé NON dépensée en magasin, recréditée au Wallet interne acheteur. INCLUS dans les invariants B/C (décompose la capture : CAPTURE = PAYOUT + COMMISSION + BUYER_WALLET_CREDIT) — zéro décaissement Stripe.
+  FRAUD_PENALTY_COLLECTED // ponction du voyageur fraudeur : 200% de (Valeur Objet + Frais Service). Flux SÉPARÉ de l'escrow acheteur — EXCLU des invariants A/B/C (la réconciliation ne somme que CAPTURE/PAYOUT/COMMISSION/REFUND).
+  BUYER_REFUND_COMPENSATION // compensation versée à l'acheteur : 120% de (Valeur Objet + Frais Service), financée par la ponction. EXCLUE des invariants A/B/C — magnitude positive, le TYPE porte la direction (sortie vers l'acheteur).
 }
 
 enum TransferStatus {
@@ -70,6 +76,12 @@ enum AuthDecision {
   DECLINED
 }
 
+enum DropOffType {
+  LOCKER  // casier automatique (InPost, DHL Packstation…)
+  RELAY   // point relais commerçant (Mondial Relay, UPS Access Point…)
+  POSTAL  // dépôt bureau de poste / service postal standard
+}
+
 model User {
   id               String    @id @default(cuid())
   // Pas de rôle de compte : « acheteur » / « voyageur » est CONTEXTUEL, dérivé
@@ -78,14 +90,19 @@ model User {
   passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
   isAdmin          Boolean   @default(false) // flag ops/admin (source de vérité unique, auditable) — remplace l'allowlist ADMIN_USER_IDS via env
   kycStatus        KycStatus @default(PENDING)
-  stripeCustomerId String?   @unique // acheteur
+  stripeCustomerId String?   @unique // acheteur (réutilisé comme customer de garantie côté voyageur)
   stripeAccountId  String?   @unique // voyageur (Connect)
+  stripePaymentMethodId String? @unique // carte de garantie voyageur (pm_…), vérifiée à l'inscription : adosse la future ponction de pénalité ; requise pour accepter/prendre une mission
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
   missionsAsBuyer    Mission[] @relation("BuyerMissions")
   missionsAsTraveler Mission[] @relation("TravelerMissions")
   adminAuditLogs     AdminAuditLog[]
+  reviewsAuthored    Review[]  @relation("ReviewsAuthored")
+  reviewsReceived    Review[]  @relation("ReviewsReceived")
+  penaltyDebits      PenaltyDebitOutbox[]
+  wallet             Wallet?   // solde interne acheteur (reliquat de substitution « Drive », S18)
 }
 
 model Mission {
@@ -96,6 +113,7 @@ model Mission {
   targetProduct   String
   budgetCents     Int // figé après MATCHED — toute modification post-MATCHED est interdite côté service
   commissionCents Int // figé
+  substitutionAuthorized Boolean @default(false) // pré-autorisation acheteur (modèle « Drive », S16) : le voyageur peut sceller un reçu > budget jusqu'à 120% sans attente synchrone ; défaut false = comportement historique (reçu > budget refusé)
   origin          String   @default("") // lieu d'origine (acheteur) ; @default("") pour backfill des lignes existantes — jamais vide via l'API (validation min 1)
   destination     String
   trackingReference String? // référence de suivi du dépôt/expédition (posée à MATCHED → IN_PROGRESS via /ship)
@@ -104,6 +122,16 @@ model Mission {
   customsReceiptUrl  String? // preuve de paiement des taxes (posée par le voyageur via /customs-receipt) ; null = non fournie
   customsReceiptSha256 String? // scellé serveur de la quittance douanière
   saleSignature   String? // sha256 du certificat de revente (généré à la confirmation de réception, /receive)
+  dropoffReceiptUrl    String?   // preuve de dépôt du colis par le voyageur (posée via /dropoff-receipt) ; null = pas encore déposé
+  dropoffTrackingNumber String?  // numéro de suivi optionnel du dépôt (transporteur)
+  dropoffAt            DateTime? // horodatage serveur du dépôt (jamais l'horloge du device)
+  dropOffType          DropOffType? // mode de dépôt logistique (posé via /drop-off depuis IN_PROGRESS)
+  dropOffCarrier       String?      // nom du transporteur / réseau (ex: "InPost", "La Poste")
+  dropOffTrackingId    String?      // numéro de colis ou identifiant de casier
+  dropOffAccessCode    String?      // code secret optionnel pour ouvrir le casier / retirer le colis
+  droppedAt            DateTime?    // horodatage serveur du dépôt logistique (jamais l'horloge du device)
+  disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
+  disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
@@ -115,6 +143,9 @@ model Mission {
   substitutions   SubstitutionRequest[]
   receipt         Receipt?
   issuingAuthLogs IssuingAuthorizationLog[]
+  reviews         Review[]
+  penaltyDebit    PenaltyDebitOutbox?
+  walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
 
   @@index([buyerId])
   @@index([travelerId])
@@ -158,6 +189,68 @@ model TransferOutbox {
 
   @@index([status])
   @@index([escrowId])
+}
+
+// Outbox transactionnel de la PONCTION DE PÉNALITÉ (vol/fraude voyageur, Sprint 14).
+// L'intention de débit de la carte de garantie du voyageur (`User.stripePaymentMethodId`)
+// commit AVEC la décision d'arbitrage (même $transaction que la transition + le ledger).
+// L'exécution Stripe réelle (charge off-session de la carte) sera portée par un worker
+// dédié — JAMAIS dans une transaction DB (règle d'or). Une seule ponction par mission
+// (@unique) : idempotence stricte, miroir de l'unicité TransferOutbox par escrow.
+model PenaltyDebitOutbox {
+  id          String         @id @default(cuid())
+  missionId   String         @unique // une seule ponction par mission (idempotence)
+  userId      String // voyageur fraudeur dont la carte de garantie sera débitée
+  amountCents Int // (Valeur Objet + Frais Service) * 2 = 200%, centimes Int
+  status      TransferStatus @default(PENDING) // réutilise le cycle outbox PENDING → SUBMITTED → SETTLED|FAILED|ABANDONED
+  // PI de la charge off-session de la carte voyageur (peuplé à SETTLED). @unique :
+  // un seul débit Stripe réussi par ponction — miroir de TransferOutbox.stripeTransferId.
+  stripePaymentIntentId String? @unique
+  attempts    Int            @default(0) // backoff exponentiel : ré-éligible après 2^attempts minutes (Sprint 15)
+  lastError   String? // dernière erreur Stripe (carte refusée…) — diagnostic, jamais le secret
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // onDelete: Cascade — une mission supprimée emporte son intention de ponction
+  // (cohérence + isolation des tests : mission.deleteMany() ne bute pas sur la FK).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+}
+
+// Wallet interne acheteur (Sprint 18, modèle « Drive »). Solde alimenté par le
+// reliquat de substitution : la part du séquestre capturé NON dépensée en magasin
+// (substitutionCeilingCents(budget) − purchaseAmountCents) est recréditée ICI plutôt
+// que remboursée via Stripe → zéro décaissement plateforme. `balanceCents` Int (centimes).
+model Wallet {
+  id          String   @id @default(cuid())
+  userId      String   @unique // un seul wallet par utilisateur
+  balanceCents Int     @default(0) // solde courant, centimes Int (jamais négatif : seuls des crédits ici en S18)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id])
+  transactions WalletTransaction[]
+}
+
+// Écriture de mouvement Wallet (append-only, miroir LedgerEntry). En S18 le seul
+// producteur est le reliquat de substitution à la capture. `missionId @unique` :
+// idempotence stricte (un seul crédit par mission, même si le webhook rejoue).
+model WalletTransaction {
+  id          String   @id @default(cuid())
+  walletId    String
+  missionId   String   @unique // une seule écriture de reliquat par mission
+  amountCents Int // crédit (centimes Int, positif)
+  reason      String   @default("SUBSTITUTION_RESIDUAL") // motif métier (extensible)
+  createdAt   DateTime @default(now())
+
+  wallet  Wallet  @relation(fields: [walletId], references: [id])
+  // onDelete: Cascade — une mission supprimée emporte son écriture wallet (isolation tests).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
 }
 
 model LedgerEntry {
@@ -224,6 +317,28 @@ model IssuingAuthorizationLog {
   // Audit KYC/AML : append-only, jamais purgé, pas de soft-delete
 
   @@index([missionId])
+}
+
+// Notation mutuelle après clôture de mission (statut RELEASED ou CANCELLED).
+// Un auteur ne peut noter qu'une seule fois par mission (@@unique missionId+authorId).
+// Immuable : pas d'updatedAt, pas de soft-delete — un avis soumis ne se modifie pas.
+model Review {
+  id        String   @id @default(cuid())
+  missionId String
+  authorId  String
+  targetId  String
+  rating    Int      // 1–5, validé par la route (Ajv minimum:1 maximum:5)
+  comment   String?  // commentaire libre optionnel
+  createdAt DateTime @default(now())
+
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  author  User    @relation("ReviewsAuthored", fields: [authorId], references: [id])
+  target  User    @relation("ReviewsReceived", fields: [targetId], references: [id])
+
+  @@unique([missionId, authorId]) // un auteur ne note qu'une fois par mission
+  @@index([missionId])
+  @@index([authorId])
+  @@index([targetId])
 }
 
 model AdminAuditLog {

@@ -4,6 +4,7 @@ import Stripe from 'stripe'
 import authRoute from './auth/auth.route'
 import missionRoute from './missions/mission.route'
 import escrowRoute from './escrow/escrow.route'
+import arbitrageRoute from './admin/arbitrage.route'
 import type { PaymentIntentClient } from './missions/mission.route'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
@@ -80,6 +81,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     onAlert: options.onAlert,
   })
   await app.register(escrowRoute, { prefix: '/api/escrow', stripe: paymentClient })
+  // Arbitrage admin de fraude voyageur (Sprint 14) — aucun client Stripe (journalise
+  // l'intention de ponction + le ledger ; l'exécution monétaire relève d'un worker).
+  await app.register(arbitrageRoute, { prefix: '/api/admin' })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
   // (encapsulé) : constructEvent exige les octets exacts du body, sans

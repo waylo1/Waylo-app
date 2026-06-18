@@ -1,6 +1,6 @@
 import { prisma } from '../db'
 import { EscrowStatus } from '../generated/prisma'
-import type { PaymentIntentClient } from '../missions/mission.route'
+import { substitutionCeilingCents, type PaymentIntentClient } from '../missions/mission.route'
 
 /**
  * Service escrow — capture du séquestre (T1) réutilisable hors route.
@@ -50,15 +50,23 @@ export async function captureEscrowFunds(
       id: true,
       stripePaymentIntentId: true,
       status: true,
-      mission: { select: { budgetCents: true, commissionCents: true } },
+      mission: {
+        select: { budgetCents: true, commissionCents: true, substitutionAuthorized: true },
+      },
     },
   })
   if (!escrow) throw new EscrowCaptureError('ESCROW_NOT_FOUND')
   if (escrow.status !== EscrowStatus.HELD) throw new EscrowCaptureError('ESCROW_NOT_HELD')
 
-  // Montant EXACT = total séquestré (budget + commission), centimes Int — miroir
-  // de POST /:id/intent. La commission est le frais plateforme, capturé avec le budget.
-  const capturedAmountCents = escrow.mission.budgetCents + escrow.mission.commissionCents
+  // Montant EXACT = total séquestré, centimes Int — miroir de POST /:id/intent.
+  // Modèle « Drive » (S18) : si la substitution est pré-autorisée, on capture
+  // l'INTÉGRALITÉ du montant provisionné (120% du budget + commission) ; le webhook
+  // décompose ensuite PAYOUT (dépense réelle) + COMMISSION + reliquat Wallet acheteur.
+  // Sinon, budget + commission (inchangé). La commission est le frais plateforme.
+  const heldBudgetCents = escrow.mission.substitutionAuthorized
+    ? substitutionCeilingCents(escrow.mission.budgetCents)
+    : escrow.mission.budgetCents
+  const capturedAmountCents = heldBudgetCents + escrow.mission.commissionCents
 
   // SEUL effet du service : la capture Stripe. idempotencyKey déterministe —
   // un retry post-crash ou un double appel capture le MÊME PI une seule fois.

@@ -71,7 +71,7 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
     app.inject({ method: 'POST', url: `/api/missions/${id}/customs-reject`, headers })
 
   async function seedPending() {
-    return prisma.mission.create({
+    const mission = await prisma.mission.create({
       data: {
         buyerId: buyer.id,
         status: 'PENDING_CUSTOMS_REVIEW',
@@ -86,19 +86,29 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })
+    // Escrow HELD requis pour la capture Stripe déclenchée par customs-approve.
+    await prisma.escrowTransaction.create({
+      data: {
+        missionId: mission.id,
+        stripePaymentIntentId: `pi_customs_${mission.id}`,
+        spendingLimitCents: 50_000,
+        idempotencyKey: `escrow_fund_${mission.id}`,
+      },
+    })
+    return mission
   }
 
-  it('(A) approve : PENDING_CUSTOMS_REVIEW → IN_PROGRESS, receipt conservé', async () => {
+  it('(A) approve : PENDING_CUSTOMS_REVIEW → VALIDATED (capture Stripe déclenchée), receipt conservé', async () => {
     const mission = await seedPending()
     const res = await approve(mission.id)
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.status).toBe('IN_PROGRESS')
+    expect(body.status).toBe('VALIDATED')
     expect(body.customsReceiptUrl).toBe('https://receipts.waylo.app/qr.pdf')
 
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
-    expect(db.status).toBe('IN_PROGRESS')
+    expect(db.status).toBe('VALIDATED')
 
     // Audit append-only : la décision admin est tracée (adminId, action, missionId).
     const audit = await prisma.adminAuditLog.findMany({ where: { missionId: mission.id } })
@@ -108,7 +118,7 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
 
   it('(B) approve sur mission non-PENDING → 400 MISSION_NOT_CUSTOMS_REVIEW', async () => {
     const mission = await seedPending()
-    await approve(mission.id) // passage IN_PROGRESS
+    await approve(mission.id) // passage VALIDATED
     const res = await approve(mission.id) // deuxième appel : plus PENDING
 
     expect(res.statusCode).toBe(400)

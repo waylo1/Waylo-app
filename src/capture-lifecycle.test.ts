@@ -126,6 +126,8 @@ describe('Cycle de vie capture — réconciliation, refunds additifs, routage, a
         retrieve: async (): Promise<{ amount_received: number }> => ({
           amount_received: BUDGET_CENTS,
         }),
+        cancel: async (id: string): Promise<{ id: string }> => ({ id }),
+        capture: async (id: string): Promise<{ id: string }> => ({ id }),
       },
     }
 

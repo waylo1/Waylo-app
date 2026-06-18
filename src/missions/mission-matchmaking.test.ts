@@ -49,8 +49,13 @@ describe('Matchmaking & cycle voyageur — match / start-travel', () => {
     await prisma.user.deleteMany()
 
     buyer = await prisma.user.create({ data: { email: 'buyer-match@test.waylo' } })
-    travelerA = await prisma.user.create({ data: { email: 'travelerA-match@test.waylo' } })
-    travelerB = await prisma.user.create({ data: { email: 'travelerB-match@test.waylo' } })
+    // Carte de garantie requise pour /match (hardening voyageur, Sprint 13).
+    travelerA = await prisma.user.create({
+      data: { email: 'travelerA-match@test.waylo', stripePaymentMethodId: 'pm_match_traveler_a' },
+    })
+    travelerB = await prisma.user.create({
+      data: { email: 'travelerB-match@test.waylo', stripePaymentMethodId: 'pm_match_traveler_b' },
+    })
     buyerToken = app.jwt.sign({ sub: buyer.id })
     travelerAToken = app.jwt.sign({ sub: travelerA.id })
     travelerBToken = app.jwt.sign({ sub: travelerB.id })
