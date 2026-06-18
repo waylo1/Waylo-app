@@ -18,28 +18,34 @@ export async function processBuyerCompensations() {
   for (const job of pendings) {
     try {
       await prisma.$transaction(async tx => {
-        // Créditer le Wallet interne de l'acheteur (créer si absent).
+        // Claim atomique anti-TOCTOU (miroir penalty.worker / transfer-worker) :
+        // transition conditionnelle PENDING → SETTLED. count=0 ⇒ la ligne a déjà
+        // été réclamée par un autre tick / une autre instance Fly → on NE crédite
+        // PAS (return : rollback implicite, aucun double-crédit possible).
+        const claim = await tx.buyerCompensationOutbox.updateMany({
+          where: { id: job.id, status: 'PENDING' },
+          data: { status: 'SETTLED', attempts: job.attempts + 1 },
+        })
+        if (claim.count !== 1) return
+
+        // Créditer le Wallet interne de l'acheteur (créer si absent). Toute
+        // exception ici annule aussi le claim (la ligne repasse PENDING).
         await tx.wallet.upsert({
           where: { userId: job.buyerId },
           create: { userId: job.buyerId, balanceCents: job.amountCents },
           update: { balanceCents: { increment: job.amountCents } },
         })
-
-        // Transition intention → SETTLED (exécution réussie).
-        await tx.buyerCompensationOutbox.update({
-          where: { id: job.id },
-          data: { status: 'SETTLED', attempts: job.attempts + 1 },
-        })
       })
-    } catch (error: any) {
+    } catch (error) {
       // Backoff exponentiel : ré-éligible après 2^attempts min ; arrêt à 4 tentatives.
+      const message = error instanceof Error ? error.message : String(error)
       const nextAttempt = job.attempts + 1
       await prisma.buyerCompensationOutbox.update({
         where: { id: job.id },
         data: {
           status: nextAttempt >= 4 ? 'FAILED' : 'PENDING',
           attempts: nextAttempt,
-          lastError: error.message,
+          lastError: message,
         },
       })
     }
