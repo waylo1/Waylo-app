@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission.route'
+import { hashQrCode } from './qr-proof'
 
 /**
  * Confirmation de collecte acheteur — POST /api/missions/:id/confirm-collection.
@@ -79,9 +80,18 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
   const confirm = (id: string, headers: Record<string, string> = bearer(buyerToken)) =>
     app.inject({ method: 'POST', url: `/api/missions/${id}/confirm-collection`, headers })
+  const confirmWithQr = (id: string, innerQrCode: string, headers: Record<string, string> = bearer(buyerToken)) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/missions/${id}/confirm-collection`,
+      headers: { ...headers, 'content-type': 'application/json' },
+      payload: JSON.stringify({ innerQrCode }),
+    })
 
   /** Mission DEPOSITED + escrow HELD (capturable). escrowStatus surchargeable. */
-  async function seedDeposited(opts: { status?: string; escrowStatus?: string } = {}) {
+  async function seedDeposited(
+    opts: { status?: string; escrowStatus?: string; innerQrCodeHash?: string } = {},
+  ) {
     const mission = await prisma.mission.create({
       data: {
         buyerId: buyer.id,
@@ -93,6 +103,7 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
         destination: 'Lyon',
         dropoffReceiptUrl: 'https://proofs.waylo.app/d.pdf',
         dropoffAt: new Date(),
+        innerQrCodeHash: opts.innerQrCodeHash ?? null,
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })
@@ -170,5 +181,36 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
 
     // Capture une seule fois : le 2e appel s'arrête à la garde d'état (plus DEPOSITED).
     expect(captureCalls).toHaveLength(1)
+  })
+
+  const QR_RAW = 'WAYLO-INNER-SEAL-7F3A9C2E1B'
+
+  it('(F) sceau présent + QR correct → 200 VALIDATED, capture 1× (chemin RELEASED existant)', async () => {
+    captureCalls.length = 0
+    const mission = await seedDeposited({ innerQrCodeHash: hashQrCode(QR_RAW) })
+    const res = await confirmWithQr(mission.id, QR_RAW)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().status).toBe('VALIDATED')
+    expect(captureCalls).toEqual([{ id: `pi_cc_${mission.id}`, key: `capture_collection_${mission.id}` }])
+  })
+
+  it('(G) sceau présent + QR faux OU absent → 400 INVALID_QR_PROOF, aucune capture, mission intacte', async () => {
+    captureCalls.length = 0
+    const mission = await seedDeposited({ innerQrCodeHash: hashQrCode(QR_RAW) })
+
+    // QR faux : rejet AVANT toute capture.
+    const wrong = await confirmWithQr(mission.id, 'MAUVAIS-CODE')
+    expect(wrong.statusCode).toBe(400)
+    expect(wrong.json()).toEqual({ error: 'INVALID_QR_PROOF' })
+
+    // QR absent (corps vide) sur une mission scellée → même rejet.
+    const missing = await confirm(mission.id)
+    expect(missing.statusCode).toBe(400)
+    expect(missing.json()).toEqual({ error: 'INVALID_QR_PROOF' })
+
+    expect(captureCalls).toHaveLength(0)
+    const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(db.status).toBe('DEPOSITED') // séquestre jamais libéré sur preuve invalide
   })
 })
