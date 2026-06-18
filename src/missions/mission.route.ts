@@ -146,8 +146,6 @@ class ConfirmReceiptConflictError extends Error {}
 /** Transition FUNDED → MATCHED perdue (course : un autre voyageur a pris la mission). */
 class MatchConflictError extends Error {}
 
-/** Transition MATCHED → IN_PROGRESS perdue (course / double départ). */
-class StartTravelConflictError extends Error {}
 
 /** Transition IN_PROGRESS → AWAITING_VALIDATION perdue (course / double dépôt de reçu). */
 class ReceiptConflictError extends Error {}
