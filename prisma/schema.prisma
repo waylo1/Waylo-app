@@ -64,6 +64,16 @@ enum TransferStatus {
   ABANDONED // terminal : M tentatives épuisées (échec structurel) — hors scope worker et requeue, « needs human »
 }
 
+// Cycle de vie de l'outbox de COMPENSATION ACHETEUR (restitution 120% de fraude, roadmap S20+).
+// Volontairement plus court que TransferStatus : pas de SUBMITTED/ABANDONED tant que le
+// worker dédié n'existe pas — ces valeurs seront ajoutées par `ADD VALUE` (rétro-compatible)
+// quand le claim FOR UPDATE SKIP LOCKED et l'abandon M-tentatives seront implémentés.
+enum OutboxStatus {
+  PENDING
+  SETTLED
+  FAILED
+}
+
 enum SubstitutionStatus {
   PENDING
   APPROVED
@@ -103,6 +113,7 @@ model User {
   reviewsReceived    Review[]  @relation("ReviewsReceived")
   penaltyDebits      PenaltyDebitOutbox[]
   wallet             Wallet?   // solde interne acheteur (reliquat de substitution « Drive », S18)
+  buyerCompensations BuyerCompensationOutbox[] // restitutions 120% de fraude en attente d'exécution (roadmap S20+)
 }
 
 model Mission {
@@ -146,6 +157,7 @@ model Mission {
   reviews         Review[]
   penaltyDebit    PenaltyDebitOutbox?
   walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
+  buyerCompensations BuyerCompensationOutbox[] // intentions de compensation 120% (arbitrage de fraude, roadmap S20+)
 
   @@index([buyerId])
   @@index([travelerId])
@@ -218,6 +230,34 @@ model PenaltyDebitOutbox {
 
   @@index([userId])
   @@index([status])
+}
+
+// Outbox transactionnel de la COMPENSATION ACHETEUR (restitution 120% de fraude, roadmap S20+).
+// L'intention de restituer les 120% de (Valeur Objet + Frais Service) — déjà journalisée en
+// `LedgerType.BUYER_REFUND_COMPENSATION` par /arbitrate-fraud (S14) — commit ICI ; l'EXÉCUTION
+// (crédit Wallet interne acheteur OU payout, canal à décider) sera portée par un worker dédié,
+// JAMAIS dans une transaction DB (règle d'or). Miroir strict de TransferOutbox / PenaltyDebitOutbox
+// (cycle PENDING → SETTLED | FAILED, backoff via `attempts`). Idempotence : `idempotencyKey @unique`.
+model BuyerCompensationOutbox {
+  id             String       @id @default(cuid())
+  missionId      String
+  buyerId        String // acheteur bénéficiaire de la compensation 120%
+  amountCents    Int // 120% de (Valeur Objet + Frais Service), centimes Int (jamais Float)
+  status         OutboxStatus @default(PENDING)
+  idempotencyKey String       @unique // ex. buyer_compensation_<missionId> : une seule restitution par arbitrage
+  attempts       Int          @default(0) // backoff exponentiel : ré-éligibilité du futur worker
+  lastError      String? // dernière erreur d'exécution (diagnostic, jamais de secret)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  // onDelete: Cascade — miroir PenaltyDebitOutbox : une mission supprimée emporte son
+  // intention de compensation (cohérence + isolation des tests : mission.deleteMany()).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  buyer   User    @relation(fields: [buyerId], references: [id])
+
+  @@index([status]) // file d'attente du worker (éligibilité PENDING)
+  @@index([buyerId])
+  @@index([missionId])
 }
 
 // Wallet interne acheteur (Sprint 18, modèle « Drive »). Solde alimenté par le
