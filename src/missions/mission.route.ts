@@ -10,6 +10,11 @@ import {
 import { getCustomsThreshold } from './customs'
 import { isRateLimited } from '../rate-limit'
 import { safeEmit, type AlertSink } from '../alerts'
+import {
+  validateMissionFunding,
+  requiredCapacityCents,
+  CheckoutValidationError,
+} from '../checkout/wallet-validation'
 
 /**
  * Garde ops/admin : autorisation par le flag `isAdmin` en base (source de
@@ -326,6 +331,44 @@ const isUniqueViolation = (err: unknown): boolean =>
 export const substitutionCeilingCents = (budgetCents: number): number =>
   Math.floor((budgetCents * 12) / 10)
 
+/** Corps OPTIONNEL des routes de financement : capacité carte déclarée par l'acheteur. */
+interface FundingBody {
+  /**
+   * Montant que la carte de l'acheteur autorisera au checkout (centimes Int ≥ 0).
+   * OMIS ⇒ on suppose que la carte couvre le plafond requis (120% du total) : la
+   * garde passe (comportement historique). Une valeur explicite < plafond force
+   * le Wallet interne à combler le delta, sinon INSUFFICIENT_FUNDS_FOR_MISSION.
+   */
+  stripeAuthorizationCents?: number
+}
+
+/**
+ * Garde capacité « Drive » (S19), PARTAGÉE par /intent et /checkout-session.
+ * Pré-vol PUR (aucune écriture, aucun appel Stripe, ne modifie pas le hold) :
+ * (autorisation carte acheteur + solde Wallet interne) doit atteindre 120% du
+ * prix total mission (cf. validateMissionFunding). Capacité carte par défaut =
+ * plafond requis ⇒ passe sans Wallet (non-régression du financement nominal).
+ * Renvoie { status, code } à répondre si insuffisant, ou null si OK.
+ */
+async function checkFundingCapacity(
+  missionId: string,
+  budgetCents: number,
+  commissionCents: number,
+  declaredAuthCents: number | undefined,
+): Promise<{ status: number; code: string } | null> {
+  const stripeAuthorizationCents =
+    declaredAuthCents ?? requiredCapacityCents(budgetCents + commissionCents)
+  try {
+    await validateMissionFunding({ missionId, stripeAuthorizationCents })
+    return null
+  } catch (err) {
+    if (err instanceof CheckoutValidationError) {
+      return { status: err.code === 'MISSION_NOT_FOUND' ? 404 : 400, code: err.code }
+    }
+    throw err
+  }
+}
+
 interface CreateMissionBody {
   targetProduct: string
   budgetCents: number
@@ -490,6 +533,19 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
     }
 
+    // Garde capacité « Drive » (S19) AVANT toute réservation/appel Stripe : si la
+    // capacité (carte + Wallet) ne couvre pas 120% du total, on bloque ici.
+    const intentBody = (req.body ?? {}) as FundingBody
+    const intentCapacityError = await checkFundingCapacity(
+      mission.id,
+      mission.budgetCents,
+      mission.commissionCents,
+      intentBody.stripeAuthorizationCents,
+    )
+    if (intentCapacityError) {
+      return reply.code(intentCapacityError.status).send({ error: intentCapacityError.code })
+    }
+
     // Montant séquestré = budget + commission : la commission EST le frais
     // plateforme (le webhook de capture verse capturé − commission au voyageur).
     // Modèle « Drive » (S17) : si la substitution est pré-autorisée, l'acheteur
@@ -572,6 +628,19 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
         return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
       }
       if (!opts.stripe.checkout) return reply.code(500).send({ error: 'CHECKOUT_UNAVAILABLE' })
+
+      // Garde capacité « Drive » (S19), miroir exact de /intent : (carte + Wallet)
+      // ≥ 120% du total, sinon 400 AVANT toute réservation/appel Stripe.
+      const checkoutBody = (req.body ?? {}) as FundingBody
+      const checkoutCapacityError = await checkFundingCapacity(
+        mission.id,
+        mission.budgetCents,
+        mission.commissionCents,
+        checkoutBody.stripeAuthorizationCents,
+      )
+      if (checkoutCapacityError) {
+        return reply.code(checkoutCapacityError.status).send({ error: checkoutCapacityError.code })
+      }
 
       // Prix = budget + commission (frais plateforme), centimes Int — miroir de /intent.
       // Modèle « Drive » (S17) : hold dimensionné à 120% du budget si substitution

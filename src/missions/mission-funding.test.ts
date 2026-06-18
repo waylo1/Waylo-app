@@ -71,6 +71,8 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     prisma = (await import('../db')).prisma
     app = await (await import('../app')).buildApp({ stripe: fakeStripe })
 
+    await prisma.walletTransaction.deleteMany()
+    await prisma.wallet.deleteMany() // FK userId RESTRICT : purger AVANT user.deleteMany()
     await prisma.transferOutbox.deleteMany()
     await prisma.ledgerEntry.deleteMany()
     await prisma.issuingAuthorizationLog.deleteMany()
@@ -96,6 +98,15 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
   const fund = (missionId: string, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: `/api/missions/${missionId}/intent`, headers })
+  // Variante avec corps (capacité carte déclarée) — garde capacité « Drive » S19.
+  const fundBody = (
+    missionId: string,
+    headers: Record<string, string>,
+    payload: Record<string, unknown>,
+  ) => app.inject({ method: 'POST', url: `/api/missions/${missionId}/intent`, headers, payload })
+
+  // total = budget + commission = 11_500 → plafond capacité requis (120%) = 13_800.
+  const REQUIRED_CAPACITY_CENTS = Math.floor((TOTAL_CENTS * 12) / 10)
 
   const seedMission = (overrides: { travelerId?: string; status?: 'CREATED' | 'MATCHED' } = {}) =>
     prisma.mission.create({
@@ -244,5 +255,46 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     expect(
       (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
     ).toBe('FUNDED')
+  })
+
+  it('(8) capacité carte déclarée < 120% du total, sans Wallet → 400 INSUFFICIENT_FUNDS_FOR_MISSION (Stripe non rappelé)', async () => {
+    const mission = await seedMission()
+    const callsBefore = intentCalls.length
+
+    // Carte 10_000 + Wallet 0 = 10_000 < 13_800 (plafond 120%).
+    const res = await fundBody(mission.id, bearer(buyerToken), {
+      stripeAuthorizationCents: REQUIRED_CAPACITY_CENTS - 3_800, // 10_000
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'INSUFFICIENT_FUNDS_FOR_MISSION' })
+
+    // Bloqué AVANT la réservation ET l'appel Stripe : rien n'a bougé.
+    expect(intentCalls).toHaveLength(callsBefore)
+    expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(0)
+    expect(
+      (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
+    ).toBe('CREATED')
+  })
+
+  it('(9) le Wallet interne comble le delta → 200, mission FUNDED (hold inchangé = budget + commission)', async () => {
+    const mission = await seedMission()
+    // Carte 10_000 + Wallet 4_000 = 14_000 ≥ 13_800 → la garde passe grâce au Wallet.
+    await prisma.wallet.create({ data: { userId: buyer.id, balanceCents: 4_000 } })
+    try {
+      const res = await fundBody(mission.id, bearer(buyerToken), {
+        stripeAuthorizationCents: REQUIRED_CAPACITY_CENTS - 3_800, // 10_000
+      })
+
+      expect(res.statusCode).toBe(200)
+      // La garde NE redimensionne PAS le séquestre : hold = budget + commission.
+      expect(res.json()).toMatchObject({ amountCents: TOTAL_CENTS })
+      expect(await prisma.escrowTransaction.count({ where: { missionId: mission.id } })).toBe(1)
+      expect(
+        (await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })).status,
+      ).toBe('FUNDED')
+    } finally {
+      await prisma.wallet.deleteMany({ where: { userId: buyer.id } })
+    }
   })
 })
