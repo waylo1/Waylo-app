@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
-import type { PaymentIntentClient } from './mission.route'
+import type { PaymentIntentClient } from './mission-common'
 import { hashQrCode } from './qr-proof'
 
 /**

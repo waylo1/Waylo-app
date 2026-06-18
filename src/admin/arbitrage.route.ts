@@ -1,7 +1,7 @@
 import { FastifyError, FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { LedgerType, MissionStatus } from '../generated/prisma'
-import { isRequestAdmin } from '../missions/mission.route'
+import { isRequestAdmin } from '../missions/mission-common'
 
 /**
  * API admin — arbitrage de FRAUDE / VOL voyageur (Sprint 14).
