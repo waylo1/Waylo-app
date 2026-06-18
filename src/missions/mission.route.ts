@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { prisma } from '../db'
 import { DropOffType, EscrowStatus, MissionStatus, Prisma, SubstitutionStatus } from '../generated/prisma'
@@ -8,6 +8,7 @@ import {
   findMissionForTraveler,
 } from './mission-access'
 import { getCustomsThreshold } from './customs'
+import { hashQrCode, qrCodeMatches } from './qr-proof'
 import { isRateLimited, maskIp } from '../rate-limit'
 import { safeEmit, type AlertSink } from '../alerts'
 import {
@@ -290,7 +291,6 @@ const disputeBodySchema = {
     disputeReason: { type: 'string', minLength: 1, maxLength: 2000 },
   },
 } as const
-
 interface ShipBody {
   trackingReference: string
   purchaseAmountCents: number
@@ -1111,6 +1111,12 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const { dropoffReceiptUrl, dropoffTrackingNumber } = req.body as DropoffReceiptBody
 
+      // Sceau QR interne IDEMPOTENT : si /ship n'a pas posé de sceau (ex. MATCHED →
+      // DEPOSITED direct, sans passer par /ship), on le génère ICI — sinon la collecte
+      // resterait sans preuve. Sceau déjà présent → on n'écrase JAMAIS (déjà imprimé).
+      // Brut renvoyé une seule fois (impression/scellage), seul le sha256 persisté.
+      const newInnerQrCode = mission.innerQrCodeHash ? null : randomBytes(32).toString('hex')
+
       // Transaction atomique : transition conditionnelle (anti-TOCTOU) + métadonnées
       // de dépôt. dropoffAt = horloge SERVEUR (jamais le device). Tout rollback
       // ensemble si la mission a quitté l'état attendu entre la lecture et l'écriture.
@@ -1123,6 +1129,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
               dropoffReceiptUrl,
               dropoffTrackingNumber: dropoffTrackingNumber ?? null,
               dropoffAt: new Date(),
+              ...(newInnerQrCode ? { innerQrCodeHash: hashQrCode(newInnerQrCode) } : {}),
             },
           })
           if (updated.count !== 1) throw new DropoffConflictError()
@@ -1135,7 +1142,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       }
 
       const deposited = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
-      return reply.code(200).send(deposited)
+      // Brut joint à la réponse UNIQUEMENT s'il vient d'être généré ici (jamais re-dérivable).
+      return reply
+        .code(200)
+        .send(newInnerQrCode ? { ...deposited, innerQrCode: newInnerQrCode } : deposited)
     },
   )
 
@@ -1148,7 +1158,13 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
   //   exécutant) exécute transfers.create → mission RELEASED (final).
   // La route pose seulement l'état transitoire VALIDATED ; le webhook finalise.
   // Réservé à l'acheteur (404 masquant pour un tiers/voyageur — invariant IDOR).
-  app.post('/:id/confirm-collection', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
+  app.post(
+    '/:id/confirm-collection',
+    // Pas de body schema : le corps est OPTIONNEL (missions sans sceau = corps vide,
+    // chemin historique). Un schéma `object` ferait échouer la validation d'un POST
+    // sans body (INVALID_INPUT) ; le code brut QR est donc lu et validé à la main.
+    { schema: { params: missionIdParamsSchema } },
+    async (req, reply) => {
     const { id } = req.params as { id: string }
     // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'en est pas
     // l'acheteur (voyageur/tiers) — les deux cas indistinguables.
@@ -1158,6 +1174,22 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
     // Garde d'état : la collecte ne se confirme QUE depuis DEPOSITED (strict).
     if (mission.status !== MissionStatus.DEPOSITED) {
       return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+    }
+
+    // Preuve QR interne (anti « colis vide ») : si un sceau a été enregistré, la
+    // collecte EXIGE le code brut scellé dans le colis, vérifié en temps constant.
+    // Contrôlé AVANT toute capture Stripe — jamais de libération sur preuve absente
+    // ou invalide. Mission sans sceau (innerQrCodeHash null) → chemin historique.
+    if (mission.innerQrCodeHash) {
+      const raw = (req.body as { innerQrCode?: unknown } | null)?.innerQrCode
+      if (
+        typeof raw !== 'string' ||
+        raw.length === 0 ||
+        raw.length > 512 ||
+        !qrCodeMatches(raw, mission.innerQrCodeHash)
+      ) {
+        return reply.code(400).send({ error: 'INVALID_QR_PROOF' })
+      }
     }
 
     // Précondition escrow — lecture HORS transaction (règle d'or). Le séquestre
@@ -1534,16 +1566,31 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       if (purchaseAmountCents > mission.budgetCents) {
         return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
       }
+
+      // Sceau QR interne (anti « colis vide ») : à l'entrée du flux transport, on
+      // génère un code aléatoire opaque (256 bits) destiné à être IMPRIMÉ ET SCELLÉ
+      // À L'INTÉRIEUR du colis. On ne persiste QUE son sha256 ; le code brut est
+      // renvoyé UNE SEULE FOIS ici (jamais restocké) pour impression. À la collecte,
+      // l'acheteur le scanne et /confirm-collection le vérifie avant libération.
+      const innerQrCode = randomBytes(32).toString('hex')
+      const innerQrCodeHash = hashQrCode(innerQrCode)
+
       const updated = await prisma.mission.updateMany({
         where: { id, travelerId: req.user.sub, status: MissionStatus.MATCHED },
-        data: { status: MissionStatus.IN_PROGRESS, trackingReference, purchaseAmountCents },
+        data: {
+          status: MissionStatus.IN_PROGRESS,
+          trackingReference,
+          purchaseAmountCents,
+          innerQrCodeHash,
+        },
       })
       if (updated.count !== 1) {
         return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
       }
 
       const shipped = await prisma.mission.findUniqueOrThrow({ where: { id } })
-      return reply.code(200).send(shipped)
+      // Code brut joint à la réponse pour impression/scellage — jamais persisté en clair.
+      return reply.code(200).send({ ...shipped, innerQrCode })
     },
   )
 
