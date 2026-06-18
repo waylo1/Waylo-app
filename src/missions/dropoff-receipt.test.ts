@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission.route'
+import { hashQrCode } from './qr-proof'
 
 /**
  * Module Dépôt Voyageur — POST /api/missions/:id/dropoff-receipt.
@@ -169,5 +170,43 @@ describe('Dépôt voyageur — POST /:id/dropoff-receipt', () => {
     const second = await dropoff(mission.id, validBody)
     expect(second.statusCode).toBe(400)
     expect(second.json()).toEqual({ error: 'INVALID_MISSION_STATE' })
+  })
+
+  it('(H) sceau ABSENT (MATCHED sans /ship) → génère le sceau : brut renvoyé, sha256 persisté', async () => {
+    const mission = await seedMission('MATCHED')
+    const res = await dropoff(mission.id, validBody)
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.innerQrCode).toMatch(/^[0-9a-f]{64}$/) // code brut généré, renvoyé 1×
+
+    const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(db.innerQrCodeHash).toBe(hashQrCode(body.innerQrCode)) // seul le hash en base
+    expect(db.innerQrCodeHash).not.toBe(body.innerQrCode)
+  })
+
+  it('(I) sceau DÉJÀ présent (posé par /ship) → idempotent : pas de régénération, pas de brut renvoyé', async () => {
+    const existingHash = hashQrCode('seal-pose-par-ship')
+    const mission = await prisma.mission.create({
+      data: {
+        buyerId: buyer.id,
+        travelerId: traveler.id,
+        status: 'MATCHED' as never,
+        targetProduct: 'Colis déjà scellé',
+        budgetCents: 50_000,
+        commissionCents: 5_000,
+        destination: 'Paris',
+        innerQrCodeHash: existingHash,
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      },
+    })
+
+    const res = await dropoff(mission.id, validBody)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().innerQrCode).toBeUndefined() // jamais re-dérivable → non renvoyé
+
+    const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(db.innerQrCodeHash).toBe(existingHash) // sceau d'origine INCHANGÉ
   })
 })

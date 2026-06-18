@@ -1111,6 +1111,12 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
       const { dropoffReceiptUrl, dropoffTrackingNumber } = req.body as DropoffReceiptBody
 
+      // Sceau QR interne IDEMPOTENT : si /ship n'a pas posé de sceau (ex. MATCHED →
+      // DEPOSITED direct, sans passer par /ship), on le génère ICI — sinon la collecte
+      // resterait sans preuve. Sceau déjà présent → on n'écrase JAMAIS (déjà imprimé).
+      // Brut renvoyé une seule fois (impression/scellage), seul le sha256 persisté.
+      const newInnerQrCode = mission.innerQrCodeHash ? null : randomBytes(32).toString('hex')
+
       // Transaction atomique : transition conditionnelle (anti-TOCTOU) + métadonnées
       // de dépôt. dropoffAt = horloge SERVEUR (jamais le device). Tout rollback
       // ensemble si la mission a quitté l'état attendu entre la lecture et l'écriture.
@@ -1123,6 +1129,7 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
               dropoffReceiptUrl,
               dropoffTrackingNumber: dropoffTrackingNumber ?? null,
               dropoffAt: new Date(),
+              ...(newInnerQrCode ? { innerQrCodeHash: hashQrCode(newInnerQrCode) } : {}),
             },
           })
           if (updated.count !== 1) throw new DropoffConflictError()
@@ -1135,7 +1142,10 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
       }
 
       const deposited = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
-      return reply.code(200).send(deposited)
+      // Brut joint à la réponse UNIQUEMENT s'il vient d'être généré ici (jamais re-dérivable).
+      return reply
+        .code(200)
+        .send(newInnerQrCode ? { ...deposited, innerQrCode: newInnerQrCode } : deposited)
     },
   )
 
