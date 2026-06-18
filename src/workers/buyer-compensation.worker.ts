@@ -56,14 +56,24 @@ export async function processBuyerCompensations() {
  * Boucle cron explicite (~1 min) — miroir de `startPenaltyWorkerLoop`. Le `.catch`
  * de niveau tick garantit qu'une exception du batch (ex. DB injoignable au `findMany`)
  * n'effondre PAS le process scheduler : on log et le prochain tick reprend.
+ *
+ * Garde `inFlight` : un tick qui arrive pendant qu'un batch est encore en cours est
+ * SAUTÉ — jamais deux runs concurrents dans CE process (un batch lent ne s'empile pas
+ * sur lui-même). Le claim atomique de `processBuyerCompensations` reste le seul rempart
+ * contre la concurrence MULTI-instance ; cette garde n'élimine que le travail redondant.
  */
 export function startBuyerCompensationWorkerLoop(
   intervalMs = 60_000,
   log: { error(details: Record<string, unknown>, message?: string): void } = console,
 ): NodeJS.Timeout {
+  let inFlight = false
   return setInterval(() => {
-    void processBuyerCompensations().catch(err =>
-      log.error({ err: String(err) }, 'buyer compensation worker tick failed'),
-    )
+    if (inFlight) return // run précédent encore en cours — tick sauté
+    inFlight = true
+    void processBuyerCompensations()
+      .catch(err => log.error({ err: String(err) }, 'buyer compensation worker tick failed'))
+      .finally(() => {
+        inFlight = false
+      })
   }, intervalMs)
 }
