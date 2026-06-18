@@ -91,6 +91,7 @@ function PayContent({ missionId }: { missionId: string }) {
   const [mission, setMission] = useState<Mission | null>(null);
   const [intent, setIntent] = useState<IntentResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
 
@@ -106,9 +107,13 @@ function PayContent({ missionId }: { missionId: string }) {
   async function handleCreateIntent() {
     setPending(true);
     setError(null);
+    setErrorCode(null);
     try {
       setIntent(await api.createIntent(missionId));
     } catch (err) {
+      if (err instanceof api.ApiError) {
+        setErrorCode(err.code);
+      }
       setError(
         apiErrorMessage(err, "Échec de la création du paiement — erreur réseau."),
       );
@@ -198,7 +203,20 @@ function PayContent({ missionId }: { missionId: string }) {
                   et le fonctionnement de la mise en relation sous séquestre.
                 </span>
               </label>
-              {error && <p className="text-sm text-destructive">{error}</p>}
+              {error && (
+                <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3">
+                  <p className="text-sm text-destructive">{error}</p>
+                  {errorCode === "INSUFFICIENT_FUNDS_FOR_MISSION" && (
+                    <Button
+                      className="mt-3 w-full"
+                      variant="outline"
+                      render={<Link href="/wallet/recharge" />}
+                    >
+                      Recharger le Wallet
+                    </Button>
+                  )}
+                </div>
+              )}
               <Button
                 className="w-full"
                 disabled={

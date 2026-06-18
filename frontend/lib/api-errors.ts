@@ -20,6 +20,8 @@ const ERROR_LABELS: Record<string, string> = {
     "La mission n'est pas (ou plus) en attente de validation — déjà validée ?",
   ESCROW_NOT_HELD:
     "Le séquestre n'est pas en place — validation impossible, contactez le support.",
+  INSUFFICIENT_FUNDS_FOR_MISSION:
+    "Votre capacité de paiement (carte + Wallet interne) est insuffisante pour couvrir 120% du total de la mission. Recharger le Wallet pour compléter.",
   CANNOT_MATCH_OWN_MISSION: "Vous ne pouvez pas accepter votre propre mission.",
   MISSION_NOT_MATCHABLE: "Cette mission n'est pas encore financée.",
   MISSION_ALREADY_MATCHED: "Trop tard — un autre voyageur a pris cette mission.",
