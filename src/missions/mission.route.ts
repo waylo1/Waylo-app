@@ -8,7 +8,7 @@ import {
   findMissionForTraveler,
 } from './mission-access'
 import { getCustomsThreshold } from './customs'
-import { isRateLimited } from '../rate-limit'
+import { isRateLimited, maskIp } from '../rate-limit'
 import { safeEmit, type AlertSink } from '../alerts'
 import {
   validateMissionFunding,
@@ -49,7 +49,7 @@ async function travelerHasGuaranteeCard(userId: string): Promise<boolean> {
 /** preHandler de rate limit, clé par route + IP + utilisateur. 429 si dépassé. */
 const rateLimit =
   (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    if (isRateLimited(`${name}:${req.ip}:${req.user.sub}`)) {
+    if (await isRateLimited(`${name}:${maskIp(req.ip)}:${req.user.sub}`)) {
       await reply.code(429).send({ error: 'RATE_LIMITED' })
     }
   }

@@ -6,6 +6,7 @@ import { startBuyerCompensationWorkerLoop } from './workers/buyer-compensation.w
 import { runReconciliation } from './workers/reconciliation'
 import type { ReconciliationDeps } from './workers/reconciliation'
 import { startFundingReconciliationLoop } from './workers/funding-reconciliation'
+import { startRateLimitCleanupLoop } from './workers/rate-limit-cleanup'
 
 /**
  * Point d'entrée serveur Waylo — MVP monoprocess : trois composants démarrés
@@ -44,6 +45,8 @@ const DEFAULT_FUNDING_RECONCILIATION_INTERVAL_MS = 15 * 60_000
 // Stripe atterrir après un downtime (sinon faux CAPTURE_WITHOUT_LEDGER — seul
 // contrôle sans horodatage local pour une fenêtre de grâce par ligne).
 const DEFAULT_RECONCILIATION_BOOT_DELAY_MS = 15 * 60_000
+// Purge des compteurs de rate-limit expirés (store Postgres) : balayage horaire.
+const DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL_MS = 3_600_000
 
 interface OpsLogger {
   info(details: Record<string, unknown>, message?: string): void
@@ -135,6 +138,10 @@ async function main(): Promise<void> {
     'FUNDING_RECONCILIATION_INTERVAL_MS',
     DEFAULT_FUNDING_RECONCILIATION_INTERVAL_MS,
   )
+  const rateLimitCleanupIntervalMs = intFromEnv(
+    'RATE_LIMIT_CLEANUP_INTERVAL_MS',
+    DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL_MS,
+  )
 
   const { prisma } = await import('./db')
   const { buildApp } = await import('./app')
@@ -163,6 +170,8 @@ async function main(): Promise<void> {
     { prisma, stripe, log },
     fundingReconciliationIntervalMs,
   )
+  // Purge horaire des fenêtres de rate-limit expirées (store Postgres distribué).
+  const rateLimitCleanupTimer = startRateLimitCleanupLoop(rateLimitCleanupIntervalMs, log)
   log.info(
     {
       port,
@@ -171,8 +180,9 @@ async function main(): Promise<void> {
       reconciliationIntervalMs,
       reconciliationBootDelayMs,
       fundingReconciliationIntervalMs,
+      rateLimitCleanupIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit',
   )
 
   let shuttingDown = false
@@ -186,6 +196,7 @@ async function main(): Promise<void> {
     clearInterval(workerTimer)
     clearInterval(penaltyTimer)
     clearInterval(buyerCompensationTimer)
+    clearInterval(rateLimitCleanupTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol
