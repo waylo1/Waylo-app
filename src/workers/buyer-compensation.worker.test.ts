@@ -25,7 +25,8 @@ const { mockPrisma, mockTx } = vi.hoisted(() => {
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
 
-const { processBuyerCompensations } = await import('./buyer-compensation.worker')
+// Import statique : vi.mock est hoisté au-dessus des imports → le worker reçoit le mock.
+import { processBuyerCompensations } from './buyer-compensation.worker'
 
 const COMPENSATION_CENTS = 13_800 // 120% de (10_000 + 1_500)
 
