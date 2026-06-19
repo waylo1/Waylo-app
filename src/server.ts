@@ -7,6 +7,7 @@ import { runReconciliation } from './workers/reconciliation'
 import type { ReconciliationDeps } from './workers/reconciliation'
 import { startFundingReconciliationLoop } from './workers/funding-reconciliation'
 import { startRateLimitCleanupLoop } from './workers/rate-limit-cleanup'
+import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 
 /**
  * Point d'entrée serveur Waylo — MVP monoprocess : trois composants démarrés
@@ -47,6 +48,8 @@ const DEFAULT_FUNDING_RECONCILIATION_INTERVAL_MS = 15 * 60_000
 const DEFAULT_RECONCILIATION_BOOT_DELAY_MS = 15 * 60_000
 // Purge des compteurs de rate-limit expirés (store Postgres) : balayage horaire.
 const DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL_MS = 3_600_000
+// Clôture des ghost missions (CREATED expirées → EXPIRED) : balayage horaire.
+const DEFAULT_MISSION_LIFECYCLE_INTERVAL_MS = 3_600_000
 
 interface OpsLogger {
   info(details: Record<string, unknown>, message?: string): void
@@ -142,6 +145,10 @@ async function main(): Promise<void> {
     'RATE_LIMIT_CLEANUP_INTERVAL_MS',
     DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL_MS,
   )
+  const missionLifecycleIntervalMs = intFromEnv(
+    'MISSION_LIFECYCLE_INTERVAL_MS',
+    DEFAULT_MISSION_LIFECYCLE_INTERVAL_MS,
+  )
 
   const { prisma } = await import('./db')
   const { buildApp } = await import('./app')
@@ -172,6 +179,8 @@ async function main(): Promise<void> {
   )
   // Purge horaire des fenêtres de rate-limit expirées (store Postgres distribué).
   const rateLimitCleanupTimer = startRateLimitCleanupLoop(rateLimitCleanupIntervalMs, log)
+  // Clôture horaire des ghost missions (CREATED expirées → EXPIRED, aucun argent).
+  const missionLifecycleTimer = startMissionLifecycleLoop(prisma, missionLifecycleIntervalMs, log)
   log.info(
     {
       port,
@@ -181,8 +190,9 @@ async function main(): Promise<void> {
       reconciliationBootDelayMs,
       fundingReconciliationIntervalMs,
       rateLimitCleanupIntervalMs,
+      missionLifecycleIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions',
   )
 
   let shuttingDown = false
@@ -197,6 +207,7 @@ async function main(): Promise<void> {
     clearInterval(penaltyTimer)
     clearInterval(buyerCompensationTimer)
     clearInterval(rateLimitCleanupTimer)
+    clearInterval(missionLifecycleTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol

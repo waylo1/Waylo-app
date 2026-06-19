@@ -36,6 +36,7 @@ enum MissionStatus {
   RELEASED
   REFUNDED
   CANCELLED
+  EXPIRED // « ghost mission » : CREATED jamais financée et expiresAt dépassé — clôturée par le worker mission-lifecycle (aucun escrow, aucun argent en jeu)
 }
 
 enum EscrowStatus {

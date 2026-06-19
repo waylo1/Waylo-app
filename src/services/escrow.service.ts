@@ -1,6 +1,10 @@
 import { prisma } from '../db'
 import { EscrowStatus } from '../generated/prisma'
-import { substitutionCeilingCents, type PaymentIntentClient } from '../missions/mission-common'
+import {
+  substitutionCeilingCents,
+  substitutionHardCapCents,
+  type PaymentIntentClient,
+} from '../missions/mission-common'
 
 /**
  * Service escrow — capture du séquestre (T1) réutilisable hors route.
@@ -67,6 +71,14 @@ export async function captureEscrowFunds(
   const heldBudgetCents = escrow.mission.substitutionAuthorized
     ? substitutionCeilingCents(escrow.mission.budgetCents)
     : escrow.mission.budgetCents
+
+  // BACKSTOP 150% (audit robustesse) : aucun montant de substitution ne peut être
+  // capturé au-delà du plafond dur, même si la logique 120% régressait. Refus AVANT
+  // tout appel Stripe (rien capturé) → erreur typée, jamais un débit hors borne.
+  if (heldBudgetCents > substitutionHardCapCents(escrow.mission.budgetCents)) {
+    throw new EscrowCaptureError('SUBSTITUTION_HARD_CAP_EXCEEDED')
+  }
+
   const capturedAmountCents = heldBudgetCents + escrow.mission.commissionCents
 
   // SEUL effet du service : la capture Stripe. idempotencyKey déterministe —
