@@ -94,3 +94,34 @@ erDiagram
 - Un `User` a **0..1** `Wallet` (`userId @unique`) ; le `Wallet` est **RESTRICT** sur l'utilisateur ⇒ purge avant `user.deleteMany()`.
 - Un `WalletTransaction` est **unique par mission** (idempotence du crédit résiduel de substitution) et **cascade** avec la mission, mais reste **RESTRICT** sur le wallet.
 - L'`EscrowTransaction` (1:1 mission) est **RESTRICT** ⇒ purge avant la mission.
+
+## Cycle de vie Escrow
+
+`EscrowStatus` : `HELD` (verrou initial) → un seul état terminal par mission.
+Toute sortie de `HELD` est une transition **conditionnelle atomique** (`updateMany`
+avec `where: { status: HELD }`, anti-TOCTOU). Les états terminaux (`RELEASED`,
+`REFUNDED`, `CANCELLED`) sont **immuables** — garantis à deux niveaux : (1) la garde
+de statut à chaque appelant, (2) l'extension Prisma `escrow-guard.ts` qui rejette
+toute mutation d'un escrow terminal (défense en profondeur).
+
+```mermaid
+stateDiagram-v2
+    [*] --> HELD : funding /intent · /checkout-session<br/>webhook JIT · reconciliation
+    HELD --> RELEASED : payment_intent.succeeded (capture)
+    HELD --> CANCELLED : payment_failed · penalty.worker (fraude)<br/>reconciliation (orphelin)
+    HELD --> REFUNDED : charge.refunded (total)
+    HELD --> PARTIALLY_REFUNDED : charge.refunded (partiel)
+    PARTIALLY_REFUNDED --> PARTIALLY_REFUNDED : charge.refunded (cumul)
+    PARTIALLY_REFUNDED --> REFUNDED : charge.refunded (atteint le total)
+    RELEASED --> [*]
+    REFUNDED --> [*]
+    CANCELLED --> [*]
+    note right of HELD
+        Toute sortie de HELD est gardée par
+        where: { status: HELD } (anti-TOCTOU).
+        États terminaux = immuables (escrow-guard.ts).
+    end note
+```
+
+- La libération (`HELD→RELEASED`) et le remboursement (`→REFUNDED`) ne sont **jamais** écrits par une route : ils transitent par webhook Stripe (`payment_intent.succeeded`, `charge.refunded`). La résolution de litige admin (`resolve-refund`/`resolve-payout`) déclenche l'action Stripe ; la transition escrow suit **de façon asynchrone**.
+- `PARTIALLY_REFUNDED` est le seul état non terminal hormis `HELD` : il accepte des remboursements cumulés jusqu'au total (`→REFUNDED`).

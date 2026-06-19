@@ -1,4 +1,5 @@
 import { PrismaClient } from './generated/prisma'
+import { escrowGuard } from './lib/prisma-extensions/escrow-guard'
 
 /**
  * Client Prisma Waylo (schéma racine prisma/schema.prisma, sortie src/generated/prisma).
@@ -40,9 +41,20 @@ function withConnectionLimit(url: string | undefined): string | undefined {
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient }
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({ datasourceUrl: withConnectionLimit(process.env.DATABASE_URL) })
+/**
+ * Client central + garde d'immutabilité escrow (`$extends`) : toute mutation
+ * (update/updateMany/upsert) d'un escrow en état terminal (RELEASED/REFUNDED/
+ * CANCELLED) est rejetée — cf. lib/prisma-extensions/escrow-guard.ts. Le `reader`
+ * de la garde est le client de BASE (non étendu) → lecture committée, sans
+ * récursion ni pool supplémentaire (même moteur). Cast en `PrismaClient` : la
+ * garde n'expose aucune API publique, les appelants restent inchangés.
+ */
+function buildPrisma(): PrismaClient {
+  const base = new PrismaClient({ datasourceUrl: withConnectionLimit(process.env.DATABASE_URL) })
+  return base.$extends(escrowGuard(base)) as unknown as PrismaClient
+}
+
+export const prisma = globalForPrisma.prisma ?? buildPrisma()
 
 if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.prisma = prisma
