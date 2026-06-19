@@ -46,6 +46,14 @@ enum EscrowStatus {
   CANCELLED // PaymentIntent échoué (payment_intent.payment_failed) : hold jamais capturé → annulé
 }
 
+enum DisputeStatus {
+  DRAFT
+  OPEN
+  ESCALATED
+  RESOLVED
+  CLOSED
+}
+
 enum LedgerType {
   CAPTURE
   PAYOUT
@@ -114,6 +122,7 @@ model User {
   penaltyDebits      PenaltyDebitOutbox[]
   wallet             Wallet?   // solde interne acheteur (reliquat de substitution « Drive », S18)
   buyerCompensations BuyerCompensationOutbox[] // restitutions 120% de fraude en attente d'exécution (roadmap S20+)
+  disputesOpened     Dispute[] // litiges ouverts par cet utilisateur (DisputeService)
 }
 
 model Mission {
@@ -159,6 +168,7 @@ model Mission {
   penaltyDebit    PenaltyDebitOutbox?
   walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
   buyerCompensations BuyerCompensationOutbox[] // intentions de compensation 120% (arbitrage de fraude, roadmap S20+)
+  dispute         Dispute? // litige structuré (cycle de vie DisputeService) — au plus un par mission
 
   @@index([buyerId])
   @@index([travelerId])
@@ -380,6 +390,33 @@ model Review {
   @@index([missionId])
   @@index([authorId])
   @@index([targetId])
+}
+
+// Litige structuré (DisputeService) — cycle de vie immuable à transitions
+// conditionnelles atomiques (anti-TOCTOU, miroir EscrowTransaction). Au plus un
+// litige par mission (`missionId @unique`) ; création idempotente via
+// `idempotencyKey @unique` (ex. dispute_<missionId>).
+model Dispute {
+  id             String        @id @default(cuid())
+  missionId      String        @unique
+  openedById     String // acheteur initiateur du litige
+  status         DisputeStatus @default(DRAFT)
+  reason         String? // motif acheteur (optionnel)
+  resolution     String? // note de résolution admin
+  idempotencyKey String        @unique // ex. dispute_<missionId> : un seul litige par mission
+  openedAt       DateTime? // DRAFT → OPEN
+  escalatedAt    DateTime? // OPEN → ESCALATED
+  resolvedAt     DateTime? // → RESOLVED
+  closedAt       DateTime? // RESOLVED → CLOSED (terminal)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  // onDelete: Cascade — une mission supprimée emporte son litige (isolation tests).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  opener  User    @relation(fields: [openedById], references: [id])
+
+  @@index([openedById])
+  @@index([status])
 }
 
 model AdminAuditLog {
