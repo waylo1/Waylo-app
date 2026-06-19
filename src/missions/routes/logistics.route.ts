@@ -266,10 +266,8 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     { schema: { params: missionIdParamsSchema }, preHandler: rateLimit('receive') },
     async (req, reply) => {
       const { id } = req.params as { id: string }
-      const mission = await prisma.mission.findUnique({ where: { id } })
-      if (!mission || mission.buyerId !== req.user.sub) {
-        return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-      }
+      const mission = await findMissionForBuyer(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
 
       if (mission.status !== MissionStatus.IN_PROGRESS) {
         return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
@@ -344,10 +342,8 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     },
     async (req, reply) => {
       const { id } = req.params as { id: string }
-      const mission = await prisma.mission.findUnique({ where: { id } })
-      if (!mission || mission.travelerId !== req.user.sub) {
-        return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-      }
+      const mission = await findMissionForTraveler(prisma, id, req.user.sub)
+      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
       if (mission.status !== MissionStatus.ESCROW_LOCKED_CUSTOMS) {
         return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
       }
