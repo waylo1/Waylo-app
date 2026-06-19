@@ -43,3 +43,54 @@ flowchart TD
 - Le rate-limiter et le sceau QR sont **orthogonaux** : le premier protège l'accès (brute-force, flood), le second protège la **libération des fonds** (anti colis vide).
 - Aucune capture Stripe n'a lieu tant que la preuve QR n'est pas validée (quand un sceau existe).
 - Le rate-limiter est **fail-open** ; le sceau QR est **fail-closed** (pas de preuve ⇒ pas de libération).
+
+## Modèle de données — Wallet ↔ Mission ↔ User
+
+Autorisation par ressource : « acheteur » / « voyageur » est dérivé des FK
+`Mission.buyerId` / `Mission.travelerId` (pas de rôle de compte). Les FK en
+`RESTRICT` (sans cascade) dictent l'ordre de purge des tests : il faut détruire
+`WalletTransaction → Wallet → User` et `EscrowTransaction → Mission → User`
+(cf. `tests/helpers/db-reset.ts`).
+
+```mermaid
+erDiagram
+    USER ||--o| WALLET : "possède (userId @unique · RESTRICT)"
+    USER ||--o{ MISSION : "achète (BuyerMissions · RESTRICT)"
+    USER |o--o{ MISSION : "voyage (TravelerMissions? · RESTRICT)"
+    WALLET ||--o{ WALLET_TRANSACTION : "historise (walletId · RESTRICT)"
+    MISSION ||--o| WALLET_TRANSACTION : "crédite reliquat (missionId @unique · CASCADE)"
+    MISSION ||--o| ESCROW_TRANSACTION : "séquestre (missionId @unique · RESTRICT)"
+
+    USER {
+        string id PK
+        boolean isAdmin
+    }
+    WALLET {
+        string id PK
+        string userId UK "FK -> USER (RESTRICT)"
+        int balanceCents
+    }
+    WALLET_TRANSACTION {
+        string id PK
+        string walletId FK "-> WALLET (RESTRICT)"
+        string missionId UK "FK -> MISSION (CASCADE)"
+        int amountCents
+        string reason
+    }
+    MISSION {
+        string id PK
+        string buyerId FK "-> USER (RESTRICT)"
+        string travelerId FK "-> USER? (RESTRICT)"
+        int budgetCents
+    }
+    ESCROW_TRANSACTION {
+        string id PK
+        string missionId UK "FK -> MISSION (RESTRICT)"
+        int spendingLimitCents
+        EscrowStatus status
+    }
+```
+
+- Un `User` a **0..1** `Wallet` (`userId @unique`) ; le `Wallet` est **RESTRICT** sur l'utilisateur ⇒ purge avant `user.deleteMany()`.
+- Un `WalletTransaction` est **unique par mission** (idempotence du crédit résiduel de substitution) et **cascade** avec la mission, mais reste **RESTRICT** sur le wallet.
+- L'`EscrowTransaction` (1:1 mission) est **RESTRICT** ⇒ purge avant la mission.

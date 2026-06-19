@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission-common'
+import { resetDb } from '../../tests/helpers/db-reset'
 
 /**
  * Confirmation de réception acheteur — POST /api/missions/:id/confirm-receipt.
@@ -60,17 +61,7 @@ describe('Confirmation réception acheteur — POST /api/missions/:id/confirm-re
     prisma = (await import('../db')).prisma
     app = await (await import('../app')).buildApp({ stripe: fakeStripe })
 
-    await prisma.transferOutbox.deleteMany()
-    await prisma.ledgerEntry.deleteMany()
-    await prisma.issuingAuthorizationLog.deleteMany()
-    await prisma.review.deleteMany()
-    await prisma.receipt.deleteMany()
-    await prisma.substitutionRequest.deleteMany()
-    await prisma.escrowTransaction.deleteMany()
-    await prisma.processedStripeEvent.deleteMany()
-    await prisma.mission.deleteMany()
-    await prisma.adminAuditLog.deleteMany()
-    await prisma.user.deleteMany()
+    await resetDb(prisma)
 
     buyer = await prisma.user.create({ data: { email: 'buyer-confirm@test.waylo' } })
     traveler = await prisma.user.create({ data: { email: 'traveler-confirm@test.waylo' } })

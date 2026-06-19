@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission-common'
+import { resetDb } from '../../tests/helpers/db-reset'
 
 /**
  * GET /api/missions/:id/wallet — vue Wallet acheteur (solde + historique) :
@@ -45,18 +46,7 @@ describe('GET /api/missions/:id/wallet', () => {
     prisma = (await import('../db')).prisma
     app = await (await import('../app')).buildApp({ stripe: fakeStripe })
 
-    await prisma.transferOutbox.deleteMany()
-    await prisma.ledgerEntry.deleteMany()
-    await prisma.issuingAuthorizationLog.deleteMany()
-    await prisma.receipt.deleteMany()
-    await prisma.substitutionRequest.deleteMany()
-    await prisma.walletTransaction.deleteMany()
-    await prisma.wallet.deleteMany()
-    await prisma.escrowTransaction.deleteMany()
-    await prisma.processedStripeEvent.deleteMany()
-    await prisma.mission.deleteMany()
-    await prisma.adminAuditLog.deleteMany()
-    await prisma.user.deleteMany()
+    await resetDb(prisma)
 
     buyer = await prisma.user.create({ data: { email: 'buyer-w@test.waylo' } })
     buyerNoWallet = await prisma.user.create({ data: { email: 'buyer-now@test.waylo' } })
@@ -69,12 +59,9 @@ describe('GET /api/missions/:id/wallet', () => {
   })
 
   afterAll(async () => {
-    // Purge des wallets créés ici AVANT déconnexion : `Wallet.userId` n'a pas de
-    // cascade, donc des lignes résiduelles feraient échouer le `user.deleteMany()`
-    // des suites suivantes (FK `Wallet_userId_fkey`). Convention : on ne laisse
-    // jamais de wallet/walletTransaction derrière soi (cf. wallet-drive-capture).
-    await prisma.walletTransaction.deleteMany()
-    await prisma.wallet.deleteMany()
+    // Purge FK-safe complète avant déconnexion : ne jamais laisser de wallet
+    // derrière soi (FK `Wallet_userId_fkey` casserait la suite suivante).
+    await resetDb(prisma)
     await app.close()
     await prisma.$disconnect()
   })
