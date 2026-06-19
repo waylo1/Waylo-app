@@ -42,6 +42,7 @@ export interface CaptureEscrowResult {
 export async function captureEscrowFunds(
   missionId: string,
   stripe: PaymentIntentClient,
+  idempotencyKey: string = `capture_${missionId}`,
 ): Promise<CaptureEscrowResult> {
   // Lecture seule : récupère le PaymentIntent lié + vérifie l'état capturable.
   const escrow = await prisma.escrowTransaction.findUnique({
@@ -70,10 +71,14 @@ export async function captureEscrowFunds(
 
   // SEUL effet du service : la capture Stripe. idempotencyKey déterministe —
   // un retry post-crash ou un double appel capture le MÊME PI une seule fois.
+  // `amount_to_capture` EXPLICITE : on capture le montant métier exact (= montant
+  // autorisé), jamais « ce que Stripe a sous la main » — source unique partagée par
+  // tous les chemins de capture (/validate, /confirm-receipt, /receive,
+  // /confirm-collection) → mêmes paramètres sous une même clé (anti-conflit d'idempotence).
   await stripe.paymentIntents.capture(
     escrow.stripePaymentIntentId,
     { amount_to_capture: capturedAmountCents },
-    { idempotencyKey: `capture_${missionId}` },
+    { idempotencyKey },
   )
 
   return {

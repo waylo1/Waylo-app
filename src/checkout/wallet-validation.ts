@@ -59,32 +59,50 @@ export async function validateMissionFunding(
     throw new CheckoutValidationError('INVALID_AUTHORIZATION_AMOUNT')
   }
 
-  const mission = await prisma.mission.findUnique({
-    where: { id: args.missionId },
-    select: { buyerId: true, budgetCents: true, commissionCents: true },
+  // Anti-TOCTOU (VULN #3) : le solde Wallet est une ressource PARTAGÉE entre toutes
+  // les missions d'un acheteur. Sans sérialisation, deux financements concurrents
+  // lisent le même solde et passent tous deux la garde de capacité (course de
+  // lecture-snapshot). On exécute donc le contrôle dans UNE transaction et on prend
+  // un verrou consultatif transactionnel par acheteur (pg_advisory_xact_lock) AVANT
+  // de lire le Wallet : les contrôles concurrents d'un même acheteur s'exécutent en
+  // série, chacun voyant l'état committé par le précédent. Le verrou (clé dérivée du
+  // buyerId, indépendant de l'existence d'une ligne Wallet) est relâché au commit.
+  //
+  // NB : ferme la course de lecture ; la prévention complète du double-engagement du
+  // reliquat Wallet exigerait une réservation persistée du solde au financement
+  // (déférée — le solde Wallet n'est pas encore dépensable, S18).
+  return prisma.$transaction(async tx => {
+    const mission = await tx.mission.findUnique({
+      where: { id: args.missionId },
+      select: { buyerId: true, budgetCents: true, commissionCents: true },
+    })
+    if (!mission) throw new CheckoutValidationError('MISSION_NOT_FOUND')
+
+    // $executeRaw (et non $queryRaw) : pg_advisory_xact_lock renvoie `void`, non
+    // désérialisable en colonne — executeRaw n'attend qu'un nombre de lignes.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${mission.buyerId}))`
+
+    // Solde du Wallet interne acheteur (S18). Pas de wallet ouvert ⇒ 0 (jamais négatif).
+    const wallet = await tx.wallet.findUnique({
+      where: { userId: mission.buyerId },
+      select: { balanceCents: true },
+    })
+    const walletBalanceCents = wallet?.balanceCents ?? 0
+
+    const missionTotalCents = mission.budgetCents + mission.commissionCents
+    const required = requiredCapacityCents(missionTotalCents)
+    const totalCapacityCents = args.stripeAuthorizationCents + walletBalanceCents
+
+    if (totalCapacityCents < required) {
+      throw new CheckoutValidationError('INSUFFICIENT_FUNDS_FOR_MISSION')
+    }
+
+    return {
+      missionTotalCents,
+      requiredCapacityCents: required,
+      stripeAuthorizationCents: args.stripeAuthorizationCents,
+      walletBalanceCents,
+      totalCapacityCents,
+    }
   })
-  if (!mission) throw new CheckoutValidationError('MISSION_NOT_FOUND')
-
-  // Solde du Wallet interne acheteur (S18). Pas de wallet ouvert ⇒ 0 (jamais négatif).
-  const wallet = await prisma.wallet.findUnique({
-    where: { userId: mission.buyerId },
-    select: { balanceCents: true },
-  })
-  const walletBalanceCents = wallet?.balanceCents ?? 0
-
-  const missionTotalCents = mission.budgetCents + mission.commissionCents
-  const required = requiredCapacityCents(missionTotalCents)
-  const totalCapacityCents = args.stripeAuthorizationCents + walletBalanceCents
-
-  if (totalCapacityCents < required) {
-    throw new CheckoutValidationError('INSUFFICIENT_FUNDS_FOR_MISSION')
-  }
-
-  return {
-    missionTotalCents,
-    requiredCapacityCents: required,
-    stripeAuthorizationCents: args.stripeAuthorizationCents,
-    walletBalanceCents,
-    totalCapacityCents,
-  }
 }

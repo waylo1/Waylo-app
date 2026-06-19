@@ -1,7 +1,8 @@
 import { FastifyPluginAsync } from 'fastify'
-import { EscrowStatus, MissionStatus } from '../../generated/prisma'
+import { MissionStatus } from '../../generated/prisma'
 import { prisma } from '../../db'
 import { findMissionForBuyer } from '../mission-access'
+import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
 import {
   missionIdParamsSchema,
   ValidationConflictError,
@@ -27,19 +28,16 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
     }
 
-    const escrow = await prisma.escrowTransaction.findUnique({
-      where: { missionId: mission.id },
-      select: { stripePaymentIntentId: true, status: true },
-    })
-    if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    // Capture déléguée au service (source unique) : pré-check escrow HELD + montant
+    // `amount_to_capture` exact (120% si substitution, budget sinon), clé `capture_<id>`.
+    try {
+      await captureEscrowFunds(mission.id, opts.stripe)
+    } catch (err) {
+      if (err instanceof EscrowCaptureError) {
+        return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+      }
+      throw err
     }
-
-    await opts.stripe.paymentIntents.capture(
-      escrow.stripePaymentIntentId,
-      {},
-      { idempotencyKey: `capture_${mission.id}` },
-    )
 
     try {
       await prisma.$transaction(async tx => {
@@ -77,19 +75,16 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       return reply.code(400).send({ error: 'MISSION_NOT_AWAITING_VALIDATION' })
     }
 
-    const escrow = await prisma.escrowTransaction.findUnique({
-      where: { missionId: mission.id },
-      select: { stripePaymentIntentId: true, status: true },
-    })
-    if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+    // Jumeau de /validate : capture via le service (clé partagée `capture_<id>` →
+    // un acheteur appelant /validate ET /confirm-receipt ne capture qu'une fois).
+    try {
+      await captureEscrowFunds(mission.id, opts.stripe)
+    } catch (err) {
+      if (err instanceof EscrowCaptureError) {
+        return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+      }
+      throw err
     }
-
-    await opts.stripe.paymentIntents.capture(
-      escrow.stripePaymentIntentId,
-      {},
-      { idempotencyKey: `capture_${mission.id}` },
-    )
 
     try {
       await prisma.$transaction(async tx => {
