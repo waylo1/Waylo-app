@@ -127,6 +127,32 @@ export interface FundingBody {
   stripeAuthorizationCents?: number
 }
 
+/**
+ * DTO de réponse Wallet (vue API) — distincts des modèles Prisma générés
+ * (`Wallet`/`WalletTransaction`), qu'on n'expose JAMAIS bruts : on ne renvoie
+ * que les champs nécessaires (ni `walletId`, ni `userId`, ni `updatedAt`).
+ * Montants en centimes Int partout (jamais Float), conformément aux conventions.
+ */
+export interface WalletTransactionView {
+  /** id de l'écriture (cuid). */
+  id: string
+  /** mission à l'origine du mouvement (1 écriture max par mission). */
+  missionId: string
+  /** crédit en centimes Int (toujours positif en l'état du modèle). */
+  amountCents: number
+  /** motif métier (ex. SUBSTITUTION_RESIDUAL). */
+  reason: string
+  createdAt: Date
+}
+
+/** Vue Wallet acheteur : solde courant + historique des mouvements (desc). */
+export interface WalletView {
+  /** solde courant, centimes Int (0 si le wallet n'a jamais été crédité). */
+  balanceCents: number
+  /** mouvements du wallet, les plus récents d'abord. */
+  transactions: WalletTransactionView[]
+}
+
 export interface DropOffBody {
   dropOffType: string
   dropOffCarrier: string
