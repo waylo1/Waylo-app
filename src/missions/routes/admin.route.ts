@@ -14,6 +14,7 @@ import {
   ResolveRefundConflictError,
   ResolvePayoutConflictError,
 } from '../mission-common'
+import { createDisputeInTx, openDisputeInTx } from '../../services/dispute.service'
 
 export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
   // POST /api/missions/:id/customs-approve — validation ops/admin du verrou douanier.
@@ -141,6 +142,14 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
             },
           })
           if (updated.count !== 1) throw new DisputeConflictError()
+          // Créer + ouvrir le litige structuré atomiquement avec la mise à jour mission.
+          // Si l'une de ces étapes échoue, toute la transaction est annulée — la mission
+          // ne peut pas rester DISPUTED sans Dispute row (cohérence garantie).
+          await createDisputeInTx(tx, mission.id, req.user.sub, disputeReason)
+          await openDisputeInTx(tx, mission.id)
+          await tx.adminAuditLog.create({
+            data: { adminId: req.user.sub, action: 'DISPUTE_OPENED', missionId: mission.id },
+          })
         })
       } catch (err) {
         if (err instanceof DisputeConflictError) {

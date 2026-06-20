@@ -1,7 +1,10 @@
 import { prisma } from '../db'
-import { Dispute, DisputeStatus } from '../generated/prisma'
+import { Dispute, DisputeStatus, PrismaClient } from '../generated/prisma'
 import { findMissionForBuyer, findMissionForParticipant } from '../missions/mission-access'
 import { isRequestAdmin, isUniqueViolation } from '../missions/mission-common'
+
+// Surface minimale acceptée par les variantes tx-aware (compatible PrismaClient et client transaction).
+type DisputeWriter = Pick<PrismaClient['dispute'], 'upsert' | 'updateMany'>
 
 /**
  * DisputeService — cycle de vie immuable du litige (DRAFT → OPEN → ESCALATED →
@@ -151,4 +154,43 @@ export async function getDispute(input: {
 }): Promise<Dispute> {
   await assertParticipant(input.missionId, input.actorId)
   return getOrThrow(input.missionId)
+}
+
+/**
+ * Variantes TX-AWARE — à appeler UNIQUEMENT dans un `prisma.$transaction()`.
+ * Pas de vérification d'accès (faite en amont par la route), pas de catch
+ * de violation d'unicité (géré par le rollback de la transaction parente).
+ *
+ * Pattern identique à `mission-access.ts` : acceptent un objet structurellement
+ * compatible avec `PrismaClient` (transaction client ou client de base).
+ */
+
+/** Crée le litige (DRAFT) en mode idempotent via upsert — safe dans une tx. */
+export async function createDisputeInTx(
+  client: { dispute: DisputeWriter },
+  missionId: string,
+  actorId: string,
+  reason?: string | null,
+): Promise<void> {
+  await client.dispute.upsert({
+    where: { missionId },
+    create: {
+      missionId,
+      openedById: actorId,
+      reason: reason ?? null,
+      idempotencyKey: `dispute_${missionId}`,
+    },
+    update: {},
+  })
+}
+
+/** Fait passer le litige DRAFT → OPEN (transition conditionnelle atomique). */
+export async function openDisputeInTx(
+  client: { dispute: DisputeWriter },
+  missionId: string,
+): Promise<void> {
+  await client.dispute.updateMany({
+    where: { missionId, status: DisputeStatus.DRAFT },
+    data: { status: DisputeStatus.OPEN, openedAt: new Date() },
+  })
 }
