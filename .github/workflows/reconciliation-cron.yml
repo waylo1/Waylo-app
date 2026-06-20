@@ -6,7 +6,6 @@ on:
   schedule:
     - cron: "0 0 * * *" # tous les jours à 00:00 UTC
   workflow_dispatch: # déclenchement manuel
-  push: # TEMPORAIRE — test connexion DB prod via secrets.DATABASE_URL (à retirer)
 
 # Une seule réconciliation à la fois : un run en cours n'est pas doublé par un
 # déclenchement manuel concurrent.
