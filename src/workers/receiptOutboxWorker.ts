@@ -2,6 +2,7 @@ import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
 import { processReceiptImage, VisionExtractionError, type VisionClient } from '../services/visionClient'
 import { UnsupportedImageError, MalformedImageError } from '../services/inputGuard'
+import { sealReceipt } from '../services/escrowService'
 
 /**
  * Worker d'extraction OCR de reçu — draine `ReceiptExtractionOutbox`
@@ -84,6 +85,14 @@ export async function processReceiptOutbox(client: VisionClient): Promise<void> 
           lastError: null,
         },
       })
+
+      // (3a-bis) Validation métier + scellement (anti-fraude) : COMPLETED →
+      // CONSUMED (reçu validé + Receipt scellé) | FAILED (montant manquant /
+      // mismatch / déjà scellé). Transactionnel et idempotent : sealReceipt ne
+      // traite qu'un job COMPLETED et gère lui-même tous les cas métier (jamais
+      // d'exception pour ceux-ci). Une erreur DB inattendue retombe dans le catch
+      // ci-dessous (no-op : le job n'est plus PROCESSING) — jamais corrompu.
+      await sealReceipt(job.id)
     } catch (error) {
       // (3b) Échec : définitif si erreur déterministe (image/contenu) OU seuil de
       // ré-essais atteint ; sinon ré-éligible (→ PENDING) pour le prochain tick.

@@ -16,11 +16,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  *  (7) reclaim des PROCESSING orphelins (crash) → repassés PENDING en début de tick.
  */
 
-const { mockPrisma, mockProcess } = vi.hoisted(() => ({
+const { mockPrisma, mockProcess, mockSeal } = vi.hoisted(() => ({
   mockPrisma: {
     receiptExtractionOutbox: { updateMany: vi.fn(), findMany: vi.fn() },
   },
   mockProcess: vi.fn(),
+  mockSeal: vi.fn(),
 }))
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
@@ -28,6 +29,8 @@ vi.mock('../services/visionClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/visionClient')>()
   return { ...actual, processReceiptImage: mockProcess }
 })
+// sealReceipt isolé : on vérifie qu'il est appelé après COMPLETED, pas sa logique.
+vi.mock('../services/escrowService', () => ({ sealReceipt: mockSeal }))
 
 import { processReceiptOutbox } from './receiptOutboxWorker'
 import { VisionExtractionError, type VisionClient } from '../services/visionClient'
@@ -76,6 +79,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
     mockPrisma.receiptExtractionOutbox.updateMany.mockResolvedValue({ count: 1 })
     mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([])
     mockProcess.mockResolvedValue(RECEIPT)
+    mockSeal.mockResolvedValue({ outcome: 'CONSUMED', receiptId: 'r1' })
   })
 
   it('(1) PENDING → claim PENDING→PROCESSING (attempts +1) puis COMPLETED + resultJson', async () => {
@@ -103,6 +107,17 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
       where: { id: 'job_1', status: 'PROCESSING' },
       data: { status: 'COMPLETED', resultJson: RECEIPT, lastError: null },
     })
+    // Scellement déclenché APRÈS le passage COMPLETED.
+    expect(mockSeal).toHaveBeenCalledWith('job_1')
+  })
+
+  it('(1-bis) échec d’extraction → AUCUN scellement', async () => {
+    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 0 })])
+    mockProcess.mockRejectedValueOnce(new VisionExtractionError('UNREADABLE_IMAGE'))
+
+    await processReceiptOutbox(fakeClient)
+
+    expect(mockSeal).not.toHaveBeenCalled()
   })
 
   it('(2) claim perdu (count=0) → AUCUNE extraction ni verdict', async () => {
