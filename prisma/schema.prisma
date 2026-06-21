@@ -37,6 +37,8 @@ enum MissionStatus {
   REFUNDED
   CANCELLED
   EXPIRED // « ghost mission » : CREATED jamais financée et expiresAt dépassé — clôturée par le worker mission-lifecycle (aucun escrow, aucun argent en jeu)
+  AWAITING_CONFIRMATION // colis livré : en attente de la confirmation de réception de l'acheteur (preuve de livraison). Gèle la suppression de compte des parties (userService.deleteAccount).
+  COMPLETED_BY_BUYER // acheteur a confirmé la réception (deliveryProof vérifié) : déclenche le paiement voyageur via OutboxEvent READY_FOR_PAYOUT (capture exécutée hors tx par le worker).
 }
 
 enum EscrowStatus {
@@ -95,6 +97,13 @@ enum ReceiptJobStatus {
   COMPLETED
   CONSUMED
   FAILED
+}
+
+// Type d'événement métier de l'outbox générique (OutboxEvent). READY_FOR_PAYOUT :
+// l'acheteur a confirmé la réception → handoff vers le worker de paiement (capture
+// Stripe HORS transaction DB — règle « No Stripe in DB tx »).
+enum OutboxEventType {
+  READY_FOR_PAYOUT
 }
 
 enum SubstitutionStatus {
@@ -168,6 +177,8 @@ model Mission {
   droppedAt            DateTime?    // horodatage serveur du dépôt logistique (jamais l'horloge du device)
   disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
+  deliveryProofHash    String?   // sha256 (hex) de la preuve de livraison scellée à confirmReception ; jamais le secret en clair (preuve irréfutable de litige)
+  receptionConfirmedAt DateTime? // horodatage serveur de la confirmation de réception acheteur (confirmReception) ; null tant que non confirmé
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
@@ -185,6 +196,7 @@ model Mission {
   walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
   buyerCompensations BuyerCompensationOutbox[] // intentions de compensation 120% (arbitrage de fraude, roadmap S20+)
   receiptExtractions ReceiptExtractionOutbox[] // jobs d'extraction OCR de reçu (upload voyageur, S21)
+  outboxEvents    OutboxEvent[] // événements métier asynchrones (ex. READY_FOR_PAYOUT à confirmReception, S22)
   dispute         Dispute? // litige structuré (cycle de vie DisputeService) — au plus un par mission
 
   @@index([buyerId])
@@ -317,6 +329,30 @@ model ReceiptExtractionOutbox {
   @@index([status]) // file d'attente du worker (éligibilité PENDING + reclaim PROCESSING)
   @@index([missionId])
   @@index([uploaderId])
+}
+
+// Outbox générique d'événements métier (S22). Découple un fait métier committé en
+// base (ex. acheteur a confirmé la réception) de son effet à exécuter hors
+// transaction (ex. capture Stripe → paiement voyageur), porté par un worker
+// asynchrone. `confirmReception` y insère READY_FOR_PAYOUT dans la MÊME transaction
+// que la transition de statut → respect strict « aucun appel Stripe dans une
+// transaction DB » : la $transaction ne fait QUE de l'écriture DB, jamais de réseau.
+model OutboxEvent {
+  id        String          @id @default(cuid())
+  missionId String
+  type      OutboxEventType
+  status    OutboxStatus    @default(PENDING) // PENDING → SETTLED | FAILED (worker consommateur)
+  payload   Json? // contexte de l'événement (ex. { deliveryProofHash, confirmedBy }) — jamais de secret en clair
+  attempts  Int             @default(0)
+  lastError String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  // onDelete: Cascade — miroir des autres outbox : une mission supprimée emporte ses événements.
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  @@index([status]) // file d'attente du worker consommateur (éligibilité PENDING)
+  @@index([missionId])
 }
 
 // Wallet interne acheteur (Sprint 18, modèle « Drive »). Solde alimenté par le
