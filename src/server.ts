@@ -9,6 +9,8 @@ import { startFundingReconciliationLoop } from './workers/funding-reconciliation
 import { startRateLimitCleanupLoop } from './workers/rate-limit-cleanup'
 import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 import { startKeepAliveLoop } from './workers/keep-alive'
+import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
+import { AnthropicVisionClient } from './services/visionClient'
 
 /**
  * Point d'entrée serveur Waylo — MVP monoprocess : trois composants démarrés
@@ -53,6 +55,9 @@ const DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL_MS = 3_600_000
 const DEFAULT_MISSION_LIFECYCLE_INTERVAL_MS = 3_600_000
 // Keep-alive anti-pause Supabase (sonde DB SELECT 1) : toutes les 20 min.
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 20 * 60_000
+// Extraction OCR des reçus déposés (file ReceiptExtractionOutbox) : même cadence
+// que les autres outbox (~1 min).
+const DEFAULT_RECEIPT_WORKER_INTERVAL_MS = 60_000
 
 interface OpsLogger {
   info(details: Record<string, unknown>, message?: string): void
@@ -153,6 +158,10 @@ async function main(): Promise<void> {
     DEFAULT_MISSION_LIFECYCLE_INTERVAL_MS,
   )
   const keepAliveIntervalMs = intFromEnv('KEEP_ALIVE_INTERVAL_MS', DEFAULT_KEEP_ALIVE_INTERVAL_MS)
+  const receiptWorkerIntervalMs = intFromEnv(
+    'RECEIPT_WORKER_INTERVAL_MS',
+    DEFAULT_RECEIPT_WORKER_INTERVAL_MS,
+  )
 
   const { prisma } = await import('./db')
   const { buildApp } = await import('./app')
@@ -187,6 +196,13 @@ async function main(): Promise<void> {
   const missionLifecycleTimer = startMissionLifecycleLoop(prisma, missionLifecycleIntervalMs, log)
   // Keep-alive anti-pause Supabase : sonde DB légère toutes les 20 min.
   const keepAliveTimer = startKeepAliveLoop(prisma, keepAliveIntervalMs, log)
+  // Extraction OCR des reçus déposés (S21) : draine ReceiptExtractionOutbox via
+  // l'API Vision (clé ANTHROPIC_API_KEY lue par le SDK ; jobs en échec si absente).
+  const receiptWorkerTimer = startReceiptOutboxWorkerLoop(
+    new AnthropicVisionClient(),
+    receiptWorkerIntervalMs,
+    log,
+  )
   log.info(
     {
       port,
@@ -198,6 +214,7 @@ async function main(): Promise<void> {
       rateLimitCleanupIntervalMs,
       missionLifecycleIntervalMs,
       keepAliveIntervalMs,
+      receiptWorkerIntervalMs,
     },
     'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive',
   )
@@ -216,6 +233,7 @@ async function main(): Promise<void> {
     clearInterval(rateLimitCleanupTimer)
     clearInterval(missionLifecycleTimer)
     clearInterval(keepAliveTimer)
+    clearInterval(receiptWorkerTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol

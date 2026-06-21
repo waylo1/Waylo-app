@@ -8,6 +8,7 @@ import arbitrageRoute from './admin/arbitrage.route'
 import type { PaymentIntentClient } from './missions/mission-common'
 import issuingAuthorizationRoute from './stripe/issuing-authorization.route'
 import stripeWebhookRoute from './stripe/webhook.route'
+import receiptsRoute from './receipts/receipts.route'
 import { readAuthCookie } from './auth/cookie'
 import { AlertSink } from './alerts'
 
@@ -81,6 +82,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     onAlert: options.onAlert,
   })
   await app.register(escrowRoute, { prefix: '/api/escrow', stripe: paymentClient })
+  // Upload de reçu (S21) : multipart → outbox d'extraction OCR (worker async).
+  // Aucun client Stripe — la route ne fait que valider + mettre en file.
+  await app.register(receiptsRoute, { prefix: '/api/receipts' })
   // Arbitrage admin de fraude voyageur (Sprint 14) — aucun client Stripe (journalise
   // l'intention de ponction + le ledger ; l'exécution monétaire relève d'un worker).
   await app.register(arbitrageRoute, { prefix: '/api/admin' })
