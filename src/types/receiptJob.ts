@@ -8,7 +8,12 @@
  * sa charge utile (réponses d'API, journalisation, vues de file d'attente).
  */
 
-export type ReceiptJobStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+export type ReceiptJobStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'CONSUMED'
+  | 'FAILED'
 
 export interface ReceiptJobData {
   id: string

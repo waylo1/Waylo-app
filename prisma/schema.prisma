@@ -86,10 +86,14 @@ enum OutboxStatus {
 // Cycle de vie d'un job d'extraction OCR de reçu (outbox dédiée). Distinct de
 // OutboxStatus : un job traverse un état PROCESSING explicite (appel Vision en
 // cours, hors transaction DB) entre la prise en charge et le verdict final.
+// COMPLETED = extraction réussie ; CONSUMED = reçu validé (anti-fraude : total OCR
+// == purchaseAmountCents) PUIS scellé (Receipt créé) ; FAILED = échec d'extraction
+// OU rejet métier (montant manquant / mismatch / reçu déjà scellé).
 enum ReceiptJobStatus {
   PENDING
   PROCESSING
   COMPLETED
+  CONSUMED
   FAILED
 }
 

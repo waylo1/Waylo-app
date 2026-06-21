@@ -16,11 +16,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  *  (7) reclaim des PROCESSING orphelins (crash) → repassés PENDING en début de tick.
  */
 
-const { mockPrisma, mockProcess } = vi.hoisted(() => ({
+const { mockPrisma, mockProcess, mockSeal } = vi.hoisted(() => ({
   mockPrisma: {
     receiptExtractionOutbox: { updateMany: vi.fn(), findMany: vi.fn() },
   },
   mockProcess: vi.fn(),
+  mockSeal: vi.fn(),
 }))
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
@@ -28,6 +29,8 @@ vi.mock('../services/visionClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/visionClient')>()
   return { ...actual, processReceiptImage: mockProcess }
 })
+// sealReceipt isolé : on vérifie qu'il est appelé après COMPLETED, pas sa logique.
+vi.mock('../services/escrowService', () => ({ sealReceipt: mockSeal }))
 
 import { processReceiptOutbox } from './receiptOutboxWorker'
 import { VisionExtractionError, type VisionClient } from '../services/visionClient'
@@ -69,17 +72,31 @@ const claimCalls = () =>
 const verdictCalls = () =>
   calls().filter(([a]) => a.where.status === 'PROCESSING' && a.where.updatedAt === undefined)
 
+// findMany est appelé pour DEUX files : COMPLETED (reconciliation) puis PENDING.
+// On les distingue par `where.status` pour piloter chaque file indépendamment.
+let pendingRows: ReturnType<typeof job>[] = []
+let completedRows: { id: string }[] = []
+
 describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    pendingRows = []
+    completedRows = []
     // Tout updateMany réussit par défaut (reclaim, claim, verdict) ; surchargé au besoin.
     mockPrisma.receiptExtractionOutbox.updateMany.mockResolvedValue({ count: 1 })
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([])
+    mockPrisma.receiptExtractionOutbox.findMany.mockImplementation(
+      async ({ where }: { where: { status: string } }) => {
+        if (where.status === 'COMPLETED') return completedRows
+        if (where.status === 'PENDING') return pendingRows
+        return []
+      },
+    )
     mockProcess.mockResolvedValue(RECEIPT)
+    mockSeal.mockResolvedValue({ outcome: 'CONSUMED', receiptId: 'r1' })
   })
 
   it('(1) PENDING → claim PENDING→PROCESSING (attempts +1) puis COMPLETED + resultJson', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 0 })])
+    pendingRows = [job({ attempts: 0 })]
 
     await processReceiptOutbox(fakeClient)
 
@@ -103,10 +120,21 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
       where: { id: 'job_1', status: 'PROCESSING' },
       data: { status: 'COMPLETED', resultJson: RECEIPT, lastError: null },
     })
+    // Scellement déclenché APRÈS le passage COMPLETED.
+    expect(mockSeal).toHaveBeenCalledWith('job_1')
+  })
+
+  it('(1-bis) échec d’extraction → AUCUN scellement', async () => {
+    pendingRows = [job({ attempts: 0 })]
+    mockProcess.mockRejectedValueOnce(new VisionExtractionError('UNREADABLE_IMAGE'))
+
+    await processReceiptOutbox(fakeClient)
+
+    expect(mockSeal).not.toHaveBeenCalled()
   })
 
   it('(2) claim perdu (count=0) → AUCUNE extraction ni verdict', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job()])
+    pendingRows = [job()]
     // Le claim ne matche rien (ligne déjà réclamée ailleurs).
     mockPrisma.receiptExtractionOutbox.updateMany.mockImplementation(
       async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
@@ -122,7 +150,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   })
 
   it('(3) échec transitoire (UNREADABLE_IMAGE), attempts < max → ré-éligible (PENDING)', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 0 })])
+    pendingRows = [job({ attempts: 0 })]
     mockProcess.mockRejectedValueOnce(new VisionExtractionError('UNREADABLE_IMAGE'))
 
     await processReceiptOutbox(fakeClient)
@@ -135,7 +163,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   })
 
   it('(4) échec déterministe de contenu (SCHEMA_MISMATCH) → FAILED immédiat', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 0 })])
+    pendingRows = [job({ attempts: 0 })]
     mockProcess.mockRejectedValueOnce(new VisionExtractionError('SCHEMA_MISMATCH'))
 
     await processReceiptOutbox(fakeClient)
@@ -144,7 +172,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   })
 
   it('(5) échec déterministe structurel (UnsupportedImageError) → FAILED immédiat', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 0 })])
+    pendingRows = [job({ attempts: 0 })]
     mockProcess.mockRejectedValueOnce(new UnsupportedImageError('magic bytes non JPEG/PNG'))
 
     await processReceiptOutbox(fakeClient)
@@ -153,7 +181,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   })
 
   it('(6) échec transitoire atteignant le seuil (attempts 3 → 4) → FAILED', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([job({ attempts: 3 })])
+    pendingRows = [job({ attempts: 3 })]
     mockProcess.mockRejectedValueOnce(new VisionExtractionError('UNREADABLE_IMAGE'))
 
     await processReceiptOutbox(fakeClient)
@@ -162,7 +190,7 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
   })
 
   it('(7) reclaim des PROCESSING orphelins → repassés PENDING en tête de tick', async () => {
-    mockPrisma.receiptExtractionOutbox.findMany.mockResolvedValue([])
+    // pendingRows / completedRows vides (défaut) → aucun job à traiter.
 
     await processReceiptOutbox(fakeClient)
 
@@ -172,5 +200,31 @@ describe('processReceiptOutbox — worker extraction OCR de reçu', () => {
     expect(arg.where.status).toBe('PROCESSING')
     expect(arg.data).toEqual({ status: 'PENDING' })
     expect((arg.where.updatedAt as { lt: Date }).lt).toBeInstanceOf(Date)
+  })
+
+  it('(8) reconciliation : un job COMPLETED orphelin est re-scellé (anti dangling state)', async () => {
+    // Aucun PENDING ; un COMPLETED resté non scellé (crash entre COMPLETED et seal).
+    completedRows = [{ id: 'job_orphan' }]
+
+    await processReceiptOutbox(fakeClient)
+
+    // La file COMPLETED est balayée et sealReceipt rejoué (idempotent) sur l'orphelin.
+    expect(mockPrisma.receiptExtractionOutbox.findMany).toHaveBeenCalledWith({
+      where: { status: 'COMPLETED' },
+      select: { id: true },
+      take: 10,
+    })
+    expect(mockSeal).toHaveBeenCalledWith('job_orphan')
+  })
+
+  it('(9) reconciliation : un sealReceipt en échec n’interrompt pas le balayage', async () => {
+    completedRows = [{ id: 'orphan_a' }, { id: 'orphan_b' }]
+    mockSeal.mockRejectedValueOnce(new Error('db blip')) // orphan_a échoue
+
+    await processReceiptOutbox(fakeClient)
+
+    // orphan_b est tout de même tenté (isolation des échecs).
+    expect(mockSeal).toHaveBeenCalledWith('orphan_a')
+    expect(mockSeal).toHaveBeenCalledWith('orphan_b')
   })
 })

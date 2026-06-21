@@ -121,6 +121,8 @@ describe('POST /api/receipts/upload + worker', () => {
         budgetCents: 50_000,
         commissionCents: 5_000,
         destination: 'Tokyo',
+        // Montant d'achat déclaré = total du reçu OCR (1500) → scellement CONSUMED.
+        purchaseAmountCents: 1500,
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })
@@ -147,7 +149,7 @@ describe('POST /api/receipts/upload + worker', () => {
       payload: body,
     })
 
-  it('(E2E-1) upload voyageur → 202 PENDING en DB → worker → COMPLETED + resultJson', async () => {
+  it('(E2E-1) upload → PENDING → worker → extraction + scellement → CONSUMED + Receipt', async () => {
     const res = await upload(travelerToken, multipartBody(mission.id, MINIMAL_JPEG))
 
     expect(res.statusCode).toBe(202)
@@ -166,13 +168,20 @@ describe('POST /api/receipts/upload + worker', () => {
     expect(pending?.imageData.length).toBeGreaterThan(0)
 
     // Déclenchement manuel du worker (client Vision factice cohérent).
+    // total OCR (1500) === mission.purchaseAmountCents (1500) → validé + scellé.
     await processReceiptOutbox(okClient)
 
     const done = await prisma.receiptExtractionOutbox.findUnique({ where: { id: outboxId } })
-    expect(done?.status).toBe('COMPLETED')
+    expect(done?.status).toBe('CONSUMED')
     expect(done?.attempts).toBe(1)
     expect(done?.lastError).toBeNull()
     expect(done?.resultJson).toMatchObject({ totalAmount: 1500, currency: 'EUR' })
+
+    // Receipt scellé créé pour la mission (totalTtcCents = total OCR, sha256 posé).
+    const sealed = await prisma.receipt.findUnique({ where: { missionId: mission.id } })
+    expect(sealed).not.toBeNull()
+    expect(sealed?.totalTtcCents).toBe(1500)
+    expect(sealed?.sha256Server).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('(E2E-2) extraction déterministe en échec (JSON invalide) → FAILED', async () => {
@@ -184,6 +193,35 @@ describe('POST /api/receipts/upload + worker', () => {
     const failed = await prisma.receiptExtractionOutbox.findUnique({ where: { id: outboxId } })
     expect(failed?.status).toBe('FAILED')
     expect(failed?.lastError).toBe('INVALID_JSON')
+  })
+
+  it('(E2E-3 anti-fraude) total OCR ≠ purchaseAmountCents → FAILED, aucun Receipt', async () => {
+    // Mission dont le montant déclaré (9999) diffère du total OCR (1500).
+    const mismatchMission = await prisma.mission.create({
+      data: {
+        buyerId: buyer.id,
+        travelerId: traveler.id,
+        status: 'IN_PROGRESS',
+        targetProduct: 'Article mismatch',
+        budgetCents: 50_000,
+        commissionCents: 5_000,
+        destination: 'Osaka',
+        purchaseAmountCents: 9999,
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      },
+    })
+
+    const res = await upload(travelerToken, multipartBody(mismatchMission.id, MINIMAL_JPEG))
+    const { outboxId } = res.json() as { outboxId: string }
+
+    await processReceiptOutbox(okClient) // total OCR 1500 ≠ 9999 → blocage
+
+    const blocked = await prisma.receiptExtractionOutbox.findUnique({ where: { id: outboxId } })
+    expect(blocked?.status).toBe('FAILED')
+    expect(blocked?.lastError).toBe('PRICE_MISMATCH')
+    // Aucun reçu scellé : la fraude présumée n'entre jamais dans l'état canonique.
+    const noReceipt = await prisma.receipt.findUnique({ where: { missionId: mismatchMission.id } })
+    expect(noReceipt).toBeNull()
   })
 
   it('(AUTHZ) un non-voyageur de la mission → 404 MISSION_NOT_FOUND', async () => {

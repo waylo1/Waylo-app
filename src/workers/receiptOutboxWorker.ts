@@ -2,6 +2,7 @@ import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
 import { processReceiptImage, VisionExtractionError, type VisionClient } from '../services/visionClient'
 import { UnsupportedImageError, MalformedImageError } from '../services/inputGuard'
+import { sealReceipt } from '../services/escrowService'
 
 /**
  * Worker d'extraction OCR de reçu — draine `ReceiptExtractionOutbox`
@@ -53,6 +54,26 @@ export async function processReceiptOutbox(client: VisionClient): Promise<void> 
     data: { status: 'PENDING' },
   })
 
+  // (0-bis) Reconciliation des jobs COMPLETED orphelins. Le scellement (sealReceipt)
+  // est une étape SÉPARÉE de la transition COMPLETED : un crash / une erreur DB dans
+  // cet intervalle laisse un job COMPLETED jamais scellé (le reclaim ci-dessus ne
+  // couvre que PROCESSING). sealReceipt étant idempotent (n'agit que sur COMPLETED →
+  // CONSUMED|FAILED), on le rejoue ici → reprise automatique au tick suivant et au
+  // redémarrage du process. Chaque scellement est isolé : un orphelin récalcitrant
+  // (erreur DB transitoire) ne bloque pas le reste du balayage (repris au tick suivant).
+  const orphanedCompleted = await prisma.receiptExtractionOutbox.findMany({
+    where: { status: 'COMPLETED' },
+    select: { id: true },
+    take: BATCH_SIZE,
+  })
+  for (const orphan of orphanedCompleted) {
+    try {
+      await sealReceipt(orphan.id)
+    } catch {
+      // Repris au prochain tick (sealReceipt reste idempotent).
+    }
+  }
+
   const pendings = await prisma.receiptExtractionOutbox.findMany({
     where: { status: 'PENDING' },
     take: BATCH_SIZE,
@@ -84,6 +105,14 @@ export async function processReceiptOutbox(client: VisionClient): Promise<void> 
           lastError: null,
         },
       })
+
+      // (3a-bis) Validation métier + scellement (anti-fraude) : COMPLETED →
+      // CONSUMED (reçu validé + Receipt scellé) | FAILED (montant manquant /
+      // mismatch / déjà scellé). Transactionnel et idempotent : sealReceipt ne
+      // traite qu'un job COMPLETED et gère lui-même tous les cas métier (jamais
+      // d'exception pour ceux-ci). Une erreur DB inattendue retombe dans le catch
+      // ci-dessous (no-op : le job n'est plus PROCESSING) — jamais corrompu.
+      await sealReceipt(job.id)
     } catch (error) {
       // (3b) Échec : définitif si erreur déterministe (image/contenu) OU seuil de
       // ré-essais atteint ; sinon ré-éligible (→ PENDING) pour le prochain tick.
