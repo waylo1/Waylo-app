@@ -83,6 +83,16 @@ enum OutboxStatus {
   FAILED
 }
 
+// Cycle de vie d'un job d'extraction OCR de reçu (outbox dédiée). Distinct de
+// OutboxStatus : un job traverse un état PROCESSING explicite (appel Vision en
+// cours, hors transaction DB) entre la prise en charge et le verdict final.
+enum ReceiptJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 enum SubstitutionStatus {
   PENDING
   APPROVED
@@ -123,6 +133,7 @@ model User {
   penaltyDebits      PenaltyDebitOutbox[]
   wallet             Wallet?   // solde interne acheteur (reliquat de substitution « Drive », S18)
   buyerCompensations BuyerCompensationOutbox[] // restitutions 120% de fraude en attente d'exécution (roadmap S20+)
+  receiptExtractions ReceiptExtractionOutbox[] // reçus déposés par ce voyageur, en file d'extraction OCR (S21)
   disputesOpened     Dispute[] // litiges ouverts par cet utilisateur (DisputeService)
 }
 
@@ -169,6 +180,7 @@ model Mission {
   penaltyDebit    PenaltyDebitOutbox?
   walletTransaction WalletTransaction? // crédit Wallet acheteur du reliquat de substitution (S18) — au plus un par mission
   buyerCompensations BuyerCompensationOutbox[] // intentions de compensation 120% (arbitrage de fraude, roadmap S20+)
+  receiptExtractions ReceiptExtractionOutbox[] // jobs d'extraction OCR de reçu (upload voyageur, S21)
   dispute         Dispute? // litige structuré (cycle de vie DisputeService) — au plus un par mission
 
   @@index([buyerId])
@@ -270,6 +282,37 @@ model BuyerCompensationOutbox {
   @@index([status]) // file d'attente du worker (éligibilité PENDING)
   @@index([buyerId])
   @@index([missionId])
+}
+
+// Outbox d'extraction OCR de reçu (S21). Un upload voyageur (POST /api/receipts/upload)
+// y insère l'image NETTOYÉE (sanitizeVisionInput — métadonnées déjà retirées avant
+// persistance) ; le worker `receiptOutboxWorker` la draine en réutilisant
+// `processReceiptImage` (Vision → schéma → intégrité). Transitions :
+//   PENDING → PROCESSING (claim atomique, committé AVANT l'appel Vision)
+//           → COMPLETED (resultJson = reçu extrait) | FAILED (lastError).
+// Distinct des 3 autres outbox (monétaires, OutboxStatus) : ici l'étape lourde est
+// un appel réseau, jamais tenue dans une transaction DB ouverte.
+model ReceiptExtractionOutbox {
+  id         String           @id @default(cuid())
+  missionId  String
+  uploaderId String // voyageur déposant (= mission.travelerId vérifié à l'upload, anti-IDOR)
+  imageData  Bytes // image JPEG/PNG nettoyée (bytea) — source de l'extraction asynchrone
+  mimeType   String // 'image/jpeg' | 'image/png' détecté à l'upload (diagnostic ; le worker re-détecte)
+  status     ReceiptJobStatus @default(PENDING)
+  attempts   Int              @default(0) // incrémenté à chaque claim ; borne les ré-essais (échecs transitoires)
+  lastError  String? // dernier code/erreur d'extraction (diagnostic, jamais de secret)
+  resultJson Json? // snapshot du Receipt extrait à COMPLETED ; null tant que non traité
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  // onDelete: Cascade — miroir des autres outbox : une mission supprimée emporte ses
+  // jobs d'extraction (cohérence + isolation des tests : mission.deleteMany()).
+  mission  Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  uploader User    @relation(fields: [uploaderId], references: [id])
+
+  @@index([status]) // file d'attente du worker (éligibilité PENDING + reclaim PROCESSING)
+  @@index([missionId])
+  @@index([uploaderId])
 }
 
 // Wallet interne acheteur (Sprint 18, modèle « Drive »). Solde alimenté par le
