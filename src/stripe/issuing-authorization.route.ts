@@ -3,6 +3,7 @@ import Stripe from 'stripe'
 import { prisma } from '../db'
 import { AuthDecision, EscrowStatus, MissionStatus } from '../generated/prisma'
 import { AlertSink, safeEmit } from '../alerts'
+import { substitutionHardCapCents } from '../missions/mission-common'
 
 export interface IssuingAuthorizationOptions {
   /** Hook d'alerte (cf. src/alerts.ts). */
@@ -104,7 +105,12 @@ const issuingAuthorizationRoute: FastifyPluginAsync<IssuingAuthorizationOptions>
             const ceilingCents = escrow.mission.substitutionAuthorized
               ? Math.floor((escrow.mission.budgetCents * 12) / 10)
               : escrow.spendingLimitCents
-            if (requestedCents > ceilingCents) {
+            // BACKSTOP 150% (audit robustesse) : borne dure indépendante du plafond
+            // opérationnel — aucune autorisation au-delà de 150% du budget, même si
+            // le calcul du plafond régressait. Refus fail-safe, motif explicite.
+            if (requestedCents > substitutionHardCapCents(escrow.mission.budgetCents)) {
+              reason = 'HARD_CAP_EXCEEDED'
+            } else if (requestedCents > ceilingCents) {
               reason = 'OVER_BUDGET'
             } else {
               approved = true

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Pré-commit : npm test (base waylo_test)…",
+            "timeout": 300,
+            "command": "input=$(cat); case \"$input\" in *'git commit'*) DATABASE_URL=\"postgresql://flipsync:flipsync@localhost:5433/waylo_test\" npm test >/tmp/waylo-precommit-test.log 2>&1 || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"npm test a échoué — commit bloqué (anti-régression financière). Voir /tmp/waylo-precommit-test.log. Corrige les tests rouges avant de committer.\"}}' ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -31,6 +31,16 @@ export const rateLimit =
 export const substitutionCeilingCents = (budgetCents: number): number =>
   Math.floor((budgetCents * 12) / 10)
 
+/**
+ * BACKSTOP absolu (audit robustesse) — plafond dur 150% du budget. Indépendant et
+ * PLUS LARGE que le plafond opérationnel 120% (`substitutionCeilingCents`) : c'est
+ * une défense en profondeur aux points de mouvement d'argent (capture, autorisation
+ * JIT). Aucun montant de substitution ne doit JAMAIS dépasser cette borne, même si
+ * la logique 120% régressait. Centimes Int strict (Math.floor), jamais Float.
+ */
+export const substitutionHardCapCents = (budgetCents: number): number =>
+  Math.floor((budgetCents * 15) / 10)
+
 export async function checkFundingCapacity(
   missionId: string,
   budgetCents: number,
