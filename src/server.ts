@@ -10,6 +10,7 @@ import { startRateLimitCleanupLoop } from './workers/rate-limit-cleanup'
 import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 import { startKeepAliveLoop } from './workers/keep-alive'
 import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
+import { startEscrowPayoutWorkerLoop } from './workers/escrowPayoutWorker'
 import { AnthropicVisionClient } from './services/visionClient'
 
 /**
@@ -203,6 +204,9 @@ async function main(): Promise<void> {
     receiptWorkerIntervalMs,
     log,
   )
+  // Worker de payout escrow (S22) : consomme les OutboxEvent READY_FOR_PAYOUT
+  // créés par confirmReception → capture Stripe HORS transaction DB.
+  const escrowPayoutTimer = startEscrowPayoutWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
   log.info(
     {
       port,
@@ -234,6 +238,7 @@ async function main(): Promise<void> {
     clearInterval(missionLifecycleTimer)
     clearInterval(keepAliveTimer)
     clearInterval(receiptWorkerTimer)
+    clearInterval(escrowPayoutTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol
