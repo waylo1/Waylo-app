@@ -114,14 +114,62 @@ const appendCriticalFile = (alert: OpsAlert): void => {
 }
 
 /**
- * Canal par défaut. info/warn → stderr structuré. ops et critical → stderr ET
- * sink dédié persistant (jamais stderr seul) — ops partage le fichier NDJSON,
- * la distinction sert au branchement prod (pager pour critical, file d'action
- * pour ops).
- *
- * TODO(prod): brancher ici le canal critique réel (PagerDuty/Slack webhook)
- * quand les credentials existeront — remplacer/compléter appendCriticalFile,
- * ne PAS supprimer la persistance locale (filet si le canal externe est down).
+ * Webhook prod (format Slack Incoming Webhook). Vide → désactivé : seul le filet
+ * NDJSON local subsiste. Lu au chargement du module, comme le sink critique.
+ */
+const ALERT_WEBHOOK_URL = process.env.WAYLO_ALERT_WEBHOOK_URL ?? ''
+
+/**
+ * Payload Slack-compatible : `text` est le champ rendu par Slack ; les champs
+ * structurés (severity/code/details) servent à un routage en aval (Slack
+ * Workflow, ou tout endpoint maison qui parse le JSON). Exporté pour test.
+ */
+export function buildWebhookPayload(alert: OpsAlert): {
+  text: string
+  severity: AlertSeverity
+  code: AlertCode
+  details: Record<string, unknown>
+} {
+  const icon = alert.severity === 'critical' ? '🔴' : '🟠'
+  return {
+    text: `${icon} [${alert.severity.toUpperCase()}] ${alert.code} — ${alert.message}`,
+    severity: alert.severity,
+    code: alert.code,
+    details: alert.details,
+  }
+}
+
+/**
+ * POST fire-and-forget vers le webhook : JAMAIS bloquant, JAMAIS throw. Un
+ * chemin webhook Stripe ne doit pas dépendre de la latence/du statut de Slack
+ * (un await ici rallongerait la réponse à Stripe ; un throw ferait rejouer un
+ * effet déjà committé). La persistance NDJSON (appelée AVANT) reste le filet si
+ * ce POST échoue ou si l'URL n'est pas configurée.
+ */
+function postWebhook(alert: OpsAlert): void {
+  if (!ALERT_WEBHOOK_URL) return
+  void fetch(ALERT_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(buildWebhookPayload(alert)),
+  }).catch((err: unknown) => {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        kind: 'alert_webhook_failed',
+        code: alert.code,
+        err: String(err),
+      }),
+    )
+  })
+}
+
+/**
+ * Canal par défaut. info/warn → stderr structuré. ops et critical → stderr,
+ * sink dédié persistant (jamais stderr seul), PUIS webhook prod si configuré —
+ * ops partage le fichier NDJSON, la distinction sert au branchement prod (pager
+ * pour critical, file d'action pour ops). L'ordre garantit que la persistance
+ * locale est faite avant tout I/O réseau best-effort.
  */
 export const defaultAlertChannel: AlertChannel = {
   info: stderrLine,
@@ -129,10 +177,12 @@ export const defaultAlertChannel: AlertChannel = {
   ops: alert => {
     stderrLine(alert)
     appendCriticalFile(alert)
+    postWebhook(alert)
   },
   critical: alert => {
     stderrLine(alert)
     appendCriticalFile(alert)
+    postWebhook(alert)
   },
 }
 
