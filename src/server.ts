@@ -11,6 +11,7 @@ import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 import { startKeepAliveLoop } from './workers/keep-alive'
 import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
 import { startEscrowPayoutWorkerLoop } from './workers/escrowPayoutWorker'
+import { startWorkerHealthLoop } from './monitoring/workerHealth'
 import { AnthropicVisionClient } from './services/visionClient'
 
 /**
@@ -59,6 +60,9 @@ const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 20 * 60_000
 // Extraction OCR des reçus déposés (file ReceiptExtractionOutbox) : même cadence
 // que les autres outbox (~1 min).
 const DEFAULT_RECEIPT_WORKER_INTERVAL_MS = 60_000
+// Santé worker (S22) : log périodique des métriques OutboxEvent (lecture seule).
+// Cadence 5 min — un health-check n'a pas besoin de la cadence du worker.
+const DEFAULT_WORKER_HEALTH_INTERVAL_MS = 5 * 60_000
 
 interface OpsLogger {
   info(details: Record<string, unknown>, message?: string): void
@@ -163,6 +167,10 @@ async function main(): Promise<void> {
     'RECEIPT_WORKER_INTERVAL_MS',
     DEFAULT_RECEIPT_WORKER_INTERVAL_MS,
   )
+  const workerHealthIntervalMs = intFromEnv(
+    'WORKER_HEALTH_INTERVAL_MS',
+    DEFAULT_WORKER_HEALTH_INTERVAL_MS,
+  )
 
   const { prisma } = await import('./db')
   const { buildApp } = await import('./app')
@@ -207,6 +215,13 @@ async function main(): Promise<void> {
   // Worker de payout escrow (S22) : consomme les OutboxEvent READY_FOR_PAYOUT
   // créés par confirmReception → capture Stripe HORS transaction DB.
   const escrowPayoutTimer = startEscrowPayoutWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
+  // Santé worker (S22) : log périodique des métriques OutboxEvent (lecture seule,
+  // zéro impact sur le chemin du worker). `app.log` (pino) expose le niveau warn.
+  const workerHealthTimer = startWorkerHealthLoop(
+    prisma,
+    { info: (d, m) => app.log.info(d, m), warn: (d, m) => app.log.warn(d, m) },
+    workerHealthIntervalMs,
+  )
   log.info(
     {
       port,
@@ -219,8 +234,9 @@ async function main(): Promise<void> {
       missionLifecycleIntervalMs,
       keepAliveIntervalMs,
       receiptWorkerIntervalMs,
+      workerHealthIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive + santé worker',
   )
 
   let shuttingDown = false
@@ -239,6 +255,7 @@ async function main(): Promise<void> {
     clearInterval(keepAliveTimer)
     clearInterval(receiptWorkerTimer)
     clearInterval(escrowPayoutTimer)
+    clearInterval(workerHealthTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()
     await app.close() // cesse d'accepter, draine les requêtes en vol
