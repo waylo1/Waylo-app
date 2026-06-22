@@ -1,5 +1,5 @@
 import Stripe from 'stripe'
-import { safeEmit } from './alerts'
+import { safeEmit, defaultAlertSink } from './alerts'
 import { startTransferWorkerLoop } from './workers/transfer-worker'
 import { startPenaltyWorkerLoop } from './workers/penalty.worker'
 import { startBuyerCompensationWorkerLoop } from './workers/buyer-compensation.worker'
@@ -12,6 +12,7 @@ import { startKeepAliveLoop } from './workers/keep-alive'
 import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
 import { startEscrowPayoutWorkerLoop } from './workers/escrowPayoutWorker'
 import { startDisputeResolutionWorkerLoop } from './workers/disputeResolutionWorker'
+import { startDisputePenaltyWorkerLoop } from './workers/disputePenaltyWorker'
 import { startWorkerHealthLoop } from './monitoring/workerHealth'
 import { AnthropicVisionClient } from './services/visionClient'
 
@@ -221,6 +222,13 @@ async function main(): Promise<void> {
   // puis annule le hold Stripe HORS transaction DB → mission REFUNDED. Aucune
   // intervention humaine. Même cadence que les autres outbox (~1 min).
   const disputeResolutionTimer = startDisputeResolutionWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
+  // Worker de pénalité d'instruction (contestation abusive) : prélève les frais
+  // fixes (150 €) via charge off-session HORS tx ; échec définitif → compte
+  // suspendu (blacklist auto). Même cadence outbox (~1 min).
+  const disputePenaltyTimer = startDisputePenaltyWorkerLoop(
+    { prisma, stripe, log, onAlert: defaultAlertSink },
+    workerIntervalMs,
+  )
   // Santé worker (S22) : log périodique des métriques OutboxEvent (lecture seule,
   // zéro impact sur le chemin du worker). `app.log` (pino) expose le niveau warn.
   const workerHealthTimer = startWorkerHealthLoop(
@@ -242,7 +250,7 @@ async function main(): Promise<void> {
       receiptWorkerIntervalMs,
       workerHealthIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive + santé worker + résolution litige auto',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive + santé worker + résolution litige auto + pénalité instruction',
   )
 
   let shuttingDown = false
@@ -262,6 +270,7 @@ async function main(): Promise<void> {
     clearInterval(receiptWorkerTimer)
     clearInterval(escrowPayoutTimer)
     clearInterval(disputeResolutionTimer)
+    clearInterval(disputePenaltyTimer)
     clearInterval(workerHealthTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()

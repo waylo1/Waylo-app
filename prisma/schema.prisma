@@ -119,6 +119,31 @@ enum SubstitutionStatus {
   ITEM_SKIPPED
 }
 
+// Motif d'une pénalité d'instruction (frais réels d'investigation technique :
+// logs certifiés eIDAS, preuves GPS…). Distinct de la ponction de FRAUDE 200%
+// (PenaltyDebitOutbox) : ici frais FIXES facturés à l'auteur d'une contestation
+// MANIFESTEMENT ABUSIVE (après validation conforme du protocole de preuve).
+enum PenaltyReason {
+  ABUSIVE_DISPUTE
+}
+
+// Cycle de vie de l'outbox de pénalité d'instruction : PENDING (intention commitée
+// avec la résolution du litige) → PAID (prélèvement Stripe abouti) | FAILED
+// (prélèvement épuisé après retries → suspension automatique du compte).
+enum PenaltyStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+// État de compte utilisateur. SUSPENDED = blacklist automatique posée par le
+// disputePenaltyWorker quand le prélèvement de la pénalité d'instruction échoue
+// définitivement (carte refusée/absente). Réversible par les ops (retour ACTIVE).
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 enum AuthDecision {
   APPROVED
   DECLINED
@@ -137,6 +162,7 @@ model User {
   email            String    @unique
   passwordHash     String? // argon2 — null : compte créé hors register (seed, futur OAuth) → login refusé
   isAdmin          Boolean   @default(false) // flag ops/admin (source de vérité unique, auditable) — remplace l'allowlist ADMIN_USER_IDS via env
+  accountStatus    AccountStatus @default(ACTIVE) // ACTIVE par défaut ; SUSPENDED = blacklist auto posée par disputePenaltyWorker sur échec définitif du prélèvement de pénalité d'instruction
   kycStatus        KycStatus @default(PENDING)
   stripeCustomerId String?   @unique // acheteur (réutilisé comme customer de garantie côté voyageur)
   stripeAccountId  String?   @unique // voyageur (Connect)
@@ -154,6 +180,7 @@ model User {
   buyerCompensations BuyerCompensationOutbox[] // restitutions 120% de fraude en attente d'exécution (roadmap S20+)
   receiptExtractions ReceiptExtractionOutbox[] // reçus déposés par ce voyageur, en file d'extraction OCR (S21)
   disputesOpened     Dispute[] // litiges ouverts par cet utilisateur (DisputeService)
+  penalties          Penalty[] // pénalités d'instruction (contestation abusive) facturées à cet utilisateur
 }
 
 model Mission {
@@ -185,6 +212,7 @@ model Mission {
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
   disputeOpenedAt      DateTime? // litige AUTOMATISÉ (IN_DISPUTE) : horodatage serveur d'ouverture (DisputeService.openDispute) ; null hors litige auto
   disputeDeadline      DateTime? // litige AUTOMATISÉ : échéance (disputeOpenedAt + 72 h) ; passée, DisputeResolutionWorker déclenche le REFUND auto. null hors litige auto
+  isContestAbusive     Boolean   @default(false) // litige AUTOMATISÉ : la contestation est-elle MANIFESTEMENT ABUSIVE ? défaut false (bonne foi) = JAMAIS de pénalité. Mis à true UNIQUEMENT après validation conforme du protocole de preuve (eIDAS/GPS) — seam d'instruction. Conditionne la création de la pénalité par DisputeResolutionWorker.
   deliveryProofHash    String?   // sha256 (hex) de la preuve de livraison scellée à confirmReception ; jamais le secret en clair (preuve irréfutable de litige)
   receptionConfirmedAt DateTime? // horodatage serveur de la confirmation de réception acheteur (confirmReception) ; null tant que non confirmé
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
@@ -206,6 +234,7 @@ model Mission {
   receiptExtractions ReceiptExtractionOutbox[] // jobs d'extraction OCR de reçu (upload voyageur, S21)
   outboxEvents    OutboxEvent[] // événements métier asynchrones (ex. READY_FOR_PAYOUT à confirmReception, S22)
   dispute         Dispute? // litige structuré (cycle de vie DisputeService) — au plus un par mission
+  penalty         Penalty? // pénalité d'instruction (contestation abusive) — au plus une par mission
 
   @@index([buyerId])
   @@index([travelerId])
@@ -509,6 +538,43 @@ model Dispute {
 
   @@index([openedById])
   @@index([status])
+}
+
+// Pénalité d'INSTRUCTION (frais réels d'investigation technique : logs certifiés
+// eIDAS, preuves GPS…) facturée à l'auteur d'une contestation MANIFESTEMENT
+// ABUSIVE. Montant FIXE en centimes Int (15000 = 150,00 € — jamais Float).
+//
+// DISTINCT de PenaltyDebitOutbox (ponction de FRAUDE 200% du voyageur) : cible
+// l'AUTEUR du litige (acheteur), montant fixe, déclenché par DisputeResolutionWorker
+// quand `Mission.isContestAbusive` = true.
+//
+// Pattern outbox : l'intention (PENDING) commit ATOMIQUEMENT avec la résolution du
+// litige ; `disputePenaltyWorker` matérialise le prélèvement Stripe HORS transaction
+// DB (charge off-session). `missionId @unique` = une seule pénalité par mission
+// (idempotence stricte). Échec définitif (carte refusée/absente après retries) →
+// FAILED + suspension automatique du compte (User.accountStatus = SUSPENDED).
+model Penalty {
+  id          String        @id @default(cuid())
+  missionId   String        @unique // une seule pénalité d'instruction par mission (idempotence)
+  userId      String // auteur de la contestation abusive (acheteur) dont le moyen de paiement par défaut sera prélevé
+  amountCents Int           @default(15000) // frais d'instruction FIXES : 150,00 € = 15000 centimes Int (règle projet : jamais Float)
+  reason      PenaltyReason
+  status      PenaltyStatus @default(PENDING) // PENDING → PAID | FAILED
+  // PI de la charge off-session (peuplé à PAID). @unique : un seul prélèvement
+  // réussi par pénalité — miroir de PenaltyDebitOutbox.stripePaymentIntentId.
+  stripePaymentIntentId String? @unique
+  attempts    Int           @default(0) // incrémenté à chaque claim ; borne les retries avant FAILED + suspension
+  lastError   String? // dernière erreur Stripe (carte refusée…) — diagnostic, jamais le secret
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // onDelete: Cascade — une mission supprimée emporte sa pénalité (cohérence +
+  // isolation des tests : mission.deleteMany() ne bute pas sur la FK).
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status]) // file d'attente du worker (éligibilité PENDING)
 }
 
 model AdminAuditLog {

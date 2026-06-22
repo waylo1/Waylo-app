@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma'
-import { EscrowStatus, MissionStatus, OutboxEventType } from '../generated/prisma'
+import { EscrowStatus, MissionStatus, OutboxEventType, PenaltyReason } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 
 /**
@@ -169,6 +169,14 @@ async function executeRefund(
     where: { missionId: claimed.missionId },
     select: { id: true, stripePaymentIntentId: true, status: true },
   })
+  // Instruction d'abus : lu ICI pour conditionner la création de la pénalité dans
+  // le MÊME commit que la résolution (pattern outbox atomique). `isContestAbusive`
+  // défaut false = bonne foi → AUCUNE pénalité (contrainte « pas de prélèvement
+  // sans preuve de l'abus »). `buyerId` = auteur du litige à facturer.
+  const mission = await prisma.mission.findUnique({
+    where: { id: claimed.missionId },
+    select: { isContestAbusive: true, buyerId: true },
+  })
 
   // Fonds déjà capturés/libérés : un refund par annulation du hold est impossible
   // (nécessiterait refunds.create — hors périmètre). Terminal, journalisé.
@@ -216,6 +224,21 @@ async function executeRefund(
           data: { status: EscrowStatus.CANCELLED },
         })
       }
+      // Pénalité d'instruction : créée ATOMIQUEMENT avec la résolution UNIQUEMENT si
+      // la contestation est manifestement abusive (preuve d'abus validée). Frais
+      // FIXES (15000 c = 150 €, défaut du model). Outbox PENDING → disputePenaltyWorker
+      // exécute le prélèvement Stripe HORS tx. upsert = idempotent (missionId @unique).
+      if (mission?.isContestAbusive) {
+        await tx.penalty.upsert({
+          where: { missionId: claimed.missionId },
+          create: {
+            missionId: claimed.missionId,
+            userId: mission.buyerId,
+            reason: PenaltyReason.ABUSIVE_DISPUTE,
+          },
+          update: {}, // déjà créée (rejeu) : no-op, jamais de doublon ni de réarmement
+        })
+      }
     })
 
     log.info(
@@ -225,6 +248,7 @@ async function executeRefund(
         stripePaymentIntentId: escrow?.stripePaymentIntentId ?? null,
         escrowStatusBefore: escrow?.status ?? null,
         refundDurationMs, // métrique de latence Stripe par refund
+        penaltyCreated: Boolean(mission?.isContestAbusive), // pénalité d'instruction enfilée ?
       },
       'dispute: refund Stripe exécuté — mission remboursée',
     )

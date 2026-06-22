@@ -29,6 +29,7 @@ export async function resetDb(prisma: PrismaClient): Promise<void> {
 
   // 3. Enfants de Mission (avant mission).
   await prisma.dispute.deleteMany() // FK openedById → User (RESTRICT) : purger avant user
+  await prisma.penalty.deleteMany() // FK userId → User (RESTRICT) : purger avant user
   await prisma.review.deleteMany()
   await prisma.receipt.deleteMany()
   await prisma.substitutionRequest.deleteMany()

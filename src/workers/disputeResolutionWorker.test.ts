@@ -46,7 +46,10 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
   })
 
   /** Mission IN_DISPUTE + escrow HELD. `deadline` pilote l'éligibilité au refund. */
-  async function seedDisputedMission(deadline: Date): Promise<{ missionId: string; piId: string }> {
+  async function seedDisputedMission(
+    deadline: Date,
+    isContestAbusive = false,
+  ): Promise<{ missionId: string; piId: string }> {
     counter += 1
     const piId = `pi_dispute_${counter}`
     const mission = await prisma.mission.create({
@@ -61,6 +64,7 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
         disputeOpenedAt: new Date(deadline.getTime() - 72 * 3600 * 1000),
         disputeDeadline: deadline,
+        isContestAbusive,
       },
     })
     await prisma.escrowTransaction.create({
@@ -105,6 +109,37 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
       expect.objectContaining({ missionId, stripePaymentIntentId: piId }),
       expect.stringContaining('refund Stripe exécuté'),
     )
+  })
+
+  it('contestation ABUSIVE → pénalité d\'instruction PENDING créée atomiquement avec le refund', async () => {
+    const { missionId, piId } = await seedDisputedMission(new Date(Date.now() - 1_000), true)
+    const cancel = vi.fn().mockResolvedValue({ id: piId })
+
+    const res = await runDisputeResolutionWorkerOnce({
+      prisma,
+      stripe: makeStripe(cancel),
+      log: mockLog,
+    })
+
+    expect(res).toEqual({ enqueued: 1, refunded: 1, failed: 0 })
+    // Refund toujours exécuté (la pénalité est un frais d'instruction INDÉPENDANT).
+    const mission = await prisma.mission.findUniqueOrThrow({ where: { id: missionId } })
+    expect(mission.status).toBe(MissionStatus.REFUNDED)
+    // Pénalité PENDING créée pour l'AUTEUR du litige (acheteur), montant fixe 15000 c.
+    const penalty = await prisma.penalty.findUniqueOrThrow({ where: { missionId } })
+    expect(penalty.status).toBe('PENDING')
+    expect(penalty.userId).toBe(buyer.id)
+    expect(penalty.amountCents).toBe(15_000)
+    expect(penalty.reason).toBe('ABUSIVE_DISPUTE')
+  })
+
+  it('litige de BONNE FOI (isContestAbusive=false) → AUCUNE pénalité', async () => {
+    const { missionId, piId } = await seedDisputedMission(new Date(Date.now() - 1_000), false)
+    const cancel = vi.fn().mockResolvedValue({ id: piId })
+
+    await runDisputeResolutionWorkerOnce({ prisma, stripe: makeStripe(cancel), log: mockLog })
+
+    expect(await prisma.penalty.count({ where: { missionId } })).toBe(0)
   })
 
   it('échéance NON dépassée → aucun enqueue, aucun refund, mission reste IN_DISPUTE', async () => {
