@@ -17,6 +17,7 @@ const { mockPrisma, mockCapture, mockQueryRaw } = vi.hoisted(() => {
   const mockPrisma = {
     $transaction: vi.fn(),
     outboxEvent: { update: vi.fn() },
+    mission: { findUnique: vi.fn() },
   }
   const mockCapture = vi.fn()
   return { mockPrisma, mockCapture, mockQueryRaw }
@@ -54,6 +55,8 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     // Par défaut : un event PENDING éligible (batchLimit: 1 dans chaque test pour borner la boucle).
     mockQueryRaw.mockResolvedValue([{ id: 'evt_1' }])
     mockPrisma.outboxEvent.update.mockResolvedValue(baseEvent)
+    // Par défaut : mission NON litigieuse → la garde IN_DISPUTE laisse passer le payout.
+    mockPrisma.mission.findUnique.mockResolvedValue({ status: 'COMPLETED_BY_BUYER' })
     mockCapture.mockResolvedValue({
       escrowId: 'escrow_1',
       stripePaymentIntentId: 'pi_test',
@@ -152,6 +155,26 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     const res = await runEscrowPayoutWorkerOnce(makeDeps())
 
     expect(mockCapture).not.toHaveBeenCalled()
+    expect(res).toEqual({ settled: 0, failed: 0 })
+  })
+
+  it('(7) mission IN_DISPUTE (course après claim) → payout BLOQUÉ, event re-PENDING, aucune capture', async () => {
+    // Litige ouvert entre le claim et la vérification : la garde JS rattrape.
+    mockPrisma.mission.findUnique.mockResolvedValueOnce({ status: 'IN_DISPUTE' })
+
+    const res = await runEscrowPayoutWorkerOnce(makeDeps({ batchLimit: 1 }))
+
+    // Aucun appel Stripe : la garde a court-circuité avant la capture.
+    expect(mockCapture).not.toHaveBeenCalled()
+    // Event relâché en PENDING sans pénaliser le compteur (decrement de l'incrément du claim).
+    const blockedCall = mockPrisma.outboxEvent.update.mock.calls.find(
+      ([arg]) => arg.data?.lastError === 'BLOCKED_IN_DISPUTE',
+    )
+    expect(blockedCall?.[0].data).toMatchObject({
+      status: 'PENDING',
+      attempts: { decrement: 1 },
+    })
+    // Ni settled ni failed : un payout bloqué n'est pas un échec.
     expect(res).toEqual({ settled: 0, failed: 0 })
   })
 })

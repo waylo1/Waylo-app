@@ -11,6 +11,7 @@ import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 import { startKeepAliveLoop } from './workers/keep-alive'
 import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
 import { startEscrowPayoutWorkerLoop } from './workers/escrowPayoutWorker'
+import { startDisputeResolutionWorkerLoop } from './workers/disputeResolutionWorker'
 import { startWorkerHealthLoop } from './monitoring/workerHealth'
 import { AnthropicVisionClient } from './services/visionClient'
 
@@ -215,6 +216,11 @@ async function main(): Promise<void> {
   // Worker de payout escrow (S22) : consomme les OutboxEvent READY_FOR_PAYOUT
   // créés par confirmReception → capture Stripe HORS transaction DB.
   const escrowPayoutTimer = startEscrowPayoutWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
+  // Worker de résolution de litige AUTOMATISÉ : enfile un refund (OutboxEvent
+  // READY_FOR_REFUND) pour chaque mission IN_DISPUTE à `disputeDeadline` dépassée,
+  // puis annule le hold Stripe HORS transaction DB → mission REFUNDED. Aucune
+  // intervention humaine. Même cadence que les autres outbox (~1 min).
+  const disputeResolutionTimer = startDisputeResolutionWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
   // Santé worker (S22) : log périodique des métriques OutboxEvent (lecture seule,
   // zéro impact sur le chemin du worker). `app.log` (pino) expose le niveau warn.
   const workerHealthTimer = startWorkerHealthLoop(
@@ -236,7 +242,7 @@ async function main(): Promise<void> {
       receiptWorkerIntervalMs,
       workerHealthIntervalMs,
     },
-    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive + santé worker',
+    'Waylo démarré — HTTP + worker outbox + worker ponction + cron réconciliation + cron financements abandonnés + purge rate-limit + cycle de vie missions + keep-alive + santé worker + résolution litige auto',
   )
 
   let shuttingDown = false
@@ -255,6 +261,7 @@ async function main(): Promise<void> {
     clearInterval(keepAliveTimer)
     clearInterval(receiptWorkerTimer)
     clearInterval(escrowPayoutTimer)
+    clearInterval(disputeResolutionTimer)
     clearInterval(workerHealthTimer)
     await reconciliation.stop()
     await fundingReconciliation.stop()

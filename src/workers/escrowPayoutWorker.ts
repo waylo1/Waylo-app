@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../generated/prisma'
+import { MissionStatus } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { captureEscrowFunds, EscrowCaptureError } from '../services/escrowService'
 
@@ -53,12 +54,21 @@ interface ClaimedEvent {
  */
 async function claimNext(prisma: PrismaClient, maxAttempts: number): Promise<ClaimedEvent | null> {
   return prisma.$transaction(async tx => {
+    // Garde litige (exclusion au claim) : un event dont la mission est IN_DISPUTE
+    // n'est JAMAIS sélectionné → aucun payout, aucun `attempts` brûlé, aucune
+    // famine (les events payables restent éligibles). Le refund auto suivra son
+    // propre chemin (DisputeResolutionWorker). Défense complétée par la garde JS
+    // ci-dessous pour la course « litige ouvert APRÈS le claim ».
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id" FROM "OutboxEvent"
-      WHERE  "type"     = 'READY_FOR_PAYOUT'
-        AND  "status"   = 'PENDING'
-        AND  "attempts" < ${maxAttempts}
-      ORDER BY "createdAt"
+      SELECT o."id" FROM "OutboxEvent" o
+      WHERE  o."type"     = 'READY_FOR_PAYOUT'
+        AND  o."status"   = 'PENDING'
+        AND  o."attempts" < ${maxAttempts}
+        AND  NOT EXISTS (
+          SELECT 1 FROM "Mission" m
+          WHERE m."id" = o."missionId" AND m."status" = 'IN_DISPUTE'
+        )
+      ORDER BY o."createdAt"
       LIMIT 1
       FOR UPDATE SKIP LOCKED
     `
@@ -89,6 +99,27 @@ export async function runEscrowPayoutWorkerOnce(
   for (let i = 0; i < batchLimit; i++) {
     const claimed = await claimNext(prisma, maxAttempts)
     if (!claimed) break
+
+    // Garde litige (course claim/check) : si la mission est passée IN_DISPUTE entre
+    // le claim et ici, on NE paie PAS. On relâche l'event en PENDING sans pénaliser
+    // le compteur (decrement de l'incrément du claim) ; le claim SQL l'exclura aux
+    // prochains ticks tant que le litige dure. Le refund auto est porté par
+    // DisputeResolutionWorker.
+    const mission = await prisma.mission.findUnique({
+      where: { id: claimed.missionId },
+      select: { status: true },
+    })
+    if (mission?.status === MissionStatus.IN_DISPUTE) {
+      await prisma.outboxEvent.update({
+        where: { id: claimed.id },
+        data: { status: 'PENDING', attempts: { decrement: 1 }, lastError: 'BLOCKED_IN_DISPUTE' },
+      })
+      log.info(
+        { outboxEventId: claimed.id, missionId: claimed.missionId },
+        'escrow: payout bloqué — mission en litige (IN_DISPUTE)',
+      )
+      continue
+    }
 
     // Chrono de la capture Stripe — déclaré hors du try pour être mesuré aussi en cas d'erreur.
     const startedAt = Date.now()

@@ -31,6 +31,7 @@ enum MissionStatus {
   VALIDATED // acheteur a validé (T1) : capture du PaymentIntent déclenchée — état transitoire, le webhook payment_intent.succeeded finalise en RELEASED
   DEPOSITED // le voyageur a déposé/remis le colis (preuve de dépôt + tracking) ; atteint depuis MATCHED ou VALIDATED (post-douane) via /dropoff-receipt
   DISPUTED // litige ouvert par l'acheteur depuis DEPOSITED (/dispute) ; GÈLE la mission : retirée des workers de timeout (capture/refund auto), résolution humaine requise
+  IN_DISPUTE // litige AUTOMATISÉ (DisputeService.openDispute) : aucune intervention humaine. Gèle le payout (garde escrowPayoutWorker) ; à `disputeDeadline` (now + 72 h) atteinte, DisputeResolutionWorker déclenche un REFUND Stripe via OutboxEvent READY_FOR_REFUND → REFUNDED. Distinct de DISPUTED (arbitrage humain).
   DISPUTED_FRAUD // arbitrage admin : vol/fraude voyageur avéré (depuis DISPUTED) — état gelé terminal ; déclenche la ponction 200% (PenaltyDebitOutbox) + journalisation compensation acheteur 120% (LedgerEntry). Aucune libération, aucun versement voyageur.
   AWAITING_TRAVELER_ACCOUNT // capture journalisée, versement impossible (compte Connect absent/non vérifié) — intervention requise
   RELEASED
@@ -104,6 +105,11 @@ enum ReceiptJobStatus {
 // Stripe HORS transaction DB — règle « No Stripe in DB tx »).
 enum OutboxEventType {
   READY_FOR_PAYOUT
+  // Litige automatisé : `disputeDeadline` atteinte → DisputeResolutionWorker enfile
+  // ce fait métier ; le consommateur annule le hold Stripe HORS transaction DB
+  // (paymentIntents.cancel), puis mission → REFUNDED. Pattern outbox = règle d'or
+  // « aucun appel Stripe dans une transaction DB ».
+  READY_FOR_REFUND
 }
 
 enum SubstitutionStatus {
@@ -177,6 +183,8 @@ model Mission {
   droppedAt            DateTime?    // horodatage serveur du dépôt logistique (jamais l'horloge du device)
   disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
+  disputeOpenedAt      DateTime? // litige AUTOMATISÉ (IN_DISPUTE) : horodatage serveur d'ouverture (DisputeService.openDispute) ; null hors litige auto
+  disputeDeadline      DateTime? // litige AUTOMATISÉ : échéance (disputeOpenedAt + 72 h) ; passée, DisputeResolutionWorker déclenche le REFUND auto. null hors litige auto
   deliveryProofHash    String?   // sha256 (hex) de la preuve de livraison scellée à confirmReception ; jamais le secret en clair (preuve irréfutable de litige)
   receptionConfirmedAt DateTime? // horodatage serveur de la confirmation de réception acheteur (confirmReception) ; null tant que non confirmé
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
