@@ -1,6 +1,8 @@
 import type { PrismaClient } from '../generated/prisma'
 import { AccountStatus, PenaltyStatus } from '../generated/prisma'
 import { AlertSink, safeEmit } from '../alerts'
+import { claimOutboxBatch } from './outbox-claim'
+import type { OutboxWorkerLogger } from './outbox-claim'
 
 /**
  * disputePenaltyWorker — SEUL chemin qui exécute le prélèvement d'une pénalité
@@ -41,18 +43,13 @@ export interface PenaltyChargeStripeClient {
   }
 }
 
-export interface DisputePenaltyWorkerLogger {
-  info(data: Record<string, unknown>, msg: string): void
-  error(data: Record<string, unknown>, msg: string): void
-}
-
 export interface DisputePenaltyWorkerDeps {
   prisma: PrismaClient
   stripe: PenaltyChargeStripeClient
   /** Seuil de retries avant FAILED terminal + suspension du compte. */
   maxAttempts?: number
   batchLimit?: number
-  log?: DisputePenaltyWorkerLogger
+  log?: OutboxWorkerLogger
   onAlert?: AlertSink
 }
 
@@ -74,50 +71,107 @@ class PenaltyChargeNotSucceededError extends Error {}
 /** Moyen de paiement par défaut absent : prélèvement impossible (échec terminal). */
 class MissingPaymentMethodError extends Error {}
 
-/**
- * Claim ATOMIQUE d'un lot de pénalités éligibles (PENDING, sous le seuil) en un
- * seul `FOR UPDATE SKIP LOCKED`. attempts++ AVANT tout appel Stripe (backoff au
- * crash). Lot = chaque pénalité traitée au plus une fois par tick (vrai backoff
- * inter-tick), jamais ré-épuisée dans le même passage.
- */
 async function claimPenaltyBatch(
   prisma: PrismaClient,
   maxAttempts: number,
   batchLimit: number,
 ): Promise<ClaimedPenalty[]> {
-  return prisma.$transaction(async tx => {
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+  return claimOutboxBatch<ClaimedPenalty>(prisma, {
+    selectIds: tx => tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "Penalty"
       WHERE  "status"   = 'PENDING'
         AND  "attempts" < ${maxAttempts}
       ORDER BY "createdAt"
       LIMIT ${batchLimit}
       FOR UPDATE SKIP LOCKED
+    `,
+    updateAttempts: (tx, ids) =>
+      tx.penalty.updateMany({ where: { id: { in: ids } }, data: { attempts: { increment: 1 } } }),
+    fetchClaimed: async (tx, ids) => {
+      const rows = await tx.penalty.findMany({
+        where: { id: { in: ids } },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          missionId: true,
+          userId: true,
+          amountCents: true,
+          attempts: true,
+          user: { select: { stripePaymentMethodId: true, stripeCustomerId: true } },
+        },
+      })
+      return rows.map(p => ({
+        id: p.id,
+        missionId: p.missionId,
+        userId: p.userId,
+        amountCents: p.amountCents,
+        attempts: p.attempts,
+        paymentMethodId: p.user.stripePaymentMethodId,
+        customerId: p.user.stripeCustomerId,
+      }))
+    },
+  })
+}
+
+/**
+ * Sweep des pénalités STUCK_PENDING — crash window : attempts a été incrémenté
+ * mais le verdict (PAID/FAILED) n'a jamais été commité. Ces pénalités ne peuvent
+ * plus être claimées (attempts >= maxAttempts) et resteraient bloquées à vie sans
+ * cette remédiation.
+ *
+ * SÛRETÉ : pas de suspension auto — la charge Stripe a PU aboutir (idempotencyKey
+ * déterministe `dispute_penalty_<id>` permet la vérification manuelle). Suspension
+ * uniquement si l'impayé est confirmé par l'opérateur.
+ * Atomique (FOR UPDATE SKIP LOCKED) : deux instances concurrentes ne remédie pas
+ * deux fois la même pénalité. Alerte post-commit avec l'idempotencyKey pour
+ * réconciliation immédiate dans le dashboard.
+ */
+async function sweepStuckPenalties(
+  deps: DisputePenaltyWorkerDeps,
+  maxAttempts: number,
+): Promise<void> {
+  const { prisma } = deps
+  const log = deps.log ?? console
+
+  const stuck = await prisma.$transaction(async tx => {
+    const rows = await tx.$queryRaw<
+      Array<{ id: string; missionId: string; userId: string; amountCents: number; attempts: number }>
+    >`
+      SELECT "id", "missionId", "userId", "amountCents", "attempts"
+      FROM   "Penalty"
+      WHERE  "status"   = 'PENDING'
+        AND  "attempts" >= ${maxAttempts}
+      ORDER  BY "createdAt"
+      FOR UPDATE SKIP LOCKED
     `
     if (rows.length === 0) return []
-    const ids = rows.map(r => r.id)
-    await tx.penalty.updateMany({ where: { id: { in: ids } }, data: { attempts: { increment: 1 } } })
-    const claimed = await tx.penalty.findMany({
-      where: { id: { in: ids } },
-      orderBy: { createdAt: 'asc' },
-      select: {
-        id: true,
-        missionId: true,
-        userId: true,
-        amountCents: true,
-        attempts: true,
-        user: { select: { stripePaymentMethodId: true, stripeCustomerId: true } },
-      },
+    await tx.penalty.updateMany({
+      where: { id: { in: rows.map(r => r.id) } },
+      data: { status: PenaltyStatus.FAILED, lastError: 'STUCK_PENDING_REAPED' },
     })
-    return claimed.map(p => ({
-      id: p.id,
-      missionId: p.missionId,
-      userId: p.userId,
-      amountCents: p.amountCents,
-      attempts: p.attempts,
-      paymentMethodId: p.user.stripePaymentMethodId,
-      customerId: p.user.stripeCustomerId,
-    }))
+    return rows
+  })
+  if (stuck.length === 0) return
+
+  log.error(
+    { worker: 'disputePenaltyWorker', stuckCount: stuck.length, penaltyIds: stuck.map(p => p.id) },
+    'dispute-penalty: pénalités STUCK_PENDING remédiées → FAILED (charge Stripe possible — vérifier via idempotencyKey)',
+  )
+  safeEmit(deps.onAlert, {
+    code: 'DISPUTE_PENALTY_STUCK_PENDING',
+    message: `${stuck.length} pénalité(s) bloquée(s) PENDING (attempts≥maxAttempts) remédié(s) → FAILED — vérifier charge Stripe avant toute action`,
+    details: {
+      stuckCount: stuck.length,
+      maxAttempts,
+      penalties: stuck.map(p => ({
+        penaltyId: p.id,
+        missionId: p.missionId,
+        userId: p.userId,
+        amountCents: p.amountCents,
+        attempts: p.attempts,
+        idempotencyKey: `dispute_penalty_${p.id}`,
+      })),
+    },
   })
 }
 
@@ -234,6 +288,10 @@ export async function runDisputePenaltyWorkerOnce(
 ): Promise<{ paid: number; failed: number; suspended: number }> {
   const maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
   const batchLimit = deps.batchLimit ?? DEFAULT_BATCH_LIMIT
+
+  // Sweep préventif : pénalités STUCK_PENDING (crash window) → FAILED + alerte.
+  // Exécuté AVANT le claim normal pour qu'elles ne polluent pas le batch suivant.
+  await sweepStuckPenalties(deps, maxAttempts)
 
   let paid = 0
   let failed = 0

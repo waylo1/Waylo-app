@@ -1,6 +1,8 @@
 import type { PrismaClient } from '../generated/prisma'
 import { DeliveryProofStatus, EscrowStatus, MissionStatus, OutboxEventType, PenaltyReason } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
+import { claimOutboxBatch } from './outbox-claim'
+import type { OutboxWorkerLogger } from './outbox-claim'
 
 /**
  * DisputeResolutionWorker (litige AUTOMATISÉ) — résout les litiges `IN_DISPUTE`
@@ -28,17 +30,12 @@ import type { PaymentIntentClient } from '../missions/mission-common'
  * Le résultat de chaque refund est LOGUÉ (succès = log.info, échec = log.error).
  */
 
-export interface DisputeWorkerLogger {
-  info(data: Record<string, unknown>, msg: string): void
-  error(data: Record<string, unknown>, msg: string): void
-}
-
 export interface DisputeResolutionWorkerDeps {
   prisma: PrismaClient
   stripe: PaymentIntentClient
   maxAttempts?: number
   batchLimit?: number
-  log?: DisputeWorkerLogger
+  log?: OutboxWorkerLogger
   /** Horloge injectable (tests) — défaut : maintenant. */
   now?: Date
 }
@@ -103,22 +100,13 @@ async function enqueueExpiredDisputeRefunds(
   })
 }
 
-/**
- * Claim ATOMIQUE d'un LOT d'OutboxEvent READY_FOR_REFUND éligibles (un seul
- * `FOR UPDATE SKIP LOCKED`). Incrémente `attempts` AVANT tout appel Stripe
- * (backoff naturel au crash). Le claim par lot — plutôt qu'un re-`SELECT` par
- * itération — garantit que chaque event est traité AU PLUS UNE FOIS par tick : un
- * échec qui repasse l'event PENDING ne sera ré-essayé qu'au PROCHAIN tick (vrai
- * backoff inter-tick), jamais ré-épuisé dans le même passage. Miroir du batch
- * `findMany` de buyer-compensation / penalty.worker.
- */
 async function claimRefundBatch(
   prisma: PrismaClient,
   maxAttempts: number,
   batchLimit: number,
 ): Promise<ClaimedRefund[]> {
-  return prisma.$transaction(async tx => {
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+  return claimOutboxBatch<ClaimedRefund>(prisma, {
+    selectIds: tx => tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "OutboxEvent"
       WHERE  "type"     = 'READY_FOR_REFUND'
         AND  "status"   = 'PENDING'
@@ -126,18 +114,15 @@ async function claimRefundBatch(
       ORDER BY "createdAt"
       LIMIT ${batchLimit}
       FOR UPDATE SKIP LOCKED
-    `
-    if (rows.length === 0) return []
-    const ids = rows.map(r => r.id)
-    await tx.outboxEvent.updateMany({
-      where: { id: { in: ids } },
-      data: { attempts: { increment: 1 } },
-    })
-    return tx.outboxEvent.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, missionId: true, attempts: true },
-      orderBy: { createdAt: 'asc' },
-    })
+    `,
+    updateAttempts: (tx, ids) =>
+      tx.outboxEvent.updateMany({ where: { id: { in: ids } }, data: { attempts: { increment: 1 } } }),
+    fetchClaimed: (tx, ids) =>
+      tx.outboxEvent.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, missionId: true, attempts: true },
+        orderBy: { createdAt: 'asc' },
+      }),
   })
 }
 
@@ -146,7 +131,7 @@ async function failRefund(
   prisma: PrismaClient,
   claimed: ClaimedRefund,
   maxAttempts: number,
-  log: DisputeWorkerLogger,
+  log: OutboxWorkerLogger,
   message: string,
   terminal: boolean,
 ): Promise<'failed'> {
@@ -177,7 +162,7 @@ async function executeRefund(
   stripe: PaymentIntentClient,
   claimed: ClaimedRefund,
   maxAttempts: number,
-  log: DisputeWorkerLogger,
+  log: OutboxWorkerLogger,
 ): Promise<'refunded' | 'failed'> {
   const escrow = await prisma.escrowTransaction.findUnique({
     where: { missionId: claimed.missionId },

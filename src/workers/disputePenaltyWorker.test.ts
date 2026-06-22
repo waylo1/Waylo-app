@@ -198,4 +198,45 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
     expect(create).toHaveBeenCalledTimes(1) // PAID non re-sélectionné
     expect(second).toEqual({ paid: 0, failed: 0, suspended: 0 })
   })
+
+  it('(F) pénalité STUCK_PENDING (attempts≥max) → remédiée FAILED au tick suivant + alerte + NO suspension auto', async () => {
+    // Simule la crash window : attempts incrémenté mais verdict jamais commité.
+    const user = await seedUser(true)
+    const penaltyId = await seedPenalty(user)
+    // Forcer attempts=3 >= maxAttempts=3 (état post-crash)
+    await prisma.penalty.update({ where: { id: penaltyId }, data: { attempts: 3 } })
+
+    const create = vi.fn() // ne doit PAS être appelé (item exclu du claim normal)
+    const onAlert = vi.fn()
+
+    const res = await runDisputePenaltyWorkerOnce({
+      prisma,
+      stripe: makeStripe(create),
+      log: mockLog,
+      maxAttempts: 3,
+      onAlert,
+    })
+
+    // Le sweep n'affecte pas les compteurs paid/failed/suspended du tick normal.
+    expect(res).toEqual({ paid: 0, failed: 0, suspended: 0 })
+    expect(create).not.toHaveBeenCalled()
+
+    // Pénalité remédiée : FAILED, pas de suspension auto.
+    const penalty = await prisma.penalty.findUniqueOrThrow({ where: { id: penaltyId } })
+    expect(penalty.status).toBe(PenaltyStatus.FAILED)
+    expect(penalty.lastError).toBe('STUCK_PENDING_REAPED')
+
+    // Compte NON suspendu (charge Stripe possible, vérification manuelle requise).
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
+    expect(after.accountStatus).toBe(AccountStatus.ACTIVE)
+
+    // Alerte critique émise avec idempotencyKey pour le dashboard.
+    expect(onAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'DISPUTE_PENALTY_STUCK_PENDING', severity: 'critical' }),
+    )
+    const alertCall = onAlert.mock.calls[0][0]
+    expect(alertCall.details.stuckCount).toBe(1)
+    expect(alertCall.details.penalties[0].idempotencyKey).toBe(`dispute_penalty_${penaltyId}`)
+    expect(alertCall.details.penalties[0].missionId).toBeDefined()
+  })
 })
