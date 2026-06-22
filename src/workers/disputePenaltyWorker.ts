@@ -156,8 +156,8 @@ async function failPenalty(
     })
     await tx.adminAuditLog.createMany({
       data: [
-        { adminId: null, action: 'INSTRUCTION_PENALTY_FAILED', missionId: claimed.missionId },
-        { adminId: null, action: 'ACCOUNT_SUSPENDED', missionId: claimed.missionId },
+        { actor: 'SYSTEM', adminId: null, action: 'INSTRUCTION_PENALTY_FAILED', missionId: claimed.missionId },
+        { actor: 'SYSTEM', adminId: null, action: 'ACCOUNT_SUSPENDED', missionId: claimed.missionId },
       ],
     })
   })
@@ -212,7 +212,7 @@ async function chargePenalty(
         data: { status: PenaltyStatus.PAID, stripePaymentIntentId: intent.id, lastError: null },
       })
       await tx.adminAuditLog.create({
-        data: { adminId: null, action: 'INSTRUCTION_PENALTY_CHARGED', missionId: claimed.missionId },
+        data: { actor: 'SYSTEM', adminId: null, action: 'INSTRUCTION_PENALTY_CHARGED', missionId: claimed.missionId },
       })
     })
     log.info(

@@ -587,16 +587,27 @@ model Penalty {
   @@index([status]) // file d'attente du worker (éligibilité PENDING)
 }
 
+// Origine d'une entrée d'audit. Discriminant STABLE (immunisé contre `ON DELETE SET NULL`
+// sur adminId) : ADMIN = décision humaine ops/admin (adminId renseigné) ; SYSTEM = action
+// automatisée d'un worker (adminId null). Ne PAS dériver l'origine de la nullité d'adminId :
+// la suppression d'un compte admin nullifie adminId mais ne change PAS l'actor (l'historique
+// humain ne se déguise jamais en SYSTEM).
+enum AuditActor {
+  ADMIN
+  SYSTEM
+}
+
 model AdminAuditLog {
-  id        String   @id @default(cuid())
-  adminId   String?  // null = entrée SYSTÈME (worker automatisé, sans intervention humaine) ; non-null = décision ops/admin
-  action    String   // CUSTOMS_APPROVE | CUSTOMS_REJECT | INSTRUCTION_PENALTY_OPENED | INSTRUCTION_PENALTY_CHARGED | INSTRUCTION_PENALTY_FAILED | ACCOUNT_SUSPENDED | …
-  missionId String?  // référence de mission concernée (null si action globale)
-  at        DateTime @default(now())
+  id        String     @id @default(cuid())
+  actor     AuditActor @default(ADMIN) // ADMIN (humain) | SYSTEM (worker) — source de vérité de l'origine, stable
+  adminId   String?    // identité de l'admin humain (actor=ADMIN) ; null pour actor=SYSTEM (ou admin supprimé)
+  action    String     // CUSTOMS_APPROVE | CUSTOMS_REJECT | INSTRUCTION_PENALTY_OPENED | INSTRUCTION_PENALTY_CHARGED | INSTRUCTION_PENALTY_FAILED | ACCOUNT_SUSPENDED | …
+  missionId String?    // référence de mission concernée (null si action globale)
+  at        DateTime   @default(now())
 
   admin User? @relation(fields: [adminId], references: [id])
 
-  // Audit append-only : jamais d'UPDATE ni de DELETE. adminId null = entrée auto (worker).
+  // Audit append-only : jamais d'UPDATE ni de DELETE.
 
   @@index([adminId])
   @@index([missionId])

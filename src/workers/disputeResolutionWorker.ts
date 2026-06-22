@@ -183,13 +183,6 @@ async function executeRefund(
     where: { missionId: claimed.missionId },
     select: { id: true, stripePaymentIntentId: true, status: true },
   })
-  // verifyAbuse lit deliveryProofStatus : VALIDATED → abusif → pénalité d'instruction.
-  // PENDING (défaut) ou REJECTED → false → JAMAIS de pénalité (contrainte §2).
-  const isAbusive = await verifyAbuse(prisma, claimed.missionId)
-  const mission = await prisma.mission.findUnique({
-    where: { id: claimed.missionId },
-    select: { buyerId: true },
-  })
 
   // Fonds déjà capturés/libérés : un refund par annulation du hold est impossible
   // (nécessiterait refunds.create — hors périmètre). Terminal, journalisé.
@@ -217,6 +210,9 @@ async function executeRefund(
     }
     const refundDurationMs = Date.now() - startedAt
 
+    // Pénalité enfilée ? Décidé DANS la tx (lecture fraîche) — tracé pour le log post-commit.
+    let penaltyCreated = false
+
     // Verdict : transaction courte, aucun appel Stripe.
     await prisma.$transaction(async tx => {
       await tx.outboxEvent.update({
@@ -238,27 +234,35 @@ async function executeRefund(
         })
       }
       // Pénalité d'instruction : créée ATOMIQUEMENT avec la résolution UNIQUEMENT si
-      // deliveryProofStatus === VALIDATED (preuve d'abus validée par verifyAbuse ci-dessus).
+      // deliveryProofStatus === VALIDATED. Anti-TOCTOU : lecture FRAÎCHE du statut DANS la
+      // transaction (et non un booléen calculé hors tx) — un flip VALIDATED→REJECTED entre
+      // le claim et le commit ne peut plus créer une pénalité sur une lecture périmée.
       // Frais FIXES (15000 c = 150 €, défaut du model). Outbox PENDING → disputePenaltyWorker
       // exécute le prélèvement Stripe HORS tx. upsert = idempotent (missionId @unique).
-      // AdminAuditLog SYSTÈME (adminId null) : isolation totale des logs d'instruction.
-      if (isAbusive && mission) {
+      // AdminAuditLog SYSTÈME (actor SYSTEM, adminId null) : isolation des logs d'instruction.
+      const fresh = await tx.mission.findUnique({
+        where: { id: claimed.missionId },
+        select: { deliveryProofStatus: true, buyerId: true },
+      })
+      if (fresh?.deliveryProofStatus === DeliveryProofStatus.VALIDATED) {
         await tx.penalty.upsert({
           where: { missionId: claimed.missionId },
           create: {
             missionId: claimed.missionId,
-            userId: mission.buyerId,
+            userId: fresh.buyerId,
             reason: PenaltyReason.ABUSIVE_CONTESTATION,
           },
           update: {}, // déjà créée (rejeu) : no-op, jamais de doublon ni de réarmement
         })
         await tx.adminAuditLog.create({
           data: {
-            adminId: null, // entrée SYSTÈME
+            actor: 'SYSTEM', // entrée automatisée (worker)
+            adminId: null,
             action: 'INSTRUCTION_PENALTY_OPENED',
             missionId: claimed.missionId,
           },
         })
+        penaltyCreated = true
       }
     })
 
@@ -269,7 +273,7 @@ async function executeRefund(
         stripePaymentIntentId: escrow?.stripePaymentIntentId ?? null,
         escrowStatusBefore: escrow?.status ?? null,
         refundDurationMs, // métrique de latence Stripe par refund
-        penaltyCreated: isAbusive, // pénalité d'instruction enfilée (deliveryProofStatus === VALIDATED) ?
+        penaltyCreated, // pénalité d'instruction enfilée (deliveryProofStatus === VALIDATED, lu en tx) ?
       },
       'dispute: refund Stripe exécuté — mission remboursée',
     )

@@ -107,6 +107,7 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
     })
     expect(auditCharged).not.toBeNull()
     expect(auditCharged!.adminId).toBeNull()
+    expect(auditCharged!.actor).toBe('SYSTEM')
   })
 
   it('(B) échec terminal → FAILED + compte SUSPENDED + alerte critique', async () => {
@@ -138,8 +139,10 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
     const auditSuspended = await prisma.adminAuditLog.findFirst({ where: { missionId, action: 'ACCOUNT_SUSPENDED' } })
     expect(auditFailed).not.toBeNull()
     expect(auditFailed!.adminId).toBeNull()
+    expect(auditFailed!.actor).toBe('SYSTEM')
     expect(auditSuspended).not.toBeNull()
     expect(auditSuspended!.adminId).toBeNull()
+    expect(auditSuspended!.actor).toBe('SYSTEM')
   })
 
   it('(C) moyen de paiement absent → terminal immédiat (FAILED + SUSPENDED, sans appel Stripe)', async () => {
