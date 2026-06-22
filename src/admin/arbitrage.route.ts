@@ -1,7 +1,8 @@
 import { FastifyError, FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
-import { LedgerType, MissionStatus } from '../generated/prisma'
+import { DeliveryProofStatus, LedgerType, MissionStatus } from '../generated/prisma'
 import { isRequestAdmin } from '../missions/mission-common'
+import { ArbitrageError, updateDeliveryProof } from '../services/arbitrage.service'
 
 /**
  * API admin — arbitrage de FRAUDE / VOL voyageur (Sprint 14).
@@ -36,6 +37,22 @@ const missionIdParamsSchema = {
   type: 'object',
   required: ['id'],
   properties: { id: { type: 'string', minLength: 1 } },
+} as const
+
+// Validation stricte : seules les ISSUES d'arbitrage (VALIDATED | REJECTED) sont
+// acceptées — PENDING est le défaut initial, jamais une décision. enum dérivé des
+// valeurs Prisma DeliveryProofStatus (source unique). additionalProperties:false :
+// tout champ inattendu → 400 INVALID_INPUT (fail-closed).
+const deliveryProofBodySchema = {
+  type: 'object',
+  required: ['status'],
+  additionalProperties: false,
+  properties: {
+    status: {
+      type: 'string',
+      enum: [DeliveryProofStatus.VALIDATED, DeliveryProofStatus.REJECTED],
+    },
+  },
 } as const
 
 /** Transition DISPUTED → DISPUTED_FRAUD perdue (course / mission déjà arbitrée). */
@@ -143,6 +160,35 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
 
       const arbitrated = await prisma.mission.findUniqueOrThrow({ where: { id } })
       return reply.code(200).send(arbitrated)
+    },
+  )
+
+  /**
+   * PATCH /api/admin/missions/:id/delivery-proof — arbitrage HUMAIN de la preuve de
+   * livraison. Un admin (`isRequestAdmin`) pose `deliveryProofStatus` (VALIDATED |
+   * REJECTED). VALIDATED = preuve acceptée → contestation facturable (lu par
+   * disputeResolutionWorker). Effet ATOMIQUE (service) : update + AdminAuditLog
+   * (actor=ADMIN, adminId=acteur). Mission absente → 404 ; status invalide → 400.
+   */
+  app.patch(
+    '/missions/:id/delivery-proof',
+    { schema: { params: missionIdParamsSchema, body: deliveryProofBodySchema } },
+    async (req, reply) => {
+      if (!(await isRequestAdmin(req.user.sub))) {
+        return reply.code(403).send({ error: 'FORBIDDEN' })
+      }
+      const { id } = req.params as { id: string }
+      const { status } = req.body as { status: DeliveryProofStatus }
+
+      try {
+        const mission = await updateDeliveryProof(id, req.user.sub, status)
+        return reply.code(200).send(mission)
+      } catch (err) {
+        if (err instanceof ArbitrageError) {
+          return reply.code(404).send({ error: err.code })
+        }
+        throw err
+      }
     },
   )
 }
