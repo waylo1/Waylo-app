@@ -144,7 +144,7 @@ async function failPenalty(
     return 'failed'
   }
 
-  // Échec terminal : FAILED + blacklist auto du compte, ATOMIQUEMENT.
+  // Échec terminal : FAILED + blacklist auto du compte + audit SYSTÈME, ATOMIQUEMENT.
   await prisma.$transaction(async tx => {
     await tx.penalty.update({
       where: { id: claimed.id },
@@ -153,6 +153,12 @@ async function failPenalty(
     await tx.user.update({
       where: { id: claimed.userId },
       data: { accountStatus: AccountStatus.SUSPENDED },
+    })
+    await tx.adminAuditLog.createMany({
+      data: [
+        { adminId: null, action: 'INSTRUCTION_PENALTY_FAILED', missionId: claimed.missionId },
+        { adminId: null, action: 'ACCOUNT_SUSPENDED', missionId: claimed.missionId },
+      ],
     })
   })
   log.error(
@@ -200,9 +206,14 @@ async function chargePenalty(
       throw new PenaltyChargeNotSucceededError(`PENALTY_CHARGE_NOT_SUCCEEDED:${intent.status}`)
     }
 
-    await prisma.penalty.update({
-      where: { id: claimed.id },
-      data: { status: PenaltyStatus.PAID, stripePaymentIntentId: intent.id, lastError: null },
+    await prisma.$transaction(async tx => {
+      await tx.penalty.update({
+        where: { id: claimed.id },
+        data: { status: PenaltyStatus.PAID, stripePaymentIntentId: intent.id, lastError: null },
+      })
+      await tx.adminAuditLog.create({
+        data: { adminId: null, action: 'INSTRUCTION_PENALTY_CHARGED', missionId: claimed.missionId },
+      })
     })
     log.info(
       { worker: 'disputePenaltyWorker', penaltyId: claimed.id, missionId: claimed.missionId, amountCents: claimed.amountCents, stripePaymentIntentId: intent.id },

@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma'
-import { EscrowStatus, MissionStatus, OutboxEventType, PenaltyReason } from '../generated/prisma'
+import { DeliveryProofStatus, EscrowStatus, MissionStatus, OutboxEventType, PenaltyReason } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 
 /**
@@ -45,6 +45,20 @@ export interface DisputeResolutionWorkerDeps {
 
 const DEFAULT_MAX_ATTEMPTS = 5
 const DEFAULT_BATCH_LIMIT = 50
+
+/**
+ * Vérifie si la contestation de la mission est MANIFESTEMENT ABUSIVE.
+ * Source de vérité : `Mission.deliveryProofStatus === VALIDATED` (preuve de livraison
+ * acceptée). PENDING (défaut) et REJECTED → toujours false → JAMAIS de pénalité.
+ * Exporté pour les tests unitaires.
+ */
+export async function verifyAbuse(prisma: PrismaClient, missionId: string): Promise<boolean> {
+  const mission = await prisma.mission.findUnique({
+    where: { id: missionId },
+    select: { deliveryProofStatus: true },
+  })
+  return mission?.deliveryProofStatus === DeliveryProofStatus.VALIDATED
+}
 
 interface ClaimedRefund {
   id: string
@@ -169,13 +183,12 @@ async function executeRefund(
     where: { missionId: claimed.missionId },
     select: { id: true, stripePaymentIntentId: true, status: true },
   })
-  // Instruction d'abus : lu ICI pour conditionner la création de la pénalité dans
-  // le MÊME commit que la résolution (pattern outbox atomique). `isContestAbusive`
-  // défaut false = bonne foi → AUCUNE pénalité (contrainte « pas de prélèvement
-  // sans preuve de l'abus »). `buyerId` = auteur du litige à facturer.
+  // verifyAbuse lit deliveryProofStatus : VALIDATED → abusif → pénalité d'instruction.
+  // PENDING (défaut) ou REJECTED → false → JAMAIS de pénalité (contrainte §2).
+  const isAbusive = await verifyAbuse(prisma, claimed.missionId)
   const mission = await prisma.mission.findUnique({
     where: { id: claimed.missionId },
-    select: { isContestAbusive: true, buyerId: true },
+    select: { buyerId: true },
   })
 
   // Fonds déjà capturés/libérés : un refund par annulation du hold est impossible
@@ -225,18 +238,26 @@ async function executeRefund(
         })
       }
       // Pénalité d'instruction : créée ATOMIQUEMENT avec la résolution UNIQUEMENT si
-      // la contestation est manifestement abusive (preuve d'abus validée). Frais
-      // FIXES (15000 c = 150 €, défaut du model). Outbox PENDING → disputePenaltyWorker
+      // deliveryProofStatus === VALIDATED (preuve d'abus validée par verifyAbuse ci-dessus).
+      // Frais FIXES (15000 c = 150 €, défaut du model). Outbox PENDING → disputePenaltyWorker
       // exécute le prélèvement Stripe HORS tx. upsert = idempotent (missionId @unique).
-      if (mission?.isContestAbusive) {
+      // AdminAuditLog SYSTÈME (adminId null) : isolation totale des logs d'instruction.
+      if (isAbusive && mission) {
         await tx.penalty.upsert({
           where: { missionId: claimed.missionId },
           create: {
             missionId: claimed.missionId,
             userId: mission.buyerId,
-            reason: PenaltyReason.ABUSIVE_DISPUTE,
+            reason: PenaltyReason.ABUSIVE_CONTESTATION,
           },
           update: {}, // déjà créée (rejeu) : no-op, jamais de doublon ni de réarmement
+        })
+        await tx.adminAuditLog.create({
+          data: {
+            adminId: null, // entrée SYSTÈME
+            action: 'INSTRUCTION_PENALTY_OPENED',
+            missionId: claimed.missionId,
+          },
         })
       }
     })
@@ -248,7 +269,7 @@ async function executeRefund(
         stripePaymentIntentId: escrow?.stripePaymentIntentId ?? null,
         escrowStatusBefore: escrow?.status ?? null,
         refundDurationMs, // métrique de latence Stripe par refund
-        penaltyCreated: Boolean(mission?.isContestAbusive), // pénalité d'instruction enfilée ?
+        penaltyCreated: isAbusive, // pénalité d'instruction enfilée (deliveryProofStatus === VALIDATED) ?
       },
       'dispute: refund Stripe exécuté — mission remboursée',
     )
