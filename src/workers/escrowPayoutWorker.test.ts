@@ -72,9 +72,13 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     expect(mockPrisma.outboxEvent.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'SETTLED', lastError: null }) }),
     )
-    // Audit log structuré
+    // Audit log structuré + métrique de latence par capture.
     expect(mockLog.info).toHaveBeenCalledWith(
-      expect.objectContaining({ missionId: 'm1', capturedAmountCents: 15_000 }),
+      expect.objectContaining({
+        missionId: 'm1',
+        capturedAmountCents: 15_000,
+        captureDurationMs: expect.any(Number),
+      }),
       expect.stringContaining('capture Stripe réussie'),
     )
     expect(res).toEqual({ settled: 1, failed: 0 })
@@ -101,7 +105,13 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     )
     expect(verdictCall?.[0].data).toMatchObject({ status: 'PENDING', lastError: 'stripe timeout' })
     expect(mockLog.error).toHaveBeenCalledWith(
-      expect.objectContaining({ attempt: 1, maxAttempts: 5 }),
+      expect.objectContaining({
+        kind: 'WORKER_ERROR',
+        worker: 'escrowPayoutWorker',
+        attempt: 1,
+        maxAttempts: 5,
+        captureDurationMs: expect.any(Number),
+      }),
       expect.stringContaining('retry'),
     )
     expect(res).toEqual({ settled: 0, failed: 1 })
@@ -119,7 +129,7 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     )
     expect(verdictCall?.[0].data).toMatchObject({ status: 'FAILED' })
     expect(mockLog.error).toHaveBeenCalledWith(
-      expect.objectContaining({ isEscrowError: false }),
+      expect.objectContaining({ kind: 'WORKER_ERROR', isEscrowError: false }),
       expect.stringContaining('ABANDONNÉE'),
     )
     expect(res).toEqual({ settled: 0, failed: 1 })

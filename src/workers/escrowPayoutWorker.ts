@@ -90,11 +90,14 @@ export async function runEscrowPayoutWorkerOnce(
     const claimed = await claimNext(prisma, maxAttempts)
     if (!claimed) break
 
+    // Chrono de la capture Stripe — déclaré hors du try pour être mesuré aussi en cas d'erreur.
+    const startedAt = Date.now()
     try {
       // HORS transaction DB — règle « No Stripe in DB tx ».
       // idempotencyKey `capture_<missionId>` par défaut dans captureEscrowFunds :
       // un rejeu (crash entre claim et verdict) appelle le MÊME PI → aucun double débit.
       const result = await captureEscrowFunds(claimed.missionId, stripe)
+      const captureDurationMs = Date.now() - startedAt
 
       // Verdict succès : transaction courte, aucun appel Stripe.
       await prisma.outboxEvent.update({
@@ -111,11 +114,13 @@ export async function runEscrowPayoutWorkerOnce(
           missionId: claimed.missionId,
           capturedAmountCents: result.capturedAmountCents,
           stripePaymentIntentId: result.stripePaymentIntentId,
+          captureDurationMs, // métrique de latence Stripe par capture
         },
         'escrow: capture Stripe réussie — payout voyageur déclenché',
       )
       settled++
     } catch (err) {
+      const captureDurationMs = Date.now() - startedAt
       const message = err instanceof Error ? err.message : String(err)
       // Seuil max atteint → FAILED terminal (hors queue, intervention manuelle).
       // Sous le seuil → PENDING (retry au prochain tick, attempts déjà incrémenté).
@@ -126,13 +131,18 @@ export async function runEscrowPayoutWorkerOnce(
         data: { status: isTerminal ? 'FAILED' : 'PENDING', lastError: message },
       })
 
+      // Log structuré WORKER_ERROR : exception captureEscrowFunds non aboutie —
+      // exploitable par l'agrégation de logs / alerting (kind dédié).
       log.error(
         {
+          kind: 'WORKER_ERROR',
+          worker: 'escrowPayoutWorker',
           outboxEventId: claimed.id,
           missionId: claimed.missionId,
           attempt: claimed.attempts,
           maxAttempts,
           isEscrowError: err instanceof EscrowCaptureError,
+          captureDurationMs,
           err: message,
         },
         isTerminal
