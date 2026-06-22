@@ -141,6 +141,7 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
     })
     expect(auditLog).not.toBeNull()
     expect(auditLog!.adminId).toBeNull()
+    expect(auditLog!.actor).toBe('SYSTEM') // discriminant stable (pas dérivé de adminId null)
   })
 
   it('verifyAbuse — PENDING → false, VALIDATED → true, REJECTED → false', async () => {
