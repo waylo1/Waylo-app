@@ -71,7 +71,7 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
       },
     })
     const penalty = await prisma.penalty.create({
-      data: { missionId: mission.id, userId: user.id, reason: PenaltyReason.ABUSIVE_DISPUTE },
+      data: { missionId: mission.id, userId: user.id, reason: PenaltyReason.ABUSIVE_CONTESTATION },
     })
     return penalty.id
   }
@@ -101,6 +101,12 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
     expect(penalty.stripePaymentIntentId).toBe('pi_pen_ok')
     const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id } })
     expect(after.accountStatus).toBe(AccountStatus.ACTIVE) // pas de suspension sur succès
+    // AdminAuditLog SYSTÈME : INSTRUCTION_PENALTY_CHARGED (adminId null).
+    const auditCharged = await prisma.adminAuditLog.findFirst({
+      where: { missionId: (await prisma.penalty.findUniqueOrThrow({ where: { id: penaltyId } })).missionId, action: 'INSTRUCTION_PENALTY_CHARGED' },
+    })
+    expect(auditCharged).not.toBeNull()
+    expect(auditCharged!.adminId).toBeNull()
   })
 
   it('(B) échec terminal → FAILED + compte SUSPENDED + alerte critique', async () => {
@@ -126,6 +132,14 @@ describe('disputePenaltyWorker — prélèvement pénalité d\'instruction', () 
     expect(onAlert).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'DISPUTE_PENALTY_ACCOUNT_SUSPENDED', severity: 'critical' }),
     )
+    // AdminAuditLog SYSTÈME : INSTRUCTION_PENALTY_FAILED + ACCOUNT_SUSPENDED (adminId null).
+    const missionId = (await prisma.penalty.findUniqueOrThrow({ where: { id: penaltyId } })).missionId
+    const auditFailed = await prisma.adminAuditLog.findFirst({ where: { missionId, action: 'INSTRUCTION_PENALTY_FAILED' } })
+    const auditSuspended = await prisma.adminAuditLog.findFirst({ where: { missionId, action: 'ACCOUNT_SUSPENDED' } })
+    expect(auditFailed).not.toBeNull()
+    expect(auditFailed!.adminId).toBeNull()
+    expect(auditSuspended).not.toBeNull()
+    expect(auditSuspended!.adminId).toBeNull()
   })
 
   it('(C) moyen de paiement absent → terminal immédiat (FAILED + SUSPENDED, sans appel Stripe)', async () => {

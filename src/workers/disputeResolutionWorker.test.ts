@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PrismaClient, User } from '../generated/prisma'
-import { EscrowStatus, MissionStatus } from '../generated/prisma'
+import { DeliveryProofStatus, EscrowStatus, MissionStatus } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { resetDb } from '../../tests/helpers/db-reset'
-import { runDisputeResolutionWorkerOnce } from './disputeResolutionWorker'
+import { runDisputeResolutionWorkerOnce, verifyAbuse } from './disputeResolutionWorker'
 import { runEscrowPayoutWorkerOnce } from './escrowPayoutWorker'
 
 /**
@@ -45,10 +45,11 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
     await prisma.$disconnect()
   })
 
-  /** Mission IN_DISPUTE + escrow HELD. `deadline` pilote l'éligibilité au refund. */
+  /** Mission IN_DISPUTE + escrow HELD. `deadline` pilote l'éligibilité au refund.
+   *  `deliveryProofStatus` conditionne la pénalité d'instruction (VALIDATED = abusif). */
   async function seedDisputedMission(
     deadline: Date,
-    isContestAbusive = false,
+    deliveryProofStatus: DeliveryProofStatus = DeliveryProofStatus.PENDING,
   ): Promise<{ missionId: string; piId: string }> {
     counter += 1
     const piId = `pi_dispute_${counter}`
@@ -64,7 +65,7 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
         disputeOpenedAt: new Date(deadline.getTime() - 72 * 3600 * 1000),
         disputeDeadline: deadline,
-        isContestAbusive,
+        deliveryProofStatus,
       },
     })
     await prisma.escrowTransaction.create({
@@ -111,8 +112,11 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
     )
   })
 
-  it('contestation ABUSIVE → pénalité d\'instruction PENDING créée atomiquement avec le refund', async () => {
-    const { missionId, piId } = await seedDisputedMission(new Date(Date.now() - 1_000), true)
+  it('deliveryProofStatus VALIDATED → pénalité PENDING + AdminAuditLog INSTRUCTION_PENALTY_OPENED', async () => {
+    const { missionId, piId } = await seedDisputedMission(
+      new Date(Date.now() - 1_000),
+      DeliveryProofStatus.VALIDATED,
+    )
     const cancel = vi.fn().mockResolvedValue({ id: piId })
 
     const res = await runDisputeResolutionWorkerOnce({
@@ -130,16 +134,45 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
     expect(penalty.status).toBe('PENDING')
     expect(penalty.userId).toBe(buyer.id)
     expect(penalty.amountCents).toBe(15_000)
-    expect(penalty.reason).toBe('ABUSIVE_DISPUTE')
+    expect(penalty.reason).toBe('ABUSIVE_CONTESTATION')
+    // AdminAuditLog SYSTÈME (adminId null) — isolation totale des logs d'instruction.
+    const auditLog = await prisma.adminAuditLog.findFirst({
+      where: { missionId, action: 'INSTRUCTION_PENALTY_OPENED' },
+    })
+    expect(auditLog).not.toBeNull()
+    expect(auditLog!.adminId).toBeNull()
   })
 
-  it('litige de BONNE FOI (isContestAbusive=false) → AUCUNE pénalité', async () => {
-    const { missionId, piId } = await seedDisputedMission(new Date(Date.now() - 1_000), false)
+  it('verifyAbuse — PENDING → false, VALIDATED → true, REJECTED → false', async () => {
+    const { missionId: mPending } = await seedDisputedMission(
+      new Date(Date.now() + 3_600_000),
+      DeliveryProofStatus.PENDING,
+    )
+    const { missionId: mValidated } = await seedDisputedMission(
+      new Date(Date.now() + 3_600_000),
+      DeliveryProofStatus.VALIDATED,
+    )
+    const { missionId: mRejected } = await seedDisputedMission(
+      new Date(Date.now() + 3_600_000),
+      DeliveryProofStatus.REJECTED,
+    )
+
+    expect(await verifyAbuse(prisma, mPending)).toBe(false)
+    expect(await verifyAbuse(prisma, mValidated)).toBe(true)
+    expect(await verifyAbuse(prisma, mRejected)).toBe(false)
+  })
+
+  it('litige de BONNE FOI (deliveryProofStatus PENDING) → AUCUNE pénalité', async () => {
+    const { missionId, piId } = await seedDisputedMission(
+      new Date(Date.now() - 1_000),
+      DeliveryProofStatus.PENDING,
+    )
     const cancel = vi.fn().mockResolvedValue({ id: piId })
 
     await runDisputeResolutionWorkerOnce({ prisma, stripe: makeStripe(cancel), log: mockLog })
 
     expect(await prisma.penalty.count({ where: { missionId } })).toBe(0)
+    expect(await prisma.adminAuditLog.count({ where: { missionId, action: 'INSTRUCTION_PENALTY_OPENED' } })).toBe(0)
   })
 
   it('échéance NON dépassée → aucun enqueue, aucun refund, mission reste IN_DISPUTE', async () => {

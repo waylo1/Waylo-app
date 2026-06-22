@@ -119,12 +119,21 @@ enum SubstitutionStatus {
   ITEM_SKIPPED
 }
 
+// Statut de la preuve de livraison (deliveryProofStatus sur Mission). Source de
+// vérité pour déclencher la pénalité d'instruction : seul VALIDATED autorise la
+// création d'une Penalty (contrainte « pas de prélèvement sans preuve »).
+enum DeliveryProofStatus {
+  PENDING   // aucune preuve déposée ou en cours de validation
+  VALIDATED // preuve de livraison acceptée — contestation potentiellement abusive
+  REJECTED  // preuve rejetée — litige légitime, aucune pénalité
+}
+
 // Motif d'une pénalité d'instruction (frais réels d'investigation technique :
 // logs certifiés eIDAS, preuves GPS…). Distinct de la ponction de FRAUDE 200%
 // (PenaltyDebitOutbox) : ici frais FIXES facturés à l'auteur d'une contestation
 // MANIFESTEMENT ABUSIVE (après validation conforme du protocole de preuve).
 enum PenaltyReason {
-  ABUSIVE_DISPUTE
+  ABUSIVE_CONTESTATION // contestation déclarée abusive après validation de la preuve de livraison
 }
 
 // Cycle de vie de l'outbox de pénalité d'instruction : PENDING (intention commitée
@@ -212,7 +221,8 @@ model Mission {
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
   disputeOpenedAt      DateTime? // litige AUTOMATISÉ (IN_DISPUTE) : horodatage serveur d'ouverture (DisputeService.openDispute) ; null hors litige auto
   disputeDeadline      DateTime? // litige AUTOMATISÉ : échéance (disputeOpenedAt + 72 h) ; passée, DisputeResolutionWorker déclenche le REFUND auto. null hors litige auto
-  isContestAbusive     Boolean   @default(false) // litige AUTOMATISÉ : la contestation est-elle MANIFESTEMENT ABUSIVE ? défaut false (bonne foi) = JAMAIS de pénalité. Mis à true UNIQUEMENT après validation conforme du protocole de preuve (eIDAS/GPS) — seam d'instruction. Conditionne la création de la pénalité par DisputeResolutionWorker.
+  isContestAbusive     Boolean   @default(false) // DÉPRÉCIÉ — remplacé par deliveryProofStatus ; conservé pour rétrocompatibilité mais plus lu par les workers.
+  deliveryProofStatus  DeliveryProofStatus @default(PENDING) // source de vérité pour la pénalité d'instruction : VALIDATED = livraison prouvée → contestation potentiellement abusive ; PENDING = défaut = bonne foi (aucune pénalité). Posé par le protocole de preuve (ops/admin).
   deliveryProofHash    String?   // sha256 (hex) de la preuve de livraison scellée à confirmReception ; jamais le secret en clair (preuve irréfutable de litige)
   receptionConfirmedAt DateTime? // horodatage serveur de la confirmation de réception acheteur (confirmReception) ; null tant que non confirmé
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
@@ -579,14 +589,14 @@ model Penalty {
 
 model AdminAuditLog {
   id        String   @id @default(cuid())
-  adminId   String
-  action    String // CUSTOMS_APPROVE | CUSTOMS_REJECT | … — décision ops/admin
-  missionId String? // référence de mission concernée (null si action globale)
+  adminId   String?  // null = entrée SYSTÈME (worker automatisé, sans intervention humaine) ; non-null = décision ops/admin
+  action    String   // CUSTOMS_APPROVE | CUSTOMS_REJECT | INSTRUCTION_PENALTY_OPENED | INSTRUCTION_PENALTY_CHARGED | INSTRUCTION_PENALTY_FAILED | ACCOUNT_SUSPENDED | …
+  missionId String?  // référence de mission concernée (null si action globale)
   at        DateTime @default(now())
 
-  admin User @relation(fields: [adminId], references: [id])
+  admin User? @relation(fields: [adminId], references: [id])
 
-  // Audit des décisions ops/admin : append-only, jamais d'UPDATE ni de DELETE.
+  // Audit append-only : jamais d'UPDATE ni de DELETE. adminId null = entrée auto (worker).
 
   @@index([adminId])
   @@index([missionId])
