@@ -24,6 +24,7 @@
 ## System Capabilities
 
 - **Dispute Resolution:** Automated 72h refund flow + 150€ abusive contest penalty (Atomic Penalty Outbox).
+- **Abuse Verification:** `verifyAbuse(deliveryProofStatus === VALIDATED)` — source de vérité pour pénalité d'instruction. AdminAuditLog isolation totale (INSTRUCTION_PENALTY_* actions, adminId null = SYSTÈME).
 
 ---
 
