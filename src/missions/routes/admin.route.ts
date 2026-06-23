@@ -9,18 +9,15 @@ import {
   isRequestAdmin,
   MissionRouteOptions,
   DisputeBody,
-  CustomsReviewConflictError,
-  DisputeConflictError,
-  ResolveRefundConflictError,
-  ResolvePayoutConflictError,
 } from '../mission-common'
 import { createDisputeInTx, openDisputeInTx } from '../../services/dispute.service'
+import { AppError } from '../../errors/app.error'
 
 export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
   // POST /api/missions/:id/customs-approve — validation ops/admin du verrou douanier.
   app.post('/:id/customs-approve', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
-      return reply.code(403).send({ error: 'FORBIDDEN' })
+      throw new AppError('FORBIDDEN', 403)
     }
     const { id } = req.params as { id: string }
 
@@ -29,7 +26,7 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       select: { stripePaymentIntentId: true, status: true },
     })
     if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+      throw new AppError('ESCROW_NOT_HELD', 400)
     }
 
     await opts.stripe.paymentIntents.capture(
@@ -38,23 +35,17 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       { idempotencyKey: `capture_customs_${id}` },
     )
 
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-          data: { status: MissionStatus.VALIDATED },
-        })
-        if (updated.count !== 1) throw new CustomsReviewConflictError()
-        await tx.adminAuditLog.create({
-          data: { adminId: req.user.sub, action: 'CUSTOMS_APPROVE', missionId: id },
-        })
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+        data: { status: MissionStatus.VALIDATED },
       })
-    } catch (err) {
-      if (err instanceof CustomsReviewConflictError) {
-        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_NOT_CUSTOMS_REVIEW', 400)
+      await tx.adminAuditLog.create({
+        data: { adminId: req.user.sub, action: 'CUSTOMS_APPROVE', missionId: id },
+      })
+    })
+
     const approved = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(approved)
   })
@@ -62,30 +53,25 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
   // POST /api/missions/:id/customs-reject — l'admin rejette la quittance soumise.
   app.post('/:id/customs-reject', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
-      return reply.code(403).send({ error: 'FORBIDDEN' })
+      throw new AppError('FORBIDDEN', 403)
     }
     const { id } = req.params as { id: string }
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
-          data: {
-            status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
-            customsReceiptUrl: null,
-            customsReceiptSha256: null,
-          },
-        })
-        if (updated.count !== 1) throw new CustomsReviewConflictError()
-        await tx.adminAuditLog.create({
-          data: { adminId: req.user.sub, action: 'CUSTOMS_REJECT', missionId: id },
-        })
+
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
+        data: {
+          status: MissionStatus.ESCROW_LOCKED_CUSTOMS,
+          customsReceiptUrl: null,
+          customsReceiptSha256: null,
+        },
       })
-    } catch (err) {
-      if (err instanceof CustomsReviewConflictError) {
-        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_NOT_CUSTOMS_REVIEW', 400)
+      await tx.adminAuditLog.create({
+        data: { adminId: req.user.sub, action: 'CUSTOMS_REJECT', missionId: id },
+      })
+    })
+
     const rejected = await prisma.mission.findUniqueOrThrow({ where: { id } })
     safeEmit(opts.onAlert, {
       code: 'CUSTOMS_RECEIPT_REJECTED',
@@ -98,7 +84,7 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
   // GET /api/missions/customs-pending — liste des missions PENDING_CUSTOMS_REVIEW (admin).
   app.get('/customs-pending', async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
-      return reply.code(403).send({ error: 'FORBIDDEN' })
+      throw new AppError('FORBIDDEN', 403)
     }
     const missions = await prisma.mission.findMany({
       where: { status: MissionStatus.PENDING_CUSTOMS_REVIEW },
@@ -123,40 +109,33 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       if (mission.status !== MissionStatus.DEPOSITED) {
-        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+        throw new AppError('INVALID_MISSION_STATE', 400)
       }
 
       const { disputeReason } = req.body as DisputeBody
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id: mission.id, status: MissionStatus.DEPOSITED },
-            data: {
-              status: MissionStatus.DISPUTED,
-              disputeReason: disputeReason ?? null,
-              disputedAt: new Date(),
-            },
-          })
-          if (updated.count !== 1) throw new DisputeConflictError()
-          // Créer + ouvrir le litige structuré atomiquement avec la mise à jour mission.
-          // Si l'une de ces étapes échoue, toute la transaction est annulée — la mission
-          // ne peut pas rester DISPUTED sans Dispute row (cohérence garantie).
-          await createDisputeInTx(tx, mission.id, req.user.sub, disputeReason)
-          await openDisputeInTx(tx, mission.id)
-          await tx.adminAuditLog.create({
-            data: { adminId: req.user.sub, action: 'DISPUTE_OPENED', missionId: mission.id },
-          })
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.DEPOSITED },
+          data: {
+            status: MissionStatus.DISPUTED,
+            disputeReason: disputeReason ?? null,
+            disputedAt: new Date(),
+          },
         })
-      } catch (err) {
-        if (err instanceof DisputeConflictError) {
-          return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('INVALID_MISSION_STATE', 400)
+        // Créer + ouvrir le litige structuré atomiquement avec la mise à jour mission.
+        // Si l'une de ces étapes échoue, toute la transaction est annulée — la mission
+        // ne peut pas rester DISPUTED sans Dispute row (cohérence garantie).
+        await createDisputeInTx(tx, mission.id, req.user.sub, disputeReason)
+        await openDisputeInTx(tx, mission.id)
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'DISPUTE_OPENED', missionId: mission.id },
+        })
+      })
 
       const disputed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
       safeEmit(opts.onAlert, {
@@ -171,13 +150,13 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
   // POST /api/missions/:id/admin/resolve-refund — ARBITRAGE en faveur de l'ACHETEUR (cancel hold).
   app.post('/:id/admin/resolve-refund', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
-      return reply.code(403).send({ error: 'FORBIDDEN' })
+      throw new AppError('FORBIDDEN', 403)
     }
     const { id } = req.params as { id: string }
 
     const mission = await prisma.mission.findUnique({ where: { id }, select: { status: true } })
     if (!mission || mission.status !== MissionStatus.DISPUTED) {
-      return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+      throw new AppError('MISSION_NOT_DISPUTED', 400)
     }
 
     const escrow = await prisma.escrowTransaction.findUnique({
@@ -185,10 +164,10 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       select: { stripePaymentIntentId: true, status: true },
     })
     if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+      throw new AppError('ESCROW_NOT_HELD', 400)
     }
     if (!opts.stripe.paymentIntents.cancel) {
-      return reply.code(500).send({ error: 'REFUND_UNAVAILABLE' })
+      throw new AppError('REFUND_UNAVAILABLE', 500)
     }
 
     await opts.stripe.paymentIntents.cancel(
@@ -197,23 +176,17 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       { idempotencyKey: `admin_refund_${id}` },
     )
 
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.DISPUTED },
-          data: { status: MissionStatus.CANCELLED },
-        })
-        if (updated.count !== 1) throw new ResolveRefundConflictError()
-        await tx.adminAuditLog.create({
-          data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_REFUND', missionId: id },
-        })
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.DISPUTED },
+        data: { status: MissionStatus.CANCELLED },
       })
-    } catch (err) {
-      if (err instanceof ResolveRefundConflictError) {
-        return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_NOT_DISPUTED', 400)
+      await tx.adminAuditLog.create({
+        data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_REFUND', missionId: id },
+      })
+    })
+
     const resolved = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(resolved)
   })
@@ -221,13 +194,13 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
   // POST /api/missions/:id/admin/resolve-payout — ARBITRAGE en faveur du VOYAGEUR (capture).
   app.post('/:id/admin/resolve-payout', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     if (!(await isRequestAdmin(req.user.sub))) {
-      return reply.code(403).send({ error: 'FORBIDDEN' })
+      throw new AppError('FORBIDDEN', 403)
     }
     const { id } = req.params as { id: string }
 
     const mission = await prisma.mission.findUnique({ where: { id }, select: { status: true } })
     if (!mission || mission.status !== MissionStatus.DISPUTED) {
-      return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+      throw new AppError('MISSION_NOT_DISPUTED', 400)
     }
 
     const escrow = await prisma.escrowTransaction.findUnique({
@@ -235,7 +208,7 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       select: { stripePaymentIntentId: true, status: true },
     })
     if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
+      throw new AppError('ESCROW_NOT_HELD', 400)
     }
 
     await opts.stripe.paymentIntents.capture(
@@ -244,23 +217,17 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       { idempotencyKey: `admin_payout_${id}` },
     )
 
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.DISPUTED },
-          data: { status: MissionStatus.VALIDATED },
-        })
-        if (updated.count !== 1) throw new ResolvePayoutConflictError()
-        await tx.adminAuditLog.create({
-          data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_PAYOUT', missionId: id },
-        })
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.DISPUTED },
+        data: { status: MissionStatus.VALIDATED },
       })
-    } catch (err) {
-      if (err instanceof ResolvePayoutConflictError) {
-        return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_NOT_DISPUTED', 400)
+      await tx.adminAuditLog.create({
+        data: { adminId: req.user.sub, action: 'ADMIN_RESOLVE_PAYOUT', missionId: id },
+      })
+    })
+
     const resolved = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(resolved)
   })

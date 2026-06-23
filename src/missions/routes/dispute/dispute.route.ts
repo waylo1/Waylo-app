@@ -1,4 +1,4 @@
-import { FastifyPluginAsync, FastifyReply } from 'fastify'
+import { FastifyPluginAsync } from 'fastify'
 import { missionIdParamsSchema, MissionRouteOptions } from '../../mission-common'
 import {
   createDispute,
@@ -9,6 +9,7 @@ import {
   getDispute,
   DisputeError,
 } from '../../../services/dispute.service'
+import { AppError } from '../../../errors/app.error'
 
 /**
  * Domaine DISPUTE — cycle de vie structuré (DisputeService). Authentification JWT
@@ -21,13 +22,6 @@ const HTTP_BY_CODE: Record<string, number> = {
   DISPUTE_NOT_FOUND: 404,
   FORBIDDEN: 403,
   DISPUTE_INVALID_STATE: 409,
-}
-
-function fail(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof DisputeError) {
-    return reply.code(HTTP_BY_CODE[err.code] ?? 400).send({ error: err.code })
-  }
-  throw err
 }
 
 const reasonBodySchema = {
@@ -54,7 +48,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
         const dispute = await createDispute({ missionId: id, actorId: req.user.sub, reason })
         return reply.code(201).send(dispute)
       } catch (err) {
-        return fail(reply, err)
+        if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+        throw err
       }
     },
   )
@@ -65,7 +60,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
     try {
       return reply.code(200).send(await openDispute({ missionId: id, actorId: req.user.sub }))
     } catch (err) {
-      return fail(reply, err)
+      if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+      throw err
     }
   })
 
@@ -75,7 +71,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
     try {
       return reply.code(200).send(await escalateDispute({ missionId: id, actorId: req.user.sub }))
     } catch (err) {
-      return fail(reply, err)
+      if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+      throw err
     }
   })
 
@@ -91,7 +88,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
           .code(200)
           .send(await resolveDispute({ missionId: id, actorId: req.user.sub, resolution }))
       } catch (err) {
-        return fail(reply, err)
+        if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+        throw err
       }
     },
   )
@@ -102,7 +100,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
     try {
       return reply.code(200).send(await closeDispute({ missionId: id, actorId: req.user.sub }))
     } catch (err) {
-      return fail(reply, err)
+      if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+      throw err
     }
   })
 
@@ -112,7 +111,8 @@ export const disputeRoutes: FastifyPluginAsync<MissionRouteOptions> = async app 
     try {
       return reply.code(200).send(await getDispute({ missionId: id, actorId: req.user.sub }))
     } catch (err) {
-      return fail(reply, err)
+      if (err instanceof DisputeError) throw new AppError(err.code, HTTP_BY_CODE[err.code] ?? 400)
+      throw err
     }
   })
 }

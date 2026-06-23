@@ -225,9 +225,9 @@ describe('Financement T0 — POST /api/missions/:id/intent', () => {
     stripeFailMode = true
     try {
       const res = await fund(mission.id, bearer(buyerToken))
-      // L'erreur Stripe propage après rollback → 500 (gestionnaire d'erreurs route).
+      // L'erreur Stripe propage après rollback → 500 (gestionnaire global).
       expect(res.statusCode).toBe(500)
-      expect(res.json()).toEqual({ error: 'INTERNAL_ERROR' })
+      expect(res.json()).toEqual({ error: 'INTERNAL_SERVER_ERROR' })
     } finally {
       stripeFailMode = false
     }

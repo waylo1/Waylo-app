@@ -32,19 +32,8 @@ import {
   ShipBody,
   SubmitReceiptBody,
   ReviewBody,
-  MatchConflictError,
-  ReceiptConflictError,
-  ReceiveConflictError,
-  CustomsConflictError,
-  DropoffConflictError,
-  CollectionConflictError,
-  LogisticsDropOffNotFoundError,
-  LogisticsDropOffStatusError,
-  LogisticsDropOffConflictError,
-  ReviewNotFoundError,
-  ReviewNotTerminalError,
-  ReviewNoTravelerError,
 } from '../mission-common'
+import { AppError } from '../../errors/app.error'
 
 interface DropOffBody {
   dropOffType: DropOffType
@@ -59,34 +48,27 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     const { id } = req.params as { id: string }
     const userId = req.user.sub
     const mission = await prisma.mission.findUnique({ where: { id } })
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
     if (mission.buyerId === userId) {
-      return reply.code(400).send({ error: 'CANNOT_MATCH_OWN_MISSION' })
+      throw new AppError('CANNOT_MATCH_OWN_MISSION', 400)
     }
     if (mission.status !== MissionStatus.FUNDED) {
       const code =
         mission.status === MissionStatus.CREATED ? 'MISSION_NOT_MATCHABLE' : 'MISSION_ALREADY_MATCHED'
-      return reply.code(400).send({ error: code })
+      throw new AppError(code, 400)
     }
 
     if (!(await travelerHasGuaranteeCard(userId))) {
-      return reply.code(400).send({ error: 'TRAVELER_CARD_MISSING' })
+      throw new AppError('TRAVELER_CARD_MISSING', 400)
     }
 
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.FUNDED, travelerId: null },
-          data: { travelerId: userId, status: MissionStatus.MATCHED },
-        })
-        if (updated.count !== 1) throw new MatchConflictError()
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.FUNDED, travelerId: null },
+        data: { travelerId: userId, status: MissionStatus.MATCHED },
       })
-    } catch (err) {
-      if (err instanceof MatchConflictError) {
-        return reply.code(400).send({ error: 'MISSION_ALREADY_MATCHED' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_ALREADY_MATCHED', 400)
+    })
 
     const matched = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(matched)
@@ -97,34 +79,27 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     const { id } = req.params as { id: string }
     const userId = req.user.sub
     const mission = await prisma.mission.findUnique({ where: { id } })
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
     if (mission.buyerId === userId) {
-      return reply.code(400).send({ error: 'CANNOT_MATCH_OWN_MISSION' })
+      throw new AppError('CANNOT_MATCH_OWN_MISSION', 400)
     }
     if (mission.status !== MissionStatus.FUNDED) {
       const code =
         mission.status === MissionStatus.CREATED ? 'MISSION_NOT_MATCHABLE' : 'MISSION_ALREADY_MATCHED'
-      return reply.code(400).send({ error: code })
+      throw new AppError(code, 400)
     }
 
     if (!(await travelerHasGuaranteeCard(userId))) {
-      return reply.code(400).send({ error: 'TRAVELER_CARD_MISSING' })
+      throw new AppError('TRAVELER_CARD_MISSING', 400)
     }
 
-    try {
-      await prisma.$transaction(async tx => {
-        const updated = await tx.mission.updateMany({
-          where: { id, status: MissionStatus.FUNDED, travelerId: null },
-          data: { travelerId: userId, status: MissionStatus.MATCHED },
-        })
-        if (updated.count !== 1) throw new MatchConflictError()
+    await prisma.$transaction(async tx => {
+      const updated = await tx.mission.updateMany({
+        where: { id, status: MissionStatus.FUNDED, travelerId: null },
+        data: { travelerId: userId, status: MissionStatus.MATCHED },
       })
-    } catch (err) {
-      if (err instanceof MatchConflictError) {
-        return reply.code(400).send({ error: 'MISSION_ALREADY_MATCHED' })
-      }
-      throw err
-    }
+      if (updated.count !== 1) throw new AppError('MISSION_ALREADY_MATCHED', 400)
+    })
 
     const accepted = await prisma.mission.findUniqueOrThrow({ where: { id } })
     return reply.code(200).send(accepted)
@@ -134,14 +109,14 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
   app.post('/:id/start-travel', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
     const updated = await prisma.mission.updateMany({
       where: { id, travelerId: req.user.sub, status: MissionStatus.MATCHED },
       data: { status: MissionStatus.IN_PROGRESS },
     })
     if (updated.count !== 1) {
-      return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+      throw new AppError('MISSION_NOT_MATCHED', 400)
     }
 
     const started = await prisma.mission.findUniqueOrThrow({ where: { id } })
@@ -155,14 +130,14 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
       if (mission.status !== MissionStatus.MATCHED) {
-        return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+        throw new AppError('MISSION_NOT_MATCHED', 400)
       }
 
       const { trackingReference, purchaseAmountCents } = req.body as ShipBody
       if (purchaseAmountCents > mission.budgetCents) {
-        return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+        throw new AppError('RECEIPT_AMOUNT_EXCEEDS_BUDGET', 400)
       }
 
       // Sceau QR interne (anti « colis vide ») : code aléatoire 256 bits, seul le
@@ -180,7 +155,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
         },
       })
       if (updated.count !== 1) {
-        return reply.code(400).send({ error: 'MISSION_NOT_MATCHED' })
+        throw new AppError('MISSION_NOT_MATCHED', 400)
       }
 
       const shipped = await prisma.mission.findUniqueOrThrow({ where: { id } })
@@ -195,9 +170,9 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
       if (mission.status !== MissionStatus.IN_PROGRESS) {
-        return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+        throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
       }
 
       const { urlRecu, purchaseAmountCents } = req.body as SubmitReceiptBody
@@ -205,10 +180,10 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       const isSubstitution = purchaseAmountCents > mission.budgetCents
       if (isSubstitution) {
         if (!mission.substitutionAuthorized) {
-          return reply.code(400).send({ error: 'RECEIPT_AMOUNT_EXCEEDS_BUDGET' })
+          throw new AppError('RECEIPT_AMOUNT_EXCEEDS_BUDGET', 400)
         }
         if (purchaseAmountCents > substitutionCeilingCents(mission.budgetCents)) {
-          return reply.code(400).send({ error: 'SUBSTITUTION_PRICE_EXCEEDS_LIMIT' })
+          throw new AppError('SUBSTITUTION_PRICE_EXCEEDS_LIMIT', 400)
         }
       }
       const sha256Server = createHash('sha256')
@@ -243,15 +218,10 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
             where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
             data: { status: MissionStatus.AWAITING_VALIDATION },
           })
-          if (updated.count !== 1) throw new ReceiptConflictError()
+          if (updated.count !== 1) throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
         })
       } catch (err) {
-        if (err instanceof ReceiptConflictError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
-        }
-        if (isUniqueViolation(err)) {
-          return reply.code(400).send({ error: 'RECEIPT_ALREADY_SUBMITTED' })
-        }
+        if (isUniqueViolation(err)) throw new AppError('RECEIPT_ALREADY_SUBMITTED', 400)
         throw err
       }
 
@@ -267,10 +237,10 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       if (mission.status !== MissionStatus.IN_PROGRESS) {
-        return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+        throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
       }
 
       // Contrôle douanier : verrou AVANT capture si valeur déclarée > seuil.
@@ -283,7 +253,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
             data: { status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
           })
           if (locked.count !== 1) {
-            return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
+            throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
           }
           const lockedMission = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
           return reply.code(200).send(lockedMission)
@@ -295,9 +265,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       try {
         await captureEscrowFunds(mission.id, opts.stripe)
       } catch (err) {
-        if (err instanceof EscrowCaptureError) {
-          return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
-        }
+        if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
       }
 
@@ -310,20 +278,13 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       })
       const saleSignature = createHash('sha256').update(saleCertificate).digest('hex')
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
-            data: { status: MissionStatus.VALIDATED, saleSignature },
-          })
-          if (updated.count !== 1) throw new ReceiveConflictError()
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.IN_PROGRESS },
+          data: { status: MissionStatus.VALIDATED, saleSignature },
         })
-      } catch (err) {
-        if (err instanceof ReceiveConflictError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
+      })
 
       const received = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
       return reply.code(200).send(received)
@@ -340,31 +301,24 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
       if (mission.status !== MissionStatus.ESCROW_LOCKED_CUSTOMS) {
-        return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
+        throw new AppError('MISSION_NOT_CUSTOMS_LOCKED', 400)
       }
 
       const { customsReceiptUrl, customsReceiptSha256 } = req.body as CustomsReceiptBody
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id: mission.id, status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
-            data: {
-              status: MissionStatus.PENDING_CUSTOMS_REVIEW,
-              customsReceiptUrl,
-              customsReceiptSha256,
-            },
-          })
-          if (updated.count !== 1) throw new CustomsConflictError()
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.ESCROW_LOCKED_CUSTOMS },
+          data: {
+            status: MissionStatus.PENDING_CUSTOMS_REVIEW,
+            customsReceiptUrl,
+            customsReceiptSha256,
+          },
         })
-      } catch (err) {
-        if (err instanceof CustomsConflictError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_CUSTOMS_LOCKED' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('MISSION_NOT_CUSTOMS_LOCKED', 400)
+      })
 
       const reviewing = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
       return reply.code(200).send(reviewing)
@@ -382,10 +336,10 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForTraveler(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       if (!DROPOFF_ALLOWED_STATUSES.includes(mission.status)) {
-        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+        throw new AppError('INVALID_MISSION_STATE', 400)
       }
 
       const { dropoffReceiptUrl, dropoffTrackingNumber } = req.body as DropoffReceiptBody
@@ -393,26 +347,19 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       // Sceau QR IDEMPOTENT : généré ici si /ship ne l'a pas posé, jamais écrasé.
       const newInnerQrCode = mission.innerQrCodeHash ? null : randomBytes(32).toString('hex')
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id: mission.id, status: { in: DROPOFF_ALLOWED_STATUSES } },
-            data: {
-              status: MissionStatus.DEPOSITED,
-              dropoffReceiptUrl,
-              dropoffTrackingNumber: dropoffTrackingNumber ?? null,
-              dropoffAt: new Date(),
-              ...(newInnerQrCode ? { innerQrCodeHash: hashQrCode(newInnerQrCode) } : {}),
-            },
-          })
-          if (updated.count !== 1) throw new DropoffConflictError()
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: { in: DROPOFF_ALLOWED_STATUSES } },
+          data: {
+            status: MissionStatus.DEPOSITED,
+            dropoffReceiptUrl,
+            dropoffTrackingNumber: dropoffTrackingNumber ?? null,
+            dropoffAt: new Date(),
+            ...(newInnerQrCode ? { innerQrCodeHash: hashQrCode(newInnerQrCode) } : {}),
+          },
         })
-      } catch (err) {
-        if (err instanceof DropoffConflictError) {
-          return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('INVALID_MISSION_STATE', 400)
+      })
 
       const deposited = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
       return reply
@@ -428,10 +375,10 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       if (mission.status !== MissionStatus.DEPOSITED) {
-        return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
+        throw new AppError('INVALID_MISSION_STATE', 400)
       }
 
       // Preuve QR interne (anti « colis vide ») : vérif temps constant AVANT capture.
@@ -443,7 +390,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
           raw.length > 512 ||
           !qrCodeMatches(raw, mission.innerQrCodeHash)
         ) {
-          return reply.code(400).send({ error: 'INVALID_QR_PROOF' })
+          throw new AppError('INVALID_QR_PROOF', 400)
         }
       }
 
@@ -452,26 +399,17 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       try {
         await captureEscrowFunds(mission.id, opts.stripe, `capture_collection_${mission.id}`)
       } catch (err) {
-        if (err instanceof EscrowCaptureError) {
-          return reply.code(400).send({ error: 'ESCROW_NOT_HELD' })
-        }
+        if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
       }
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id: mission.id, status: MissionStatus.DEPOSITED },
-            data: { status: MissionStatus.VALIDATED },
-          })
-          if (updated.count !== 1) throw new CollectionConflictError()
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id: mission.id, status: MissionStatus.DEPOSITED },
+          data: { status: MissionStatus.VALIDATED },
         })
-      } catch (err) {
-        if (err instanceof CollectionConflictError) {
-          return reply.code(400).send({ error: 'INVALID_MISSION_STATE' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('INVALID_MISSION_STATE', 400)
+      })
 
       const confirmed = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
       return reply.code(200).send(confirmed)
@@ -487,37 +425,27 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       const userId = req.user.sub
       const { dropOffType, dropOffCarrier, dropOffTrackingId, dropOffAccessCode } = req.body
 
-      try {
-        await prisma.$transaction(async tx => {
-          const mission = await findMissionForTraveler(tx, id, userId)
-          if (!mission) throw new LogisticsDropOffNotFoundError()
+      await prisma.$transaction(async tx => {
+        const mission = await findMissionForTraveler(tx, id, userId)
+        if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
-          if (mission.status !== MissionStatus.IN_PROGRESS) {
-            throw new LogisticsDropOffStatusError()
-          }
+        if (mission.status !== MissionStatus.IN_PROGRESS) {
+          throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
+        }
 
-          const updated = await tx.mission.updateMany({
-            where: { id, status: MissionStatus.IN_PROGRESS },
-            data: {
-              dropOffType,
-              dropOffCarrier,
-              dropOffTrackingId,
-              dropOffAccessCode,
-              droppedAt: new Date(),
-              status: MissionStatus.AWAITING_VALIDATION,
-            },
-          })
-          if (updated.count !== 1) throw new LogisticsDropOffConflictError()
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.IN_PROGRESS },
+          data: {
+            dropOffType,
+            dropOffCarrier,
+            dropOffTrackingId,
+            dropOffAccessCode,
+            droppedAt: new Date(),
+            status: MissionStatus.AWAITING_VALIDATION,
+          },
         })
-      } catch (err) {
-        if (err instanceof LogisticsDropOffNotFoundError) {
-          return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-        }
-        if (err instanceof LogisticsDropOffStatusError || err instanceof LogisticsDropOffConflictError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_IN_PROGRESS' })
-        }
-        throw err
-      }
+        if (updated.count !== 1) throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
+      })
 
       const mission = await prisma.mission.findUniqueOrThrow({ where: { id } })
       return reply.code(200).send({
@@ -543,19 +471,19 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       try {
         review = await prisma.$transaction(async tx => {
           const access = await findMissionForParticipant(tx, id, userId)
-          if (!access) throw new ReviewNotFoundError()
+          if (!access) throw new AppError('MISSION_NOT_FOUND', 404)
 
           const { mission, relation } = access
           if (
             mission.status !== MissionStatus.RELEASED &&
             mission.status !== MissionStatus.CANCELLED
           ) {
-            throw new ReviewNotTerminalError()
+            throw new AppError('MISSION_NOT_TERMINAL', 400)
           }
 
           let targetId: string
           if (relation === 'buyer') {
-            if (!mission.travelerId) throw new ReviewNoTravelerError()
+            if (!mission.travelerId) throw new AppError('NO_TRAVELER_ASSIGNED', 400)
             targetId = mission.travelerId
           } else {
             targetId = mission.buyerId
@@ -566,18 +494,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
           })
         })
       } catch (err) {
-        if (err instanceof ReviewNotFoundError) {
-          return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
-        }
-        if (err instanceof ReviewNotTerminalError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_TERMINAL' })
-        }
-        if (err instanceof ReviewNoTravelerError) {
-          return reply.code(400).send({ error: 'NO_TRAVELER_ASSIGNED' })
-        }
-        if (isUniqueViolation(err)) {
-          return reply.code(409).send({ error: 'REVIEW_ALREADY_SUBMITTED' })
-        }
+        if (isUniqueViolation(err)) throw new AppError('REVIEW_ALREADY_SUBMITTED', 409)
         throw err
       }
 
