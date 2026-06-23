@@ -1,4 +1,4 @@
-import { FastifyError, FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync } from 'fastify'
 import fastifyMultipart from '@fastify/multipart'
 import { prisma } from '../db'
 import {
@@ -6,6 +6,7 @@ import {
   UnsupportedImageError,
   MalformedImageError,
 } from '../services/inputGuard'
+import { AppError } from '../errors/app.error'
 
 /**
  * API d'upload de reçu — POST /api/receipts/upload (multipart).
@@ -39,21 +40,6 @@ function detectMimeType(buf: Buffer): 'image/jpeg' | 'image/png' {
 }
 
 const receiptsRoute: FastifyPluginAsync = async (app) => {
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    const code = (err as { code?: string }).code
-    // Dépassement de la limite de taille multipart → 413 (et non 500).
-    if (code === 'FST_REQ_FILE_TOO_LARGE') {
-      return reply.code(413).send({ error: 'FILE_TOO_LARGE' })
-    }
-    // Trop de fichiers / de parts (au-delà de `files: 1`) : entrée invalide → 400.
-    if (code === 'FST_FILES_LIMIT' || code === 'FST_PARTS_LIMIT' || code === 'FST_FIELDS_LIMIT') {
-      return reply.code(400).send({ error: 'INVALID_INPUT' })
-    }
-    if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
-    req.log.error({ err }, 'receipts route error')
-    return reply.code(500).send({ error: 'INTERNAL_ERROR' })
-  })
-
   // Parser multipart encapsulé à ce plugin : un seul fichier, taille bornée.
   await app.register(fastifyMultipart, { limits: { fileSize: MAX_FILE_BYTES, files: 1 } })
 
@@ -64,18 +50,30 @@ const receiptsRoute: FastifyPluginAsync = async (app) => {
     let imageBuffer: Buffer | undefined
     let missionId: string | undefined
 
-    // Itération sur les parts : robuste à l'ordre fichier/champ. `toBuffer()`
-    // lève FST_REQ_FILE_TOO_LARGE au-delà de la limite → capté par l'errorHandler.
-    for await (const part of req.parts()) {
-      if (part.type === 'file') {
-        imageBuffer = await part.toBuffer()
-      } else if (part.fieldname === 'missionId' && typeof part.value === 'string') {
-        missionId = part.value
+    // Itération sur les parts : robuste à l'ordre fichier/champ. Les erreurs
+    // FRAMEWORK de @fastify/multipart (taille/nombre de parts) sont levées ICI ;
+    // on les convertit en AppError → sérialisées par le gestionnaire global.
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'file') {
+          imageBuffer = await part.toBuffer()
+        } else if (part.fieldname === 'missionId' && typeof part.value === 'string') {
+          missionId = part.value
+        }
       }
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      // Dépassement de la limite de taille multipart → 413 (et non 500).
+      if (code === 'FST_REQ_FILE_TOO_LARGE') throw new AppError('FILE_TOO_LARGE', 413)
+      // Trop de fichiers / de parts (au-delà de `files: 1`) : entrée invalide → 400.
+      if (code === 'FST_FILES_LIMIT' || code === 'FST_PARTS_LIMIT' || code === 'FST_FIELDS_LIMIT') {
+        throw new AppError('INVALID_INPUT', 400)
+      }
+      throw err
     }
 
-    if (!missionId) return reply.code(400).send({ error: 'INVALID_INPUT' })
-    if (!imageBuffer || imageBuffer.length === 0) return reply.code(400).send({ error: 'NO_FILE' })
+    if (!missionId) throw new AppError('INVALID_INPUT', 400)
+    if (!imageBuffer || imageBuffer.length === 0) throw new AppError('NO_FILE', 400)
 
     // Autorisation PAR RESSOURCE (anti-IDOR) : seul le VOYAGEUR de la mission peut
     // déposer le reçu d'achat. 404 si la mission n'existe pas OU si l'appelant n'en
@@ -85,7 +83,7 @@ const receiptsRoute: FastifyPluginAsync = async (app) => {
       where: { id: missionId, travelerId: req.user.sub },
       select: { id: true },
     })
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
     // Nettoyage métadonnées AVANT persistance (fail-closed) : un format non supporté
     // ou une image malformée est rejetée À L'UPLOAD — jamais mise en file.
@@ -93,12 +91,8 @@ const receiptsRoute: FastifyPluginAsync = async (app) => {
     try {
       clean = await sanitizeVisionInput(imageBuffer)
     } catch (err) {
-      if (err instanceof UnsupportedImageError) {
-        return reply.code(415).send({ error: 'UNSUPPORTED_IMAGE' })
-      }
-      if (err instanceof MalformedImageError) {
-        return reply.code(400).send({ error: 'MALFORMED_IMAGE' })
-      }
+      if (err instanceof UnsupportedImageError) throw new AppError('UNSUPPORTED_IMAGE', 415)
+      if (err instanceof MalformedImageError) throw new AppError('MALFORMED_IMAGE', 400)
       throw err
     }
 
