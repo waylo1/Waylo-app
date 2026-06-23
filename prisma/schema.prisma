@@ -7,6 +7,9 @@ generator client {
   provider = "prisma-client-js"
   // Sortie dédiée : ne pas écraser le client FlipSync (packages/db) hoisté dans node_modules/.prisma
   output   = "../src/generated/prisma"
+  // metrics : expose prisma.$metrics.json() (jauges du pool de connexions) — lu en
+  // lecture seule par GET /debug/performance. Feature CLIENT-ONLY : aucune migration DB.
+  previewFeatures = ["metrics"]
 }
 
 datasource db {

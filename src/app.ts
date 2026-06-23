@@ -12,6 +12,8 @@ import receiptsRoute from './receipts/receipts.route'
 import { readAuthCookie } from './auth/cookie'
 import { AlertSink } from './alerts'
 import { AppError } from './errors/app.error'
+import { registerSlowRequestLogger } from './monitoring/slowRequestLogger'
+import debugRoute from './debug/performance.route'
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
@@ -48,6 +50,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
 
   const app = Fastify({ logger: true })
+
+  // Observabilité : logue (warn) toute requête dépassant 100 ms (hrtime ns).
+  // Posé tôt : les hooks racine couvrent toutes les routes enregistrées ensuite.
+  registerSlowRequestLogger(app)
 
   // Gestionnaire d'erreurs CENTRAL (cf. src/errors/app.error.ts). Portée : contexte
   // racine — fallback de TOUTE route sans handler propre. Les routes qui posent leur
@@ -112,6 +118,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Arbitrage admin de fraude voyageur (Sprint 14) — aucun client Stripe (journalise
   // l'intention de ponction + le ledger ; l'exécution monétaire relève d'un worker).
   await app.register(arbitrageRoute, { prefix: '/api/admin' })
+  // Diagnostic de performance (admin) : GET /debug/performance — lecture seule
+  // (pool Prisma, timing workers, mémoire). Guard JWT + isAdmin, comme /api/admin/*.
+  await app.register(debugRoute, { prefix: '/debug' })
 
   // Les plugins Stripe portent chacun leur parser raw application/json
   // (encapsulé) : constructEvent exige les octets exacts du body, sans
