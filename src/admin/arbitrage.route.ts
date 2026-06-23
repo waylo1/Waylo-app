@@ -1,8 +1,9 @@
-import { FastifyError, FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { DeliveryProofStatus, LedgerType, MissionStatus } from '../generated/prisma'
 import { isRequestAdmin } from '../missions/mission-common'
-import { ArbitrageError, updateDeliveryProof } from '../services/arbitrage.service'
+import { updateDeliveryProof } from '../services/arbitrage.service'
+import { AppError } from '../errors/app.error'
 
 /**
  * API admin — arbitrage de FRAUDE / VOL voyageur (Sprint 14).
@@ -29,8 +30,11 @@ import { ArbitrageError, updateDeliveryProof } from '../services/arbitrage.servi
  * relève d'un worker dédié — hors scope de ce sprint (intention enregistrée, exécution
  * différée : pattern outbox, comme TransferOutbox).
  *
- * Erreurs : non-admin → 403 `FORBIDDEN` ; mission absente ou non-`DISPUTED` → 400
- * `MISSION_NOT_DISPUTED` ; escrow absent → 400 `ESCROW_NOT_FOUND`.
+ * Gestion d'erreurs CENTRALISÉE : les échecs métier sont levés via `AppError` et
+ * sérialisés par le handler racine (cf. src/app.ts) — non-admin → 403 `FORBIDDEN` ;
+ * mission absente ou non-`DISPUTED` → 400 `MISSION_NOT_DISPUTED` ; escrow absent → 400
+ * `ESCROW_NOT_FOUND` ; mission absente (delivery-proof) → 404 `MISSION_NOT_FOUND` ;
+ * body invalide (Ajv) → 400 `INVALID_INPUT`.
  */
 
 const missionIdParamsSchema = {
@@ -55,16 +59,7 @@ const deliveryProofBodySchema = {
   },
 } as const
 
-/** Transition DISPUTED → DISPUTED_FRAUD perdue (course / mission déjà arbitrée). */
-class ArbitrateFraudConflictError extends Error {}
-
 const arbitrageRoute: FastifyPluginAsync = async app => {
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
-    req.log.error({ err }, 'admin arbitrage route error')
-    return reply.code(500).send({ error: 'INTERNAL_ERROR' })
-  })
-
   // Auth en onRequest (AVANT la validation) : un non-authentifié reçoit 401.
   app.addHook('onRequest', app.authenticate)
 
@@ -73,7 +68,7 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
     { schema: { params: missionIdParamsSchema } },
     async (req, reply) => {
       if (!(await isRequestAdmin(req.user.sub))) {
-        return reply.code(403).send({ error: 'FORBIDDEN' })
+        throw new AppError('FORBIDDEN', 403)
       }
       const { id } = req.params as { id: string }
 
@@ -93,14 +88,14 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
       })
       // Route admin de confiance : mission absente ⇒ même 400 (pas de masquage IDOR).
       if (!mission || mission.status !== MissionStatus.DISPUTED) {
-        return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
+        throw new AppError('MISSION_NOT_DISPUTED', 400)
       }
       if (!mission.escrow) {
-        return reply.code(400).send({ error: 'ESCROW_NOT_FOUND' })
+        throw new AppError('ESCROW_NOT_FOUND', 400)
       }
       if (!mission.travelerId) {
         // Impossible pour une mission DISPUTED (passée par MATCHED) — garde défensive.
-        return reply.code(400).send({ error: 'TRAVELER_NOT_ASSIGNED' })
+        throw new AppError('TRAVELER_NOT_ASSIGNED', 400)
       }
 
       const escrowId = mission.escrow.id
@@ -111,52 +106,47 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
       const penaltyCents = baseCents * 2 // 200% — ponction voyageur
       const compensationCents = Math.round((baseCents * 12) / 10) // 120% — compensation acheteur
 
-      try {
-        await prisma.$transaction(async tx => {
-          const updated = await tx.mission.updateMany({
-            where: { id, status: MissionStatus.DISPUTED },
-            data: { status: MissionStatus.DISPUTED_FRAUD },
-          })
-          if (updated.count !== 1) throw new ArbitrateFraudConflictError()
-
-          // Intention de ponction (exécution Stripe différée au worker dédié).
-          await tx.penaltyDebitOutbox.create({
-            data: { missionId: id, userId: travelerId, amountCents: penaltyCents },
-          })
-
-          // Intention de compensation acheteur 120% (exécution Wallet/payout différée au
-          // worker dédié). idempotencyKey @unique = une seule restitution par mission.
-          await tx.buyerCompensationOutbox.create({
-            data: {
-              missionId: id,
-              buyerId,
-              amountCents: compensationCents,
-              idempotencyKey: `buyer_compensation_${id}`,
-            },
-          })
-
-          // Journal comptable du flux pénalité — hors invariant escrow (cf. en-tête).
-          await tx.ledgerEntry.createMany({
-            data: [
-              { escrowId, type: LedgerType.FRAUD_PENALTY_COLLECTED, amountCents: penaltyCents },
-              {
-                escrowId,
-                type: LedgerType.BUYER_REFUND_COMPENSATION,
-                amountCents: compensationCents,
-              },
-            ],
-          })
-
-          await tx.adminAuditLog.create({
-            data: { adminId: req.user.sub, action: 'ADMIN_ARBITRATE_FRAUD', missionId: id },
-          })
+      await prisma.$transaction(async tx => {
+        const updated = await tx.mission.updateMany({
+          where: { id, status: MissionStatus.DISPUTED },
+          data: { status: MissionStatus.DISPUTED_FRAUD },
         })
-      } catch (err) {
-        if (err instanceof ArbitrateFraudConflictError) {
-          return reply.code(400).send({ error: 'MISSION_NOT_DISPUTED' })
-        }
-        throw err
-      }
+        // Transition DISPUTED → DISPUTED_FRAUD perdue (course / mission déjà arbitrée) :
+        // rollback intégral, aucune écriture. Même code que l'absence de litige.
+        if (updated.count !== 1) throw new AppError('MISSION_NOT_DISPUTED', 400)
+
+        // Intention de ponction (exécution Stripe différée au worker dédié).
+        await tx.penaltyDebitOutbox.create({
+          data: { missionId: id, userId: travelerId, amountCents: penaltyCents },
+        })
+
+        // Intention de compensation acheteur 120% (exécution Wallet/payout différée au
+        // worker dédié). idempotencyKey @unique = une seule restitution par mission.
+        await tx.buyerCompensationOutbox.create({
+          data: {
+            missionId: id,
+            buyerId,
+            amountCents: compensationCents,
+            idempotencyKey: `buyer_compensation_${id}`,
+          },
+        })
+
+        // Journal comptable du flux pénalité — hors invariant escrow (cf. en-tête).
+        await tx.ledgerEntry.createMany({
+          data: [
+            { escrowId, type: LedgerType.FRAUD_PENALTY_COLLECTED, amountCents: penaltyCents },
+            {
+              escrowId,
+              type: LedgerType.BUYER_REFUND_COMPENSATION,
+              amountCents: compensationCents,
+            },
+          ],
+        })
+
+        await tx.adminAuditLog.create({
+          data: { adminId: req.user.sub, action: 'ADMIN_ARBITRATE_FRAUD', missionId: id },
+        })
+      })
 
       const arbitrated = await prisma.mission.findUniqueOrThrow({ where: { id } })
       return reply.code(200).send(arbitrated)
@@ -168,27 +158,21 @@ const arbitrageRoute: FastifyPluginAsync = async app => {
    * livraison. Un admin (`isRequestAdmin`) pose `deliveryProofStatus` (VALIDATED |
    * REJECTED). VALIDATED = preuve acceptée → contestation facturable (lu par
    * disputeResolutionWorker). Effet ATOMIQUE (service) : update + AdminAuditLog
-   * (actor=ADMIN, adminId=acteur). Mission absente → 404 ; status invalide → 400.
+   * (actor=ADMIN, adminId=acteur). Mission absente → `ArbitrageError` (404, AppError) ;
+   * status invalide → 400 `INVALID_INPUT` (Ajv). Les deux remontent au handler central.
    */
   app.patch(
     '/missions/:id/delivery-proof',
     { schema: { params: missionIdParamsSchema, body: deliveryProofBodySchema } },
     async (req, reply) => {
       if (!(await isRequestAdmin(req.user.sub))) {
-        return reply.code(403).send({ error: 'FORBIDDEN' })
+        throw new AppError('FORBIDDEN', 403)
       }
       const { id } = req.params as { id: string }
       const { status } = req.body as { status: DeliveryProofStatus }
 
-      try {
-        const mission = await updateDeliveryProof(id, req.user.sub, status)
-        return reply.code(200).send(mission)
-      } catch (err) {
-        if (err instanceof ArbitrageError) {
-          return reply.code(404).send({ error: err.code })
-        }
-        throw err
-      }
+      const mission = await updateDeliveryProof(id, req.user.sub, status)
+      return reply.code(200).send(mission)
     },
   )
 }

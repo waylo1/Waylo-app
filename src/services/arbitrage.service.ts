@@ -1,6 +1,7 @@
 import { prisma } from '../db'
 import { DeliveryProofStatus } from '../generated/prisma'
 import type { Mission } from '../generated/prisma'
+import { AppError } from '../errors/app.error'
 
 /**
  * ArbitrageService — arbitrage HUMAIN de la preuve de livraison.
@@ -20,9 +21,13 @@ import type { Mission } from '../generated/prisma'
  *   discriminant `AuditActor` distingue cette décision humaine des entrées SYSTÈME.
  */
 
-export class ArbitrageError extends Error {
-  constructor(readonly code: 'MISSION_NOT_FOUND') {
-    super(code)
+/**
+ * Mission absente → 404. `AppError` : remonte directement au gestionnaire central
+ * (cf. src/app.ts) — la route n'a plus à traduire cette erreur en réponse HTTP.
+ */
+export class ArbitrageError extends AppError {
+  constructor(code: 'MISSION_NOT_FOUND') {
+    super(code, 404)
     this.name = 'ArbitrageError'
   }
 }

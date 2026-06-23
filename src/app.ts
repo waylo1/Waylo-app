@@ -1,4 +1,4 @@
-import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import Fastify, { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import fastifyJwt from '@fastify/jwt'
 import Stripe from 'stripe'
 import authRoute from './auth/auth.route'
@@ -11,6 +11,7 @@ import stripeWebhookRoute from './stripe/webhook.route'
 import receiptsRoute from './receipts/receipts.route'
 import { readAuthCookie } from './auth/cookie'
 import { AlertSink } from './alerts'
+import { AppError } from './errors/app.error'
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
@@ -47,6 +48,29 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
 
   const app = Fastify({ logger: true })
+
+  // Gestionnaire d'erreurs CENTRAL (cf. src/errors/app.error.ts). Portée : contexte
+  // racine — fallback de TOUTE route sans handler propre. Les routes qui posent leur
+  // propre setErrorHandler (auth, missions, escrow, receipts) gardent la main dans
+  // leur encapsulation Fastify ; les routes Stripe traitent tout en interne (aucun
+  // throw sortant). Trois branches, mutuellement exclusives :
+  //   1. AppError → statut porté + { error: code, details? } (échec métier maîtrisé) ;
+  //   2. validation Ajv (err.validation) → 400 INVALID_INPUT (fail-closed) ;
+  //   3. reste (bug, panne) → log.error + 500 INTERNAL_SERVER_ERROR (aucune fuite).
+  app.setErrorHandler((error: FastifyError, req, reply) => {
+    if (error instanceof AppError) {
+      const body =
+        error.details === undefined
+          ? { error: error.code }
+          : { error: error.code, details: error.details }
+      return reply.status(error.statusCode).send(body)
+    }
+    if (error.validation) {
+      return reply.status(400).send({ error: 'INVALID_INPUT' })
+    }
+    req.log.error({ err: error }, 'unhandled error')
+    return reply.status(500).send({ error: 'INTERNAL_SERVER_ERROR' })
+  })
 
   await app.register(fastifyJwt, { secret: jwtSecret })
 
