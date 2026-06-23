@@ -248,9 +248,9 @@ model Mission {
 
   @@index([buyerId])
   @@index([travelerId])
-  @@index([status]) // catalogue FUNDED + filtres de statut : évite un seq scan
-  // Sweep mission-lifecycle : WHERE status=CREATED AND expiresAt < now — composite
-  // (status, expiresAt) évite le scan de toutes les missions CREATED puis le filtre.
+  // (status, expiresAt) sert À LA FOIS le sweep mission-lifecycle (status=CREATED AND
+  // expiresAt < now) ET les filtres de statut seuls (catalogue FUNDED, customs-pending…)
+  // via son préfixe gauche — un index simple [status] serait redondant.
   @@index([status, expiresAt])
 }
 
@@ -587,9 +587,9 @@ model Penalty {
   user    User    @relation(fields: [userId], references: [id])
 
   @@index([userId])
-  @@index([status]) // file d'attente du worker (éligibilité PENDING)
-  // Sweep reaper/disputePenaltyWorker : WHERE status=PENDING AND attempts >= maxAttempts —
-  // composite (status, attempts) évite le scan de toutes les pénalités PENDING.
+  // (status, attempts) sert À LA FOIS le sweep reaper/disputePenaltyWorker (status=PENDING
+  // AND attempts >= maxAttempts) ET la file d'attente du worker (status=PENDING seul) via
+  // son préfixe gauche — un index simple [status] serait redondant.
   @@index([status, attempts])
 }
 
