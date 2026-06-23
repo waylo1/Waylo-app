@@ -249,6 +249,9 @@ model Mission {
   @@index([buyerId])
   @@index([travelerId])
   @@index([status]) // catalogue FUNDED + filtres de statut : évite un seq scan
+  // Sweep mission-lifecycle : WHERE status=CREATED AND expiresAt < now — composite
+  // (status, expiresAt) évite le scan de toutes les missions CREATED puis le filtre.
+  @@index([status, expiresAt])
 }
 
 model EscrowTransaction {
@@ -585,6 +588,9 @@ model Penalty {
 
   @@index([userId])
   @@index([status]) // file d'attente du worker (éligibilité PENDING)
+  // Sweep reaper/disputePenaltyWorker : WHERE status=PENDING AND attempts >= maxAttempts —
+  // composite (status, attempts) évite le scan de toutes les pénalités PENDING.
+  @@index([status, attempts])
 }
 
 // Origine d'une entrée d'audit. Discriminant STABLE (immunisé contre `ON DELETE SET NULL`
