@@ -1,9 +1,10 @@
-import { FastifyError, FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync } from 'fastify'
 import { prisma } from '../db'
 import { MissionStatus } from '../generated/prisma'
 import { findMissionForBuyer } from '../missions/mission-access'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { captureEscrowFunds, EscrowCaptureError } from '../services/escrow.service'
+import { AppError } from '../errors/app.error'
 
 /**
  * API escrow — capture du séquestre (T1) exposée hors tunnel mission.
@@ -39,12 +40,6 @@ const missionIdParamsSchema = {
 } as const
 
 const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) => {
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
-    req.log.error({ err }, 'escrow route error')
-    return reply.code(500).send({ error: 'INTERNAL_ERROR' })
-  })
-
   // Auth en onRequest (AVANT la validation) : un non-authentifié reçoit 401.
   app.addHook('onRequest', app.authenticate)
 
@@ -59,7 +54,7 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
       // pas OU si l'appelant n'en est pas l'acheteur (voyageur/tiers) — les deux
       // cas indistinguables, l'existence n'est jamais révélée à un tiers.
       const mission = await findMissionForBuyer(prisma, missionId, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       // Garde 2 — verrou douanier (D-a) : une mission en revue douanière ne peut
       // JAMAIS être capturée par ce chemin (cf. la même garde dans /validate).
@@ -67,16 +62,18 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
         mission.status === MissionStatus.ESCROW_LOCKED_CUSTOMS ||
         mission.status === MissionStatus.PENDING_CUSTOMS_REVIEW
       ) {
-        return reply.code(409).send({ error: 'CUSTOMS_LOCK_ACTIVE' })
+        throw new AppError('CUSTOMS_LOCK_ACTIVE', 409)
       }
 
       try {
         const result = await captureEscrowFunds(missionId, opts.stripe)
         return reply.code(200).send(result)
       } catch (err) {
+        // Mapping des erreurs de pré-check du service (statut escrow) vers HTTP ;
+        // toute autre erreur (ex. Stripe API) propage au gestionnaire global → 500.
         if (err instanceof EscrowCaptureError) {
-          if (err.code === 'ESCROW_NOT_FOUND') return reply.code(404).send({ error: err.code })
-          if (err.code === 'ESCROW_NOT_HELD') return reply.code(400).send({ error: err.code })
+          if (err.code === 'ESCROW_NOT_FOUND') throw new AppError(err.code, 404)
+          if (err.code === 'ESCROW_NOT_HELD') throw new AppError(err.code, 400)
         }
         throw err
       }

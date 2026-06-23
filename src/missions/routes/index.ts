@@ -1,4 +1,4 @@
-import { FastifyError, FastifyPluginAsync } from 'fastify'
+import { FastifyPluginAsync } from 'fastify'
 import { MissionRouteOptions } from '../mission-common'
 import { crudRoutes } from './crud.route'
 import { fundingRoutes } from './funding.route'
@@ -9,12 +9,6 @@ import { walletRoutes } from './wallet/wallet.route'
 import { disputeRoutes } from './dispute/dispute.route'
 
 const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    if (err.validation) return reply.code(400).send({ error: 'INVALID_INPUT' })
-    req.log.error({ err }, 'mission route error')
-    return reply.code(500).send({ error: 'INTERNAL_ERROR' })
-  })
-
   app.addHook('onRequest', app.authenticate)
 
   // Mount domain-specific sub-routers

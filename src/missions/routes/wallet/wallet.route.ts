@@ -6,6 +6,7 @@ import {
   MissionRouteOptions,
   WalletView,
 } from '../../mission-common'
+import { AppError } from '../../../errors/app.error'
 
 /**
  * Domaine WALLET — solde interne acheteur (modèle « Drive », S18) + historique.
@@ -27,7 +28,7 @@ export const walletRoutes: FastifyPluginAsync<MissionRouteOptions> = async app =
     // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'en est pas
     // l'acheteur (voyageur/tiers) — les deux cas indistinguables.
     const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
     // Wallet de l'acheteur (= appelant). Absent ⇒ jamais crédité ⇒ wallet vide
     // (200, pas 404 : un solde nul est un état légitime, pas une erreur).

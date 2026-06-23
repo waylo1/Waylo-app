@@ -9,21 +9,22 @@ import {
   isUniqueViolation,
   MissionRouteOptions,
 } from '../mission-common'
+import { AppError } from '../../errors/app.error'
 
 export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
   // POST /api/missions/:id/intent — financement T0
   app.post('/:id/intent', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-    if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+    if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
     const existingEscrow = await prisma.escrowTransaction.findUnique({
       where: { missionId: mission.id },
       select: { id: true },
     })
-    if (existingEscrow) return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+    if (existingEscrow) throw new AppError('MISSION_ALREADY_FUNDED', 400)
     if (mission.status !== MissionStatus.CREATED) {
-      return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
+      throw new AppError('MISSION_NOT_FUNDABLE', 400)
     }
 
     const intentBody = (req.body ?? {}) as { stripeAuthorizationCents?: number }
@@ -34,7 +35,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
       intentBody.stripeAuthorizationCents,
     )
     if (intentCapacityError) {
-      return reply.code(intentCapacityError.status).send({ error: intentCapacityError.code })
+      throw new AppError(intentCapacityError.code, intentCapacityError.status)
     }
 
     const heldBudgetCents = mission.substitutionAuthorized
@@ -47,7 +48,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
       data: { status: MissionStatus.FUNDED },
     })
     if (reserved.count !== 1) {
-      return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+      throw new AppError('MISSION_ALREADY_FUNDED', 400)
     }
 
     try {
@@ -79,7 +80,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
         data: { status: MissionStatus.CREATED },
       })
       if (isUniqueViolation(err)) {
-        return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+        throw new AppError('MISSION_ALREADY_FUNDED', 400)
       }
       throw err
     }
@@ -92,17 +93,17 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
-      if (!mission) return reply.code(404).send({ error: 'MISSION_NOT_FOUND' })
+      if (!mission) throw new AppError('MISSION_NOT_FOUND', 404)
 
       const existingEscrow = await prisma.escrowTransaction.findUnique({
         where: { missionId: mission.id },
         select: { id: true },
       })
-      if (existingEscrow) return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+      if (existingEscrow) throw new AppError('MISSION_ALREADY_FUNDED', 400)
       if (mission.status !== MissionStatus.CREATED) {
-        return reply.code(400).send({ error: 'MISSION_NOT_FUNDABLE' })
+        throw new AppError('MISSION_NOT_FUNDABLE', 400)
       }
-      if (!opts.stripe.checkout) return reply.code(500).send({ error: 'CHECKOUT_UNAVAILABLE' })
+      if (!opts.stripe.checkout) throw new AppError('CHECKOUT_UNAVAILABLE', 500)
 
       const checkoutBody = (req.body ?? {}) as { stripeAuthorizationCents?: number }
       const checkoutCapacityError = await checkFundingCapacity(
@@ -112,7 +113,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
         checkoutBody.stripeAuthorizationCents,
       )
       if (checkoutCapacityError) {
-        return reply.code(checkoutCapacityError.status).send({ error: checkoutCapacityError.code })
+        throw new AppError(checkoutCapacityError.code, checkoutCapacityError.status)
       }
 
       const heldBudgetCents = mission.substitutionAuthorized
@@ -126,7 +127,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
         data: { status: MissionStatus.FUNDED },
       })
       if (reserved.count !== 1) {
-        return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+        throw new AppError('MISSION_ALREADY_FUNDED', 400)
       }
 
       try {
@@ -172,7 +173,7 @@ export const fundingRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app
           data: { status: MissionStatus.CREATED },
         })
         if (isUniqueViolation(err)) {
-          return reply.code(400).send({ error: 'MISSION_ALREADY_FUNDED' })
+          throw new AppError('MISSION_ALREADY_FUNDED', 400)
         }
         throw err
       }
