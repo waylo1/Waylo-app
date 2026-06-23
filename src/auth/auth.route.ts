@@ -1,16 +1,17 @@
-import { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
+import { FastifyPluginAsync, FastifyRequest } from 'fastify'
 import argon2 from 'argon2'
 import { prisma } from '../db'
 import { Prisma } from '../generated/prisma'
 import { isRateLimited, maskIp } from '../rate-limit'
 import { clearAuthCookie, serializeAuthCookie } from './cookie'
+import { AppError } from '../errors/app.error'
 
 /** Anti-brute-force : 429 au-delà du seuil, clé par route + IP + email. */
 const authRateLimit =
-  (name: string) => async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+  (name: string) => async (req: FastifyRequest): Promise<void> => {
     const email = ((req.body as { email?: string } | undefined)?.email ?? '').toLowerCase()
     if (await isRateLimited(`${name}:${maskIp(req.ip)}:${email}`)) {
-      await reply.code(429).send({ error: 'RATE_LIMITED' })
+      throw new AppError('RATE_LIMITED', 429)
     }
   }
 
@@ -64,15 +65,6 @@ const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
 
 const authRoute: FastifyPluginAsync = async app => {
-  // Erreurs de validation au format maison { error: SNAKE_CASE } (encapsulé).
-  app.setErrorHandler((err: FastifyError, req, reply) => {
-    if (err.validation) {
-      return reply.code(400).send({ error: 'INVALID_INPUT' })
-    }
-    req.log.error({ err }, 'auth route error')
-    return reply.code(500).send({ error: 'INTERNAL_ERROR' })
-  })
-
   // Hash factice pour les emails inconnus : le login fait TOUJOURS une
   // vérification argon2, que le compte existe ou non.
   const dummyHash = await argon2.hash('waylo-dummy-password-timing-shield')
@@ -92,7 +84,7 @@ const authRoute: FastifyPluginAsync = async app => {
         .send({ token })
     } catch (err) {
       if (isUniqueViolation(err)) {
-        return reply.code(409).send({ error: 'EMAIL_ALREADY_REGISTERED' })
+        throw new AppError('EMAIL_ALREADY_REGISTERED', 409)
       }
       throw err
     }
@@ -105,7 +97,7 @@ const authRoute: FastifyPluginAsync = async app => {
     // d'early-return qui trahirait l'existence du compte par le timing.
     const passwordValid = await argon2.verify(user?.passwordHash ?? dummyHash, password)
     if (!user?.passwordHash || !passwordValid) {
-      return reply.code(401).send({ error: 'INVALID_CREDENTIALS' }) // générique, voulu
+      throw new AppError('INVALID_CREDENTIALS', 401)
     }
     const token = app.jwt.sign({ sub: user.id }, { expiresIn: TOKEN_TTL })
     return reply.header('set-cookie', serializeAuthCookie(token)).code(200).send({ token })
@@ -132,9 +124,9 @@ const authRoute: FastifyPluginAsync = async app => {
       select: { id: true, email: true, kycStatus: true, createdAt: true },
     })
     if (!user) {
-      return reply.code(401).send({ error: 'UNAUTHORIZED' })
+      throw new AppError('UNAUTHORIZED', 401)
     }
-    return user
+    return reply.send(user)
   })
 }
 
