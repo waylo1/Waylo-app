@@ -5,6 +5,8 @@ import { Prisma } from '../generated/prisma'
 import { isRateLimited, maskIp } from '../rate-limit'
 import { clearAuthCookie, serializeAuthCookie } from './cookie'
 import { AppError } from '../errors/app.error'
+// SSOT : forme du corps login/register partagée avec le mobile (@waylo/shared).
+import type { LoginRequest } from '@waylo/shared'
 
 /** Anti-brute-force : 429 au-delà du seuil, clé par route + IP + email. */
 const authRateLimit =
@@ -32,11 +34,6 @@ const PASSWORD_MIN_LENGTH = 8
 // Volontairement permissif (présence de @ et d'un point dans le domaine) :
 // la vraie preuve de validité sera la vérification d'adresse, pas la regex.
 const EMAIL_PATTERN = '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
-
-interface CredentialsBody {
-  email: string
-  password: string
-}
 
 // Register : validation stricte (format email + politique de longueur).
 const registerBodySchema = {
@@ -70,7 +67,7 @@ const authRoute: FastifyPluginAsync = async app => {
   const dummyHash = await argon2.hash('waylo-dummy-password-timing-shield')
 
   app.post('/register', { schema: { body: registerBodySchema }, preHandler: authRateLimit('register') }, async (req, reply) => {
-    const { email, password } = req.body as CredentialsBody
+    const { email, password } = req.body as LoginRequest
     const passwordHash = await argon2.hash(password)
     try {
       const user = await prisma.user.create({
@@ -91,7 +88,7 @@ const authRoute: FastifyPluginAsync = async app => {
   })
 
   app.post('/login', { schema: { body: loginBodySchema }, preHandler: authRateLimit('login') }, async (req, reply) => {
-    const { email, password } = req.body as CredentialsBody
+    const { email, password } = req.body as LoginRequest
     const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } })
     // Toujours un verify (hash réel ou factice) AVANT de décider — pas
     // d'early-return qui trahirait l'existence du compte par le timing.

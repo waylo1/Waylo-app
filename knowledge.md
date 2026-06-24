@@ -251,3 +251,40 @@ cd frontend && npm run dev            # Frontend :3001
 npx stripe listen --forward-to ...   # Stripe CLI webhooks local
 tsx scripts/e2e-smoke.mts            # Smoke test E2E
 ```
+
+---
+
+## Outillage Claude — Skills natifs
+
+Trois Skills dans `.claude/skills/` (PR #32, `feat/claude-skills`). **Les descriptions sont les déclencheurs d'auto-activation** — mutuellement exclusives par axe intent × domaine.
+
+| Skill | Fichier | Déclencheur |
+|---|---|---|
+| `audit-security` | `.claude/skills/audit-security/SKILL.md` | Revue d'un flux admin/worker **DÉJÀ ÉCRIT** : deliveryProofStatus, AdminAuditLog ADMIN/SYSTEM, dedup outbox workers, crash robustness |
+| `anti-toctou-idempotency` | `.claude/skills/anti-toctou-idempotency/SKILL.md` | **ÉCRITURE** d'une nouvelle transition financière ou handler webhook Stripe : `updateMany` conditionnel + `ProcessedStripeEvent @unique` même `$transaction` |
+| `receipt-module` | `.claude/skills/receipt-module/SKILL.md` | **ÉCRITURE/MODIF** de validation/réconciliation de reçus : centimes Int, ISO 4217, `IntegrityViolation`, fonctions pures, 100% branch coverage |
+
+**Règle de cross-firing :** chaque description contient `NE PAS utiliser pour X (→ autre-skill)`. En cas d'ambiguïté, l'axe primaire est : audit = `DÉJÀ ÉCRIT`, écriture financière = `ÉCRIVANT + statut financier/webhook`, reçus = `ÉCRIVANT + reçu/inputGuard/IntegrityViolation`.
+
+---
+
+## Outillage Claude — Configuration MCP locale
+
+MCP non versionné (scope `local`, stocké dans `~/.claude.json`). À lancer une fois depuis `C:\Waylo_Deploy\waylo_project` :
+
+```powershell
+# Supabase — MCP officiel, read-only
+claude mcp add supabase --scope local --env SUPABASE_ACCESS_TOKEN=<PAT> -- cmd /c npx -y @supabase/mcp-server-supabase@latest --read-only --project-ref=<project-ref>
+
+# Stripe — clé test UNIQUEMENT (jamais sk_live_)
+claude mcp add stripe --scope local --env STRIPE_SECRET_KEY=sk_test_<cle-test> -- cmd /c npx -y @stripe/mcp --tools=all
+```
+
+**Packages validés :** `@supabase/mcp-server-supabase@0.8.2`, `@stripe/mcp@0.3.3`.
+**NE PAS utiliser :** `@modelcontextprotocol/server-stripe` (E404) ni `@modelcontextprotocol/server-postgres` (déprécié).
+**Variables manquantes (bloquantes) :** `SUPABASE_ACCESS_TOKEN` (PAT Supabase Dashboard → Account → Access Tokens), `STRIPE_SECRET_KEY` test (Stripe Dashboard → mode test → issue #16).
+
+```powershell
+claude mcp list          # vérifier après ajout
+claude mcp get stripe    # statut de connexion
+```
