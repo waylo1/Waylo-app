@@ -526,3 +526,208 @@ Nouveaux fichiers de test S19–S20 :
 - `src/scripts/__tests__/trigger-reconciliation.test.ts` — 4 cas (exit 0/0/2/1)
 
 Migration DB appliquée sur `waylo_test` : `20260618084138_add_buyer_compensation_outbox`.
+
+---
+
+## 10. Monorepo & Mobile — TASK-MOB-00 / MOB-01 — **[OK]**
+
+**Date** : 2026-06-24. **Mode** : single-agent headless. **Statut** : **MOB-00 [OK]** (commit `5fd3f0f`) · **MOB-01 [OK]** (commit `267191f`), branche `feat/claude-skills`.
+
+> La section précédente « [FAIL] BLOQUÉ » (tentative antérieure) est **caduque** : les blocants B1 (aucun workspace) et B2 (aucun mobile) ont été **levés** par MOB-00 ci-dessous.
+
+### Gestionnaire de paquets & tactique d'intégration
+- **Package manager : npm** (seul `package-lock.json` à la racine ; aucun `pnpm-lock.yaml`/`yarn.lock`).
+- **Tactique : le backend RESTE le paquet RACINE + `"workspaces": ["packages/*"]`** (PAS de migration vers `packages/backend`).
+  **Pourquoi (moindre risque)** : `Dockerfile` (`COPY package.json` / `npm ci` / `npm start`), `fly.toml`, les **2 workflows CI** (`staging.yml` + `reconciliation-cron.yml` : `npm ci`/`prisma generate`/`typecheck`/`reconcile` à la racine), `.dockerignore`, et surtout le **chemin du client Prisma** (`generator output = "../src/generated/prisma"` → racine `src/generated/prisma`) sont **tous couplés au backend-à-la-racine**. Le déplacer aurait cassé chacun. La tactique retenue ne touche **aucune** logique métier, **aucun** `schema.prisma`, **aucun** chemin Prisma.
+- **`frontend/` reste HORS workspaces** (lockfile propre `frontend/package-lock.json` + étape CI dédiée `working-directory: frontend`). Repli volontaire : l'intégrer est hors scope (et risque React 19 frontend vs React 19/RN mobile).
+
+### Paquets workspace
+| Paquet | Chemin | Rôle |
+|---|---|---|
+| `@waylo/shared` | `packages/shared` | **SSOT** types purs, ZÉRO dépendance runtime |
+| `@waylo/mobile` | `packages/mobile` | App Expo SDK 56 (RN 0.85.3, React 19, TS 6, strict) |
+
+### `@waylo/shared` — chemin & exports
+- **Chemin** : `packages/shared` ; entrée `packages/shared/src/index.ts`, **consommé depuis les sources** (`main`/`types`/`exports` → `src/index.ts`, **pas d'étape de build**).
+- **Enums** — ré-export `export type` **depuis le client Prisma généré** (`../../../src/generated/prisma`), AUCUNE redéclaration, drift impossible : `MissionStatus`, `DeliveryProofStatus`, `PenaltyReason`, `KycStatus`.
+- **Auth** (`src/auth.ts`) : `LoginRequest`, `LoginResponse`, `TokenClaims`.
+- **DTOs** (`src/dto.ts`) : `UserDTO`, `MissionDTO`, `SessionDTO`. Conventions : dates = chaîne **ISO 8601** (format JSON), argent = **centimes Int**, **aucun secret** exposé (ni passwordHash ni IDs Stripe). Pas de modèle Prisma `Session` → `SessionDTO = { token, claims, user }` (session client).
+
+### Câblage réalisé
+- **Backend → @waylo/shared** : `src/app.ts` (augmentation `@fastify/jwt` : `payload`/`user` = `TokenClaims`) + `src/auth/auth.route.ts` (`LoginRequest` remplace le type local `CredentialsBody`). `import type` → **zéro impact runtime** (effacé ; tsx ne charge pas le module).
+- **Mobile → @waylo/shared** : `packages/mobile/App.tsx` consomme `MissionDTO` + `MissionStatus` (types, pas de redéclaration).
+
+### IMPORT PATH pour la Session 2 (mobile)
+```ts
+import type {
+  MissionDTO, MissionStatus, DeliveryProofStatus, PenaltyReason, KycStatus,
+  UserDTO, SessionDTO, LoginRequest, LoginResponse, TokenClaims,
+} from '@waylo/shared'
+```
+Résolution : symlink workspace `node_modules/@waylo/shared` → `packages/shared` → `exports`/`types` → `src/index.ts`. Metro déjà prêt monorepo (`packages/mobile/metro.config.js` : `watchFolders` racine + `nodeModulesPaths`).
+
+### Prérequis non-régression
+`prisma generate` doit avoir tourné avant tout `tsc` sur shared/mobile (le ré-export d'enums résout `src/generated/prisma`). **Garanti par le `postinstall` racine** (`npm install` → `prisma generate`).
+
+### Gates (tous verts)
+| Gate | Résultat |
+|---|---|
+| Backend `prisma generate` | ✅ exit 0 |
+| Backend `tsc --noEmit` strict | ✅ exit 0 (identique à la baseline pré-conversion) |
+| `@waylo/shared` `tsc --noEmit` | ✅ exit 0 |
+| `@waylo/mobile` `tsc --noEmit` strict | ✅ exit 0 |
+| `@waylo/mobile` `eslint .` | ✅ exit 0 |
+
+> **Tests Vitest backend : NON exécutés** — base `waylo_test` idle, et les modifs MOB-01 sont **purement typequelles** (`import type`, zéro delta runtime). Le gate défini par les tâches = `tsc --strict` (respecté). À lancer si souhaité : `npm test`.
+
+---
+
+## 11. Mobile — Auth & Parcours Splash/Login/Dashboard — TASK-MOB-02 / MOB-03 — **[OK]**
+
+**Date** : 2026-06-24. **Mode** : single-agent headless. **Statut** : **MOB-02 [OK]** (commit `8bfec7d`) · **MOB-03 [OK]** (commit `2ec8a1b`), branche `feat/claude-skills`.
+
+### Persistance de session — deux couches distinctes (MOB-02)
+
+| Couche | Lib | Rôle |
+|---|---|---|
+| Persistance chiffrée | `expo-secure-store@~56.0.4` (Keychain iOS / Keystore Android) | Stockage **seul autorisé** pour les tokens. AsyncStorage **interdit** pour les secrets. |
+| État mémoire | `zustand@^5.0.14` | Session courante + statut d'hydration, hydratée au boot depuis SecureStore. |
+
+**Chemins** :
+- `packages/mobile/src/auth/secure-store.ts` — wrapper typé : `readSession() / writeSession(session) / clearStoredSession()`. Clé fixe `waylo.session.v1`. JSON sérialisé d'un `SessionDTO` complet (token + claims + user) → boot route sans appel `/me` ; expiration détectée au premier appel API protégé. Donnée corrompue → purge silencieuse (jamais de log du contenu).
+- `packages/mobile/src/auth/auth.store.ts` — store Zustand, **API** :
+  - `status: 'loading' | 'authenticated' | 'unauthenticated'` — discriminant pour le Splash gate.
+  - `hydrate()` — **single-flight** (idempotent face à StrictMode), lit SecureStore, fait passer `status` de `loading` à `authenticated|unauthenticated`. À appeler **une fois** au boot (App.tsx).
+  - `getSession()` — vue mémoire seule, ne touche pas SecureStore.
+  - `setSession(session)` — écrit SecureStore PUIS met à jour la mémoire (ordre strict).
+  - `clearSession()` — purge SecureStore + mémoire (logout).
+
+**Types** consommés depuis `@waylo/shared` (`SessionDTO`). Aucune redéclaration mobile. **Aucun log du token** (règle d'or, jamais en `console.log`, jamais dans un message d'erreur).
+
+**Plugin Expo** : `packages/mobile/app.json` → `plugins: ["expo-secure-store"]` (requis pour les builds natifs).
+
+### Navigation & parcours (MOB-03)
+
+**Lib navigation** : **React Navigation v7** (`@react-navigation/native@^7.3.4` + `@react-navigation/native-stack@^7.17.6`). Peers SDK-56-alignés via `expo install --fix` : `react-native-screens@^4.25.2`, `react-native-safe-area-context@~5.7.0`.
+
+**Structure des routes** :
+- `RootStackParamList` (`packages/mobile/src/navigation/types.ts`) :
+  ```ts
+  { Login: undefined; Dashboard: undefined }
+  ```
+- `RootNavigator` (`packages/mobile/src/navigation/RootNavigator.tsx`) : **gating conditionnel** sur `useAuthStore(s => s.session)`. Pattern officiel React Navigation [Authentication flows](https://reactnavigation.org/docs/auth-flow) — chaque branche monte un écran différent, **JAMAIS de `navigation.navigate()` impératif** lors du login/logout (re-render React seul, pas de race purge ↔ transition).
+  ```tsx
+  session === null ? <Stack.Screen name="Login" .../> : <Stack.Screen name="Dashboard" .../>
+  ```
+- **App.tsx — Splash gate AVANT `NavigationContainer`** : tant que `status === 'loading'`, rend un `SplashView` inline (ActivityIndicator + "Waylo") ; `NavigationContainer` n'est **pas** monté pendant l'hydration → **aucun flash** de Login si la session est en fait valide. Le `useEffect` kick `hydrate()` une fois ; le single-flight côté store absorbe les remounts StrictMode.
+
+**Écrans** (tous typés via `@waylo/shared`) :
+- `LoginScreen.tsx` — form typed `LoginRequest`, `secureTextEntry` sur password, états `submitting`/`error`, sur succès construit un `SessionDTO` et appelle `setSession` → le store déclenche le swap de stack via RootNavigator. **Pas de `navigation.navigate('Dashboard')`** côté login. **Façade supprimée en MOB-05** (cf. §12) : le `SessionDTO` est désormais construit à partir de la réponse serveur (`POST /api/auth/login` + `GET /api/auth/me`), plus aucune fabrication locale.
+- `DashboardScreen.tsx` — affiche `session.user.email` et `session.user.kycStatus`, bouton « Se déconnecter » → `clearSession()` → RootNavigator swap automatique vers Login.
+
+### Règle « enums valeurs » côté @waylo/shared
+**Aucun `const string-union` ajouté ce sprint** : les écrans Splash/Login/Dashboard consomment uniquement des **types** (`LoginRequest`, `UserDTO`, `SessionDTO`) et affichent `kycStatus` comme la chaîne reçue (`user.kycStatus`), pas comme valeur codée. La règle reste **opposable** : dès qu'un écran (filter, picker, itération sur un enum) a besoin de la VALEUR d'un enum, ajouter un `const STATUSES = ['CREATED', 'FUNDED', ...] as const` dans `packages/shared/src/` et **ne PAS** importer le client Prisma (qui ferait entrer du runtime dans le bundle RN).
+
+### Gates MOB-02/03 (tous verts)
+| Gate | Résultat |
+|---|---|
+| `@waylo/shared` `tsc --noEmit` | ✅ exit 0 |
+| `@waylo/mobile` `tsc --noEmit` strict | ✅ exit 0 |
+| `@waylo/mobile` `eslint .` | ✅ exit 0 |
+| Backend `tsc --noEmit` strict (non-régression) | ✅ exit 0 |
+| `expo install --check` | ✅ versions SDK-56-alignées |
+
+> **Tests Vitest mobile : NON exécutés** — Vitest n'est pas configuré côté mobile (`@waylo/mobile` n'embarque pas de test runner ce sprint). Le gate par tâche = `tsc --strict + eslint` (respecté). Tests RN (Jest + react-native-testing-library) à venir avec le câblage backend.
+
+---
+
+## 12. Mobile — Client API & Auth réelle bout-en-bout — TASK-MOB-04 / MOB-05 — **[OK]**
+
+**Date** : 2026-06-24. **Mode** : single-agent headless. **Statut** : **MOB-04 [OK]** (commit `c188236`) · **MOB-05 [OK]** (commit `c9632eb`), branche `feat/claude-skills`.
+
+### Client HTTP (MOB-04)
+
+**Lib** : `axios@^1.18.1` (pure JS, RN-safe ; pas une lib native Expo donc pas de plugin requis).
+
+**Path** : `packages/mobile/src/api/client.ts` — instance UNIQUE (`apiClient`) partagée par toute l'app. Imports nommés (`create`, `isAxiosError`) → lint clean, aucun warning.
+
+**baseURL — fallback chain** (PAS de STOP si env absente, par consigne) :
+1. `process.env.EXPO_PUBLIC_API_URL` si défini (devices physiques, prod).
+2. Android emulator (`Platform.OS === 'android'`) → `http://10.0.2.2:3000` (convention Google : 10.0.2.2 = loopback de l'host depuis l'emu).
+3. iOS Simulator / web → `http://localhost:3000`.
+
+**Intercepteurs** :
+- **REQUEST** : token lu **à chaque requête** depuis `useAuthStore.getState().session?.token` (jamais en variable de module → pas de déphasage après `setSession`/`clearSession`). Injecté via `config.headers.set('Authorization', 'Bearer ' + token)`. **Aucun log du token**.
+- **RESPONSE** : 401 → `useAuthStore.getState().clearSession()` (fire-and-forget : RootNavigator route vers Login via le re-render, **AUCUN `navigation.navigate()` impératif**). 5xx/réseau/inconnu → `ApiError` typée.
+
+**Erreurs normalisées** (`packages/mobile/src/api/errors.ts`) :
+- `ApiError { code, status, message }` — `code` = SNAKE_CASE backend (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `RATE_LIMITED`, `INVALID_INPUT`, …) ou local (`NETWORK_ERROR`, `UNKNOWN_ERROR`, `HTTP_<N>`).
+- `normalizeAxiosError(err)` extrait `{ error: '...' }` du body backend ; pas de réponse → `NETWORK_ERROR` (status 0).
+- Le rejet ne porte **ni token, ni URL d'origine, ni stack Axios** → `console.log(err)` est sûr côté écrans.
+
+### Auth réelle — façade supprimée (MOB-05)
+
+**Routes backend câblées** (confirmées par inspection `src/auth/auth.route.ts`) :
+
+| Route | Body | Auth | Réponse |
+|---|---|---|---|
+| `POST /api/auth/login` | `LoginRequest { email, password }` | publique (rate-limited) | `200 { token }` (= `LoginResponse`) · 401 `INVALID_CREDENTIALS` · 429 `RATE_LIMITED` |
+| `GET /api/auth/me` | — | Bearer | `200 UserDTO { id, email, kycStatus, createdAt }` · 401 `UNAUTHORIZED` |
+
+**Wrappers typés** (`packages/mobile/src/api/auth.api.ts`) :
+- `login(body)` — POST, retourne `LoginResponse`.
+- `getMe(token?)` — GET ; le `token` explicite optionnel sert au flow de login (le store n'a pas encore la session, donc l'intercepteur ne l'injecterait pas). Sans argument, l'intercepteur pose le header depuis le store.
+
+**LoginScreen** — flow bout-en-bout :
+1. `POST /api/auth/login` → `{ token }`.
+2. `GET /api/auth/me` avec ce token (header explicite) → `UserDTO`.
+3. `setSession({ token, claims: { sub: user.id }, user })` — RootNavigator swap auto.
+
+`claims.sub === user.id` par construction backend (`auth.route.ts:99` signe `{ sub: user.id }`) — **pas de JWT-decoder côté client**, économie de dep.
+
+**Messages d'erreur utilisateur** (mapping `ApiError.code` → texte FR, jamais le token) : `INVALID_CREDENTIALS`, `RATE_LIMITED`, `NETWORK_ERROR`, `INVALID_INPUT`, défaut `Erreur de connexion (<code>)`.
+
+**`AuthStore.hydrate` — validation serveur STRICTE** (règle « Plus aucune session non vérifiée par le serveur ») :
+- SecureStore vide → `unauthenticated`.
+- Session stockée → `getMe(stored.token)` MUST réussir.
+  - **200** → `session.user` rafraîchi (kycStatus à jour), réécrit en SecureStore, `authenticated`.
+  - **401** (token expiré/révoqué) → `clearSession` → Login. L'intercepteur 401 déclenche aussi `clearSession` ; le second appel ici est idempotent (`deleteItemAsync` no-op).
+  - **réseau / 5xx** → `clearSession` → Login. **Trade-off UX (offline) assumé** : aucune session n'est plus considérée valide sans validation /me. Documenté ici comme contrainte spec.
+
+**Cycle d'import toléré** : `auth.store` → `api/auth.api` → `api/client` → `auth.store`. Chaque module ne référence l'autre qu'**à call-time** (callback d'intercepteur, appel `getMe()`), jamais à module-load. TS/ESLint résolvent proprement.
+
+### Confirmation : façade supprimée
+`grep -r 'placeholder|fabriqu' packages/mobile/src` → seulement `TextInput placeholder=""` (UI). Plus aucune construction locale de `SessionDTO`.
+
+### Gates MOB-04/05 (tous verts)
+| Gate | Résultat |
+|---|---|
+| `@waylo/mobile` `tsc --noEmit` strict | ✅ exit 0 |
+| `@waylo/mobile` `eslint .` | ✅ exit 0 (zero warning) |
+| `@waylo/shared` `tsc --noEmit` | ✅ exit 0 |
+| Backend `tsc --noEmit` strict (non-régression) | ✅ exit 0 |
+
+---
+
+## 13. Mobile — `hydrate` optimiste — TASK-MOB-06 — **[OK]**
+
+**Date** : 2026-06-24. **Mode** : single-agent headless. **Statut** : **MOB-06 [OK]** (commit `3b5d8a8`), branche `feat/claude-skills`. Changement **chirurgical, un seul fichier** : `packages/mobile/src/auth/auth.store.ts` (`hydrate` uniquement).
+
+### Décision : optimisme > punition
+MOB-05 déconnectait sur **toute** erreur de validation `/me` (y compris réseau/5xx). Décision Maxime : une session persistée n'est tuée que par un **rejet ACTIF** du serveur. Comportement de `hydrate()` après lecture SecureStore :
+
+| Réponse `GET /api/auth/me` | Avant (MOB-05) | Après (MOB-06) |
+|---|---|---|
+| **200** (token valide) | `user` rafraîchi → `authenticated` | **inchangé** |
+| **401** (token expiré/révoqué) | `clearSession` → Login | **inchangé** (logout strict) |
+| **réseau / 5xx** (serveur muet) | `clearSession` → Login | **session GARDÉE** → `authenticated` |
+
+**Gain** : plus aucun logout accidentel sur redémarrage backend, 4G qui hoquette, cold start. **Sécurité inchangée** : si le token est mort, le prochain appel authentifié reçoit un 401 et l'intercepteur (`client.ts`) fait `clearSession`. L'**intercepteur 401 n'est PAS modifié** (reste strict). Aucun refresh token (non supporté par le backend).
+
+**Distinction technique** : `toApiError(err).status === 401` dans le `catch` de `hydrate` (`ApiError.status` vaut 0 pour une panne réseau, 5xx pour une erreur serveur — seul 401 déclenche le logout).
+
+### Flag `stale` : **NON** (v1)
+Décision : **pas ajouté**. Le rendre utile imposait de toucher `DashboardScreen` (sinon état mort), hors du « aucun changement ailleurs » de la consigne, et marqué optionnel. La session conservée sur coupure est simplement `authenticated` ; un indicateur de fraîcheur pourra être ajouté plus tard (champ `lastValidatedAt` ou `stale` + bandeau Dashboard) si le besoin UX se confirme.
+
+### Gate MOB-06 (tous verts)
+`@waylo/mobile` tsc strict ✅ · eslint ✅ · `@waylo/shared` tsc ✅ · backend tsc non-régressé ✅.

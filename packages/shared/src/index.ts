@@ -4,6 +4,20 @@
 // (interfaces, alias, ré-exports `export type`). Tout est effacé à la compilation,
 // donc rien n'atterrit dans le bundle React Native ni dans le runtime Node.
 //
-// Le contenu réel (enums dérivés de Prisma, DTOs, payloads d'auth) est ajouté en
-// TASK-MOB-01. MOB-00 ne pose que le squelette du paquet.
-export {}
+// Consommé depuis les sources (package.json main/types/exports → src/index.ts) :
+// pas d'étape de build, le backend (tsx/tsc) et le mobile (Metro/tsc) compilent
+// directement le TypeScript de ce paquet.
+
+// Enums dérivés du client Prisma généré (aucune redéclaration — voir prisma-enums.ts).
+export type {
+  MissionStatus,
+  DeliveryProofStatus,
+  PenaltyReason,
+  KycStatus,
+} from './prisma-enums'
+
+// Payloads d'authentification.
+export type { LoginRequest, LoginResponse, TokenClaims } from './auth'
+
+// DTOs (projections sûres des modèles Prisma).
+export type { UserDTO, MissionDTO, SessionDTO } from './dto'

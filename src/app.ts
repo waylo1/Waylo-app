@@ -14,13 +14,16 @@ import { AlertSink } from './alerts'
 import { AppError } from './errors/app.error'
 import { registerSlowRequestLogger } from './monitoring/slowRequestLogger'
 import debugRoute from './debug/performance.route'
+// SSOT : le contrat d'identité du JWT vit dans @waylo/shared (partagé avec le mobile).
+// `import type` → effacé au runtime, aucune dépendance ajoutée au backend.
+import type { TokenClaims } from '@waylo/shared'
 
 declare module '@fastify/jwt' {
   interface FastifyJWT {
     // Payload minimal : identité seule. Aucun rôle de compte (rôles
     // contextuels), aucun kycStatus (relu frais en DB, jamais figé dans un JWT).
-    payload: { sub: string }
-    user: { sub: string }
+    payload: TokenClaims
+    user: TokenClaims
   }
 }
 
