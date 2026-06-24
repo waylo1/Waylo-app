@@ -6,6 +6,10 @@
   "engines": {
     "node": ">=20"
   },
+  "//workspaces": "Monorepo (MOB-00) : le backend reste le paquet racine (Dockerfile/fly/CI/chemin Prisma y sont couplés). packages/* = @waylo/shared (SSOT) + @waylo/mobile (Expo). frontend/ reste hors workspaces (lockfile + étape CI dédiés).",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
