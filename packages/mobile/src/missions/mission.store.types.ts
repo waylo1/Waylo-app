@@ -94,8 +94,10 @@ export interface Snapshot<T> {
 export type PendingMutationKind = 'VALIDATE' | 'CONFIRM_RECEIPT';
 
 /**
- * Cycle de vie minimal d'une mutation en attente. Pas de file durable : une mutation
- * `'failed'` est rollback puis retirée dans la MÊME transition atomique.
+ * Cycle de vie d'une mutation en attente. Dans l'implémentation actuelle, une
+ * mutation présente est toujours `'inflight'` : elle est RETIRÉE à la résolution
+ * (commit / rollback). `'failed'` est réservé à la future file durable de retry
+ * (ADR option B) — défini ici pour ne pas re-typer le jour où elle arrive.
  */
 export type PendingMutationStatus = 'inflight' | 'failed';
 
@@ -181,10 +183,18 @@ export interface MissionSliceActions {
    */
   rollbackOnConflict: (id: MutationId, conflict: ConflictPayload) => void;
   /**
-   * Échec non-versionné (réseau / 5xx) : selon l'optimisme MOB-06, ne rollback PAS par
-   * réflexe — la mutation peut rester `'inflight'` pour retry (serveur n'a pas statué).
+   * Échec non-versionné (réseau / 5xx) : le serveur n'a pas confirmé l'écriture.
+   * On défait l'optimisme (rollback vers la pré-image) MAIS, contrairement au 409,
+   * on n'est pas sûr de l'état serveur → on marque `stale` pour forcer un refetch
+   * de vérification. Distinct du 409 (rejet ACTIF) par l'issue retournée à l'appelant.
    */
   failMutation: (id: MutationId) => void;
+  /** Boot : charge le cache SecureStore en mémoire (`source: 'cache'`). No-op si vide. */
+  hydrate: () => Promise<void>;
+  /** Persiste l'état CONFIRMÉ (borné, pré-images pour les entités en vol) dans SecureStore. */
+  persist: () => Promise<void>;
+  /** Réinitialise le slice à l'état vide (logout / tests). */
+  reset: () => void;
 }
 
 /** Slice complet = état + actions (forme idiomatique Zustand). */
