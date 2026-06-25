@@ -17,6 +17,7 @@ import { create } from 'zustand';
 import type { MissionDTO, MissionStatus } from '@waylo/shared';
 import type {
   MissionEntity,
+  MissionId,
   MissionSlice,
   MutationId,
   PendingMutation,
@@ -41,12 +42,17 @@ export class MissionStoreError extends Error {
   }
 }
 
-// Compteur monotone pour des MutationId uniques au sein d'une session (pas de
-// Math.random : id non deviné par valeur dans les tests, corrélé par le retour).
+// Compteurs monotones au sein d'une session. Pas de Math.random (déterminisme des tests).
 let mutationCounter = 0;
 function nextMutationId(at: number): MutationId {
   mutationCounter += 1;
   return `mut_${at}_${mutationCounter}` as MutationId;
+}
+
+let tempMissionCounter = 0;
+function nextTempMissionId(at: number): MissionId {
+  tempMissionCounter += 1;
+  return `tmp_${at}_${tempMissionCounter}` as MissionId;
 }
 
 /**
@@ -213,5 +219,32 @@ export const useMissionStore = create<MissionSlice>((set, get) => ({
 
   reset: () => {
     set({ missions: {}, _pendingMutations: {}, _meta: INITIAL_META });
+  },
+
+  // ── Création optimiste ─────────────────────────────────────────────────────
+
+  addOptimisticCreate: (mission, at) => {
+    const tempId = nextTempMissionId(at);
+    const tempMission: MissionDTO = { ...mission, id: tempId };
+    const entity: MissionEntity = {
+      data: tempMission,
+      _meta: { lastSyncedAt: null, source: 'optimistic', stale: false },
+    };
+    set(s => ({ missions: { ...s.missions, [tempId]: entity } }));
+    return tempId;
+  },
+
+  commitCreate: (tempId, serverMission, at) => {
+    const confirmed: MissionEntity = {
+      data: serverMission,
+      _meta: { lastSyncedAt: at, source: 'network', stale: false },
+    };
+    set(s => ({
+      missions: { ...omit(s.missions, tempId), [serverMission.id]: confirmed },
+    }));
+  },
+
+  abortCreate: (tempId) => {
+    set(s => ({ missions: omit(s.missions, tempId) }));
   },
 }));

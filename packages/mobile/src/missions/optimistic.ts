@@ -69,6 +69,43 @@ async function persistQuietly(store: OptimisticStore): Promise<void> {
   }
 }
 
+// ── Création optimiste ────────────────────────────────────────────────────────
+
+/** Issue d'une création optimiste — plus simple que l'update (pas de 409 sur une création). */
+export type OptimisticCreateOutcome =
+  | { readonly status: 'committed'; readonly mission: MissionDTO }
+  | { readonly status: 'failed'; readonly error: ApiError };
+
+export interface WithOptimisticCreateParams {
+  /** Mission pré-construite avec un ID temporaire (`tmp_*`). */
+  readonly tempMission: MissionDTO;
+  /** Appel backend POST /api/missions (sans version : nouvelle ressource). */
+  readonly request: () => Promise<MissionDTO>;
+  /** Horloge injectée (ms epoch). */
+  readonly now: () => number;
+}
+
+export async function withOptimisticCreate(
+  store: OptimisticStore,
+  params: WithOptimisticCreateParams,
+): Promise<OptimisticCreateOutcome> {
+  const { tempMission, request, now } = params;
+
+  const tempId = store.getState().addOptimisticCreate(tempMission, now());
+
+  try {
+    const serverMission = await request();
+    store.getState().commitCreate(tempId, serverMission, now());
+    await persistQuietly(store);
+    return { status: 'committed', mission: serverMission };
+  } catch (err) {
+    store.getState().abortCreate(tempId);
+    return { status: 'failed', error: toApiError(err) };
+  }
+}
+
+// ── Update optimiste ──────────────────────────────────────────────────────────
+
 export async function withOptimisticUpdate(
   store: OptimisticStore,
   params: WithOptimisticParams,

@@ -43,9 +43,10 @@ export function toPersistedCache(state: MissionSliceState): PersistedMissionCach
     }
   }
 
-  const confirmed: MissionEntity[] = Object.values(state.missions).map(
-    entity => preimageByMission.get(entity.data.id) ?? entity,
-  );
+  // Exclut les missions avec source 'optimistic' (en-vol de création, pas encore confirmées).
+  const confirmed: MissionEntity[] = Object.values(state.missions)
+    .filter(entity => entity._meta.source !== 'optimistic')
+    .map(entity => preimageByMission.get(entity.data.id) ?? entity);
 
   // Tri par fraîcheur de la donnée (updatedAt ISO, ordre décroissant) puis cap.
   const bounded = confirmed
