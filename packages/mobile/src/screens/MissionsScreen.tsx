@@ -5,7 +5,8 @@
 // - refresh (données cached) : scrollable normalement, pas de skeletons
 // - vide (0 missions) : EmptyState
 // - erreur sans cache : ErrorState
-// - données : FlatList de missions
+// - données : ScrollView de missions
+// - hors-ligne : bandeau discret + données cachées ou NoOfflineDataState
 //
 // Props piloté par le store — découplé de la logique de fetch.
 
@@ -14,6 +15,8 @@ import type { MissionDTO } from '@waylo/shared';
 import { EmptyState } from '../components/states/EmptyState';
 import { ErrorState } from '../components/states/ErrorState';
 import { LoadingState } from '../components/states/LoadingState';
+import { NoOfflineDataState } from '../components/states/NoOfflineDataState';
+import { OfflineBanner } from '../components/OfflineBanner';
 
 // -- Props du composant (injectées par l'écran parent ou via le store) -------
 
@@ -35,6 +38,15 @@ export interface MissionsScreenProps {
   readonly isRefreshing: boolean;
   /** Handler fourni à `RefreshControl` — idempotent si déjà en cours. */
   readonly onRefresh: () => void;
+  /** true quand le réseau est hors-ligne. Affiche le bandeau de fraîcheur. */
+  readonly isOffline?: boolean;
+  /** Epoch ms du dernier sync réseau. Affiché dans le bandeau hors-ligne. */
+  readonly lastSyncedAt?: number | null;
+  /**
+   * Epoch ms « maintenant » — transmis à OfflineBanner pour les tests.
+   * Absent en prod : OfflineBanner capture lui-même Date.now au montage.
+   */
+  readonly nowMs?: number;
 }
 
 // -- Composant ---------------------------------------------------------------
@@ -47,6 +59,9 @@ export default function MissionsScreen({
   onRetry,
   isRefreshing,
   onRefresh,
+  isOffline = false,
+  lastSyncedAt = null,
+  nowMs,
 }: MissionsScreenProps) {
   // Loading initial : affiche les skeletons (jamais de spinner PTR ici).
   if (isLoadingInitial) {
@@ -62,13 +77,32 @@ export default function MissionsScreen({
     />
   );
 
+  const banner = isOffline ? (
+    <OfflineBanner lastSyncedAt={lastSyncedAt} nowMs={nowMs} />
+  ) : null;
+
+  // Hors-ligne sans cache : impossible de montrer quoi que ce soit.
+  if (isOffline && missions.length === 0 && lastSyncedAt === null) {
+    return (
+      <View style={styles.root}>
+        {banner}
+        <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
+          <NoOfflineDataState />
+        </ScrollView>
+      </View>
+    );
+  }
+
   // Erreur sans cache : affiche le message d'erreur + bouton réessayer.
   // PTR disponible pour retenter sans passer par le bouton.
   if (error !== null && missions.length === 0) {
     return (
-      <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
-        <ErrorState errorMessage={error} onRetry={onRetry} />
-      </ScrollView>
+      <View style={styles.root}>
+        {banner}
+        <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
+          <ErrorState errorMessage={error} onRetry={onRetry} />
+        </ScrollView>
+      </View>
     );
   }
 
@@ -76,19 +110,25 @@ export default function MissionsScreen({
   // PTR disponible pour vérifier s'il y a de nouvelles missions.
   if (missions.length === 0) {
     return (
-      <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
-        <EmptyState onCreatePress={onCreatePress} />
-      </ScrollView>
+      <View style={styles.root}>
+        {banner}
+        <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
+          <EmptyState onCreatePress={onCreatePress} />
+        </ScrollView>
+      </View>
     );
   }
 
   // Données : liste complète avec PTR (spinner natif, données actuelles visibles).
   return (
-    <ScrollView contentContainerStyle={styles.container} refreshControl={refreshControl}>
-      {missions.map(mission => (
-        <MissionCard key={mission.id} mission={mission} />
-      ))}
-    </ScrollView>
+    <View style={styles.root}>
+      {banner}
+      <ScrollView contentContainerStyle={styles.container} refreshControl={refreshControl}>
+        {missions.map(mission => (
+          <MissionCard key={mission.id} mission={mission} />
+        ))}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -115,6 +155,9 @@ function MissionCard({ mission }: { mission: MissionDTO }) {
 // -- Styles ------------------------------------------------------------------
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   container: {
     padding: 16,
   },
