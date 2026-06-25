@@ -30,7 +30,7 @@ export type MutationId = string & { readonly __brand: 'MutationId' };
 // ── Fraîcheur (_meta) ────────────────────────────────────────────────────────
 
 /** Provenance de la donnée affichée — pilote l'indicateur de fraîcheur en UI. */
-export type DataSource = 'network' | 'cache';
+export type DataSource = 'network' | 'cache' | 'optimistic';
 
 /**
  * Métadonnées de fraîcheur. Attachées à CHAQUE entité (fraîcheur d'une mission) ET
@@ -195,6 +195,25 @@ export interface MissionSliceActions {
   persist: () => Promise<void>;
   /** Réinitialise le slice à l'état vide (logout / tests). */
   reset: () => void;
+
+  // ── Création optimiste ───────────────────────────────────────────────────
+
+  /**
+   * Insère une mission optimiste avec un ID temporaire (`tmp_*`) et `source: 'optimistic'`.
+   * Retourne l'ID temporaire pour corréler `commitCreate` / `abortCreate`.
+   * La mission n'est JAMAIS persistée dans SecureStore tant qu'elle est `optimistic`.
+   */
+  addOptimisticCreate: (mission: MissionDTO, at: number) => MissionId;
+  /**
+   * ACK 201 : retire l'entrée temporaire et insère la mission confirmée (ID serveur).
+   * La version serveur remplace l'ID temporaire ; le cache est prêt à être persisté.
+   */
+  commitCreate: (tempId: MissionId, serverMission: MissionDTO, at: number) => void;
+  /**
+   * Échec de création : retire l'entrée temporaire sans laisser de trace.
+   * La notification vers l'utilisateur (toast) est gérée par l'appelant (hook).
+   */
+  abortCreate: (tempId: MissionId) => void;
 }
 
 /** Slice complet = état + actions (forme idiomatique Zustand). */
