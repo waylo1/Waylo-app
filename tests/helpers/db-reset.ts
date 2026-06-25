@@ -43,6 +43,7 @@ export async function resetDb(prisma: PrismaClient): Promise<void> {
 
   // 5. Tables sans FK.
   await prisma.processedStripeEvent.deleteMany()
+  await prisma.processedMissionEvent.deleteMany()
   await prisma.rateLimit.deleteMany()
 
   // 6. Racines — mission puis user (en dernier).
