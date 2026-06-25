@@ -229,6 +229,7 @@ model Mission {
   deliveryProofHash    String?   // sha256 (hex) de la preuve de livraison scellée à confirmReception ; jamais le secret en clair (preuve irréfutable de litige)
   receptionConfirmedAt DateTime? // horodatage serveur de la confirmation de réception acheteur (confirmReception) ; null tant que non confirmé
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
+  version         Int           @default(0) // Optimistic concurrency — incrémenté à chaque mutation de statut par l'acheteur (/validate, /confirm-receipt)
   expiresAt       DateTime
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt

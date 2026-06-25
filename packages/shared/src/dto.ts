@@ -41,12 +41,26 @@ export interface MissionDTO {
   /** Pré-autorisation acheteur du modèle « Drive » (reçu jusqu'à 120% du budget). */
   substitutionAuthorized: boolean
   deliveryProofStatus: DeliveryProofStatus
+  /** Compteur de concurrence optimiste — incrémenté à chaque transition de statut acheteur. */
+  version: number
   /** ISO 8601 (format JSON de `Mission.expiresAt`). */
   expiresAt: string
   /** ISO 8601 (format JSON de `Mission.createdAt`). */
   createdAt: string
   /** ISO 8601 (format JSON de `Mission.updatedAt`). */
   updatedAt: string
+}
+
+/**
+ * Payload d'une réponse 409 VERSION_CONFLICT : version cliente dépassée.
+ * Le client doit rafraîchir la mission (GET /api/missions/:id) et réessayer.
+ */
+export interface ConflictPayload {
+  error: 'VERSION_CONFLICT'
+  details: {
+    currentVersion: number
+    expectedVersion: number
+  }
 }
 
 /**

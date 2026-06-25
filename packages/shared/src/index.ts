@@ -20,4 +20,4 @@ export type {
 export type { LoginRequest, LoginResponse, TokenClaims } from './auth'
 
 // DTOs (projections sûres des modèles Prisma).
-export type { UserDTO, MissionDTO, SessionDTO } from './dto'
+export type { UserDTO, MissionDTO, SessionDTO, ConflictPayload } from './dto'
