@@ -18,9 +18,15 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@react-native/jest-preset": "^0.86.0",
+    "@testing-library/react-native": "^13.3.3",
+    "@types/jest": "^29.5.14",
     "@types/react": "~19.2.2",
+    "axios-mock-adapter": "^1.22.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~56.0.4",
+    "jest": "^29.7.0",
+    "jest-expo": "~56.0.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -29,6 +35,21 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "jest --watchAll=false",
+    "test:ci": "jest --ci --coverage"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "setupFilesAfterEnv": [
+      "<rootDir>/jest.setup.ts"
+    ],
+    "moduleNameMapper": {
+      "^@waylo/shared$": "<rootDir>/../shared/src/index.ts"
+    },
+    "testRegex": ".*\\.test\\.(ts|tsx)$",
+    "transformIgnorePatterns": [
+      "node_modules/(?!((jest-)?react-native|@react-native(-community)?|expo(nent)?|@expo(nent)?/(?!modules-core)|@expo-google-fonts|react-navigation|@react-navigation/.*|@unimodules|unimodules|react-native-svg|zustand))"
+    ]
   }
 }
