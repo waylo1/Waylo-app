@@ -25,6 +25,7 @@ enum KycStatus {
 
 enum MissionStatus {
   CREATED
+  ACTIVE  // voyageur assigné (CREATED → ACTIVE via POST /missions/:id/assign, sans escrow)
   FUNDED // escrow en place : PaymentIntent (capture différée) créé, EscrowTransaction HELD
   MATCHED
   IN_PROGRESS
@@ -659,4 +660,14 @@ model ProcessedMissionEvent {
   processedAt DateTime @default(now())
 
   @@unique([alias, missionId])
+}
+
+// Ledger d'idempotence pour l'assignation voyageur (POST /missions/:id/assign).
+// missionId UNIQUE : une seule assignation par mission, jamais réassignable.
+// Pas de FK : résistance aux suppressions, testabilité indépendante.
+model ProcessedAssignmentEvent {
+  id          String   @id @default(cuid())
+  missionId   String   @unique
+  travelerId  String
+  processedAt DateTime @default(now())
 }

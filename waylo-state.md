@@ -36,3 +36,14 @@ logging structuré avant propagation.
 - **Tests :** 371/371 ✅
 
 ---
+
+## MISSION-ASSIGN-01 ✓ — Assignation Mission (Traveler side)
+
+- `prisma/schema.prisma` : `MissionStatus.ACTIVE` + modèle `ProcessedAssignmentEvent` (`missionId @unique`)
+- `prisma/migrations/20260625211449_mission_assign_active/` : `ALTER TYPE ADD VALUE 'ACTIVE'` + `CREATE TABLE ProcessedAssignmentEvent`
+- `src/missions/routes/assign.route.ts` : `POST /:id/assign` — pré-lecture 404/403, check idempotent pre-tx (même travelerId → 200), `prisma.$transaction(updateMany + create)` atomique, 409 si count=0
+- `src/missions/routes/index.ts` : enregistrement `assignRoutes`
+- `src/missions/mission.test.ts` : +6 tests (succès, idempotent séquentiel, concurrence 1×200+1×409, 404, 403, autre voyageur → 409)
+- **Tests :** 377/377 ✅
+
+---
