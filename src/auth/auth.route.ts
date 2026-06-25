@@ -5,6 +5,7 @@ import { Prisma } from '../generated/prisma'
 import { isRateLimited, maskIp } from '../rate-limit'
 import { clearAuthCookie, serializeAuthCookie } from './cookie'
 import { AppError } from '../errors/app.error'
+import { requestMagicLink, verifyMagicLink, noopTransport } from './auth.service'
 // SSOT : forme du corps login/register partagée avec le mobile (@waylo/shared).
 import type { LoginRequest } from '@waylo/shared'
 
@@ -30,6 +31,7 @@ const authRateLimit =
  */
 
 const TOKEN_TTL = '12h'
+const MAGIC_LINK_JWT_TTL = '24h'
 const PASSWORD_MIN_LENGTH = 8
 // Volontairement permissif (présence de @ et d'un point dans le domaine) :
 // la vraie preuve de validité sera la vérification d'adresse, pas la regex.
@@ -55,6 +57,25 @@ const loginBodySchema = {
   properties: {
     email: { type: 'string', maxLength: 254 },
     password: { type: 'string', maxLength: 128 },
+  },
+} as const
+
+const requestLinkBodySchema = {
+  type: 'object',
+  required: ['email'],
+  additionalProperties: false,
+  properties: {
+    email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
+  },
+} as const
+
+const verifyBodySchema = {
+  type: 'object',
+  required: ['email', 'token'],
+  additionalProperties: false,
+  properties: {
+    email: { type: 'string', maxLength: 254 },
+    token: { type: 'string', minLength: 6, maxLength: 6, pattern: '^[0-9]{6}$' },
   },
 } as const
 
@@ -111,6 +132,21 @@ const authRoute: FastifyPluginAsync = async app => {
   // nettoyer une session même expirée).
   app.post('/logout', async (_req, reply) => {
     return reply.header('set-cookie', clearAuthCookie()).code(200).send({ ok: true })
+  })
+
+  // POST /auth/request-link — envoie un code 6 chiffres par email (MVP : no-op transport).
+  app.post('/request-link', { schema: { body: requestLinkBodySchema }, preHandler: authRateLimit('request-link') }, async (req, reply) => {
+    const { email } = req.body as { email: string }
+    await requestMagicLink(email.toLowerCase(), noopTransport)
+    return reply.code(200).send({ ok: true })
+  })
+
+  // POST /auth/verify — valide le code et émet un JWT 24 h.
+  app.post('/verify', { schema: { body: verifyBodySchema }, preHandler: authRateLimit('verify') }, async (req, reply) => {
+    const { email, token } = req.body as { email: string; token: string }
+    const userId = await verifyMagicLink(email.toLowerCase(), token)
+    const jwtToken = app.jwt.sign({ sub: userId }, { expiresIn: MAGIC_LINK_JWT_TTL })
+    return reply.header('set-cookie', serializeAuthCookie(jwtToken)).code(200).send({ token: jwtToken })
   })
 
   // Route protégée : valide le middleware ET sert au frontend. Relit la DB :

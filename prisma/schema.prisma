@@ -195,6 +195,17 @@ model User {
   penalties          Penalty[] // pénalités d'instruction (contestation abusive) facturées à cet utilisateur
 }
 
+model MagicLink {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  token     String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
 model Mission {
   id              String        @id @default(cuid())
   buyerId         String

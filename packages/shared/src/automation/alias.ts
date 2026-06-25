@@ -162,4 +162,12 @@ export function registerBuiltinAliases(): void {
     timeoutMs: 20_000,
     exponentialFactor: 2,
   })
+  // Envoi de magic link (email) — 2 re-essais, backoff 1 s, timeout 10 s.
+  registerAlias({
+    name: 'email-send',
+    maxRetries: 2,
+    backoffMs: 1_000,
+    timeoutMs: 10_000,
+    exponentialFactor: 2,
+  })
 }
