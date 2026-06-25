@@ -14,27 +14,34 @@ export class ApiError extends Error {
   readonly code: string;
   /** Statut HTTP si la requête a abouti, sinon 0 (pas de réponse). */
   readonly status: number;
+  /**
+   * Contexte métier structuré joint par le backend sous `details` (cf. `setErrorHandler`).
+   * Ex. 409 `VERSION_CONFLICT` → `{ currentVersion, expectedVersion }`. JAMAIS de secret
+   * (le backend n'y met que du contexte métier) : `console.log(err)` reste sûr.
+   */
+  readonly details?: unknown;
 
-  constructor(code: string, status: number, message?: string) {
+  constructor(code: string, status: number, details?: unknown, message?: string) {
     super(message ?? code);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
 /**
  * Convertit une `AxiosError` en `ApiError` en EXTRAYANT le code métier du body
- * (`{ error: '...' }`) quand il est présent, sans logger token/URL/Authorization.
+ * (`{ error: '...', details? }`) quand il est présent, sans logger token/URL/Authorization.
  */
 export function normalizeAxiosError(err: AxiosError): ApiError {
   if (err.response !== undefined) {
-    const body = err.response.data as { error?: unknown } | undefined;
+    const body = err.response.data as { error?: unknown; details?: unknown } | undefined;
     const code =
       typeof body?.error === 'string' && body.error.length > 0
         ? body.error
         : `HTTP_${err.response.status}`;
-    return new ApiError(code, err.response.status);
+    return new ApiError(code, err.response.status, body?.details);
   }
   // Pas de réponse : panne réseau / timeout / DNS / serveur down.
   return new ApiError('NETWORK_ERROR', 0);
