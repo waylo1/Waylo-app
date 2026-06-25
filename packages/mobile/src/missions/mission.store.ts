@@ -49,10 +49,8 @@ function nextMutationId(at: number): MutationId {
   return `mut_${at}_${mutationCounter}` as MutationId;
 }
 
-let tempMissionCounter = 0;
-function nextTempMissionId(at: number): MissionId {
-  tempMissionCounter += 1;
-  return `tmp_${at}_${tempMissionCounter}` as MissionId;
+function nextTempMissionId(): MissionId {
+  return `tmp_${crypto.randomUUID()}` as MissionId;
 }
 
 /**
@@ -224,7 +222,7 @@ export const useMissionStore = create<MissionSlice>((set, get) => ({
   // ── Création optimiste ─────────────────────────────────────────────────────
 
   addOptimisticCreate: (mission, at) => {
-    const tempId = nextTempMissionId(at);
+    const tempId = nextTempMissionId();
     const tempMission: MissionDTO = { ...mission, id: tempId };
     const entity: MissionEntity = {
       data: tempMission,
