@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  *  (6) claim perdu (FOR UPDATE SKIP LOCKED — concurrent) → loop s'arrête proprement.
  */
 
-const { mockPrisma, mockCapture, mockQueryRaw } = vi.hoisted(() => {
+const { mockPrisma, mockCapture, mockQueryRaw, mockRunAlias } = vi.hoisted(() => {
   const mockQueryRaw = vi.fn()
   const mockPrisma = {
     $transaction: vi.fn(),
@@ -20,7 +20,11 @@ const { mockPrisma, mockCapture, mockQueryRaw } = vi.hoisted(() => {
     mission: { findUnique: vi.fn() },
   }
   const mockCapture = vi.fn()
-  return { mockPrisma, mockCapture, mockQueryRaw }
+  // runAlias passthrough : appelle fn(undefined) sans retry, sans délai.
+  const mockRunAlias = vi.fn().mockImplementation(
+    async (_name: string, fn: () => Promise<unknown>) => fn(),
+  )
+  return { mockPrisma, mockCapture, mockQueryRaw, mockRunAlias }
 })
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
@@ -28,6 +32,17 @@ vi.mock('../services/escrowService', () => ({
   captureEscrowFunds: mockCapture,
   EscrowCaptureError: class EscrowCaptureError extends Error {
     constructor(readonly code: string) { super(code); this.name = 'EscrowCaptureError' }
+  },
+}))
+vi.mock('@waylo/shared/automation', () => ({
+  runAlias: mockRunAlias,
+  WatchdogExhaustedError: class WatchdogExhaustedError extends Error {
+    readonly cause: unknown
+    constructor(msg: string, _attempts: number, cause: unknown) {
+      super(msg)
+      this.cause = cause
+      this.name = 'WatchdogExhaustedError'
+    }
   },
 }))
 
@@ -69,7 +84,13 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
 
     // Claim : transaction avec FOR UPDATE SKIP LOCKED + update attempts
     expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1)
-    // captureEscrowFunds appelé avec missionId + stripe (hors transaction)
+    // runAlias 'stripe-capture' utilisé avec idempotencyKey = missionId (traçabilité).
+    expect(mockRunAlias).toHaveBeenCalledWith(
+      'stripe-capture',
+      expect.any(Function),
+      expect.objectContaining({ idempotencyKey: 'm1' }),
+    )
+    // captureEscrowFunds appelé avec missionId + stripe via passthrough runAlias
     expect(mockCapture).toHaveBeenCalledWith('m1', fakeStripe)
     // Verdict SETTLED dans un update hors transaction
     expect(mockPrisma.outboxEvent.update).toHaveBeenCalledWith(

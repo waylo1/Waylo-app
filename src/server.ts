@@ -15,6 +15,7 @@ import { startDisputeResolutionWorkerLoop } from './workers/disputeResolutionWor
 import { startDisputePenaltyWorkerLoop } from './workers/disputePenaltyWorker'
 import { startWorkerHealthLoop } from './monitoring/workerHealth'
 import { AnthropicVisionClient } from './services/visionClient'
+import { registerBuiltinAliases } from '@waylo/shared/automation'
 
 /**
  * Point d'entrée serveur Waylo — MVP monoprocess : trois composants démarrés
@@ -133,6 +134,8 @@ function intFromEnv(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
+  registerBuiltinAliases()
+
   const missing = missingRequiredEnv()
   if (missing.length > 0) {
     console.error(
