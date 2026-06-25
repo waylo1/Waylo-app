@@ -170,4 +170,12 @@ export function registerBuiltinAliases(): void {
     timeoutMs: 10_000,
     exponentialFactor: 2,
   })
+  // Notification de voyageurs à la création d'une mission — 3 re-essais, backoff léger.
+  registerAlias({
+    name: 'mission-created',
+    maxRetries: 3,
+    backoffMs: 200,
+    timeoutMs: 30_000,
+    exponentialFactor: 2,
+  })
 }

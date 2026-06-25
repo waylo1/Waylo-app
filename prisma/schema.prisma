@@ -43,6 +43,7 @@ enum MissionStatus {
   EXPIRED // « ghost mission » : CREATED jamais financée et expiresAt dépassé — clôturée par le worker mission-lifecycle (aucun escrow, aucun argent en jeu)
   AWAITING_CONFIRMATION // colis livré : en attente de la confirmation de réception de l'acheteur (preuve de livraison). Gèle la suppression de compte des parties (userService.deleteAccount).
   COMPLETED_BY_BUYER // acheteur a confirmé la réception (deliveryProof vérifié) : déclenche le paiement voyageur via OutboxEvent READY_FOR_PAYOUT (capture exécutée hors tx par le worker).
+  NOTIFICATION_FAILED // voyageur non notifié après épuisement Watchdog (mission-created) — état non bloquant, résolution async possible.
 }
 
 enum EscrowStatus {
@@ -646,4 +647,16 @@ model RateLimit {
   createdAt DateTime @default(now())
 
   @@index([expiresAt]) // balayage des fenêtres expirées (purge périodique)
+}
+
+// Ledger d'idempotence pour les notifications post-création de mission.
+// PAS de FK vers Mission : indépendance délibérée (testabilité, résistance aux suppressions).
+// Source de vérité permanente — runAlias.idempotencyKey est un label de traçage, pas une dédup.
+model ProcessedMissionEvent {
+  id          String   @id @default(cuid())
+  alias       String
+  missionId   String
+  processedAt DateTime @default(now())
+
+  @@unique([alias, missionId])
 }
