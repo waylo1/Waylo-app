@@ -5,7 +5,7 @@
 // Idempotence : la clé est transmise à `fn` ; la garantie d'unicité est
 // à la charge de la couche business (Prisma conditional update, upsert).
 
-import { automate } from './watchdog'
+import { automate, WatchdogExhaustedError } from './watchdog'
 import type { WatchdogOptions, AttemptLog } from './watchdog'
 
 // ── Types publics ──────────────────────────────────────────────────────────────
@@ -110,10 +110,17 @@ export async function runAlias<T>(
   const config = getAlias(name)
   const { idempotencyKey, onLog } = opts
   const taskId = idempotencyKey !== undefined ? `${name}:${idempotencyKey}` : name
-  return automate(taskId, () => fn(idempotencyKey), {
-    ...config,
-    onLog: onLog ?? config.onLog,
-  })
+  try {
+    return await automate(taskId, () => fn(idempotencyKey), {
+      ...config,
+      onLog: onLog ?? config.onLog,
+    })
+  } catch (err) {
+    if (err instanceof WatchdogExhaustedError) {
+      err.alias = name
+    }
+    throw err
+  }
 }
 
 // ── Templates métier ───────────────────────────────────────────────────────────
@@ -144,6 +151,14 @@ export function registerBuiltinAliases(): void {
     name: 'webhook-retry',
     maxRetries: 4,
     backoffMs: 1_000,
+    timeoutMs: 20_000,
+    exponentialFactor: 2,
+  })
+  // Résolution de litige — délai modéré, 3 re-essais max.
+  registerAlias({
+    name: 'dispute-resolve',
+    maxRetries: 3,
+    backoffMs: 300,
     timeoutMs: 20_000,
     exponentialFactor: 2,
   })

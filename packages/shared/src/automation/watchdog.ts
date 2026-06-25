@@ -2,7 +2,7 @@
 //
 // API publique :
 //   automate(id, fn, opts?) → Promise<T>
-//   WatchdogOptions, AttemptLog
+//   WatchdogOptions, AttemptLog, ExhaustLog
 //   WatchdogExhaustedError, WatchdogTimeoutError
 
 /** Identifiant de timer cross-platform (Node.js NodeJS.Timeout | browser number). */
@@ -32,6 +32,13 @@ export interface AttemptLog {
   readonly error?: string
 }
 
+/** Log léger d'une tentative échouée, collecté dans WatchdogExhaustedError.attemptLogs. */
+export interface ExhaustLog {
+  readonly attempt: number
+  readonly error: string
+  readonly timestamp: number
+}
+
 // ── Erreurs ────────────────────────────────────────────────────────────────────
 
 export class WatchdogTimeoutError extends Error {
@@ -43,10 +50,27 @@ export class WatchdogTimeoutError extends Error {
 
 export class WatchdogExhaustedError extends Error {
   override readonly cause: unknown
-  constructor(id: string, totalAttempts: number, cause: unknown) {
+  /** Alias métier — renseigné par runAlias() après construction. */
+  alias: string = ''
+  /** Nombre total de tentatives effectuées (maxRetries + 1). */
+  readonly attempts: number
+  /** Dernière erreur (alias de cause). */
+  readonly lastError: unknown
+  /** Journal structuré de toutes les tentatives échouées. */
+  readonly attemptLogs: readonly ExhaustLog[]
+
+  constructor(
+    id: string,
+    totalAttempts: number,
+    cause: unknown,
+    attemptLogs: readonly ExhaustLog[],
+  ) {
     super(`[watchdog:${id}] exhausted after ${totalAttempts} attempt(s)`)
     this.name = 'WatchdogExhaustedError'
     this.cause = cause
+    this.lastError = cause
+    this.attempts = totalAttempts
+    this.attemptLogs = attemptLogs
   }
 }
 
@@ -81,7 +105,7 @@ function raceWithTimeout<T>(promise: Promise<T>, ms: number, id: string): Promis
  * - Chaque tentative individuelle est bornée à `timeoutMs` ms.
  * - `onLog` reçoit un log structuré (JSON) après chaque tentative.
  * - Lève `WatchdogExhaustedError` si toutes les tentatives échouent,
- *   avec `cause` = dernière erreur pour diagnostic.
+ *   avec `cause` = dernière erreur et `attemptLogs` = journal complet.
  */
 export async function automate<T>(
   id: string,
@@ -98,6 +122,7 @@ export async function automate<T>(
 
   const totalAttempts = maxRetries + 1
   let lastError: unknown
+  const exhaustLogs: ExhaustLog[] = []
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     const start = Date.now()
@@ -115,6 +140,7 @@ export async function automate<T>(
       const durationMs = Date.now() - start
       const error = err instanceof Error ? err.message : String(err)
       lastError = err
+      exhaustLogs.push({ attempt, error, timestamp: Date.now() })
 
       if (attempt < totalAttempts) {
         onLog?.({ event: 'attempt_failure', id, attempt, maxRetries, durationMs, error })
@@ -126,5 +152,5 @@ export async function automate<T>(
     }
   }
 
-  throw new WatchdogExhaustedError(id, totalAttempts, lastError)
+  throw new WatchdogExhaustedError(id, totalAttempts, lastError, exhaustLogs)
 }

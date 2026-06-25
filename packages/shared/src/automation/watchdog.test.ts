@@ -4,7 +4,8 @@ import {
   WatchdogExhaustedError,
   WatchdogTimeoutError,
 } from './watchdog'
-import type { AttemptLog } from './watchdog'
+import { clearRegistry, registerBuiltinAliases, runAlias } from './alias'
+import type { AttemptLog, ExhaustLog } from './watchdog'
 
 describe('automate — watchdog retry + timeout', () => {
   beforeEach(() => {
@@ -131,5 +132,76 @@ describe('automate — watchdog retry + timeout', () => {
     expect(callTimes[1]! - callTimes[0]!).toBeGreaterThanOrEqual(100)
     expect(callTimes[2]! - callTimes[1]!).toBeGreaterThanOrEqual(200)
     expect(callTimes[3]! - callTimes[2]!).toBeGreaterThanOrEqual(400)
+  })
+
+  // ── Champs enrichis de WatchdogExhaustedError ─────────────────────────────
+
+  it('WatchdogExhaustedError expose attempts = totalAttempts', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('fail'))
+    const err = await automate('test-attempts', fn, { maxRetries: 0 }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(WatchdogExhaustedError)
+    expect((err as WatchdogExhaustedError).attempts).toBe(1)
+  })
+
+  it('WatchdogExhaustedError expose lastError = dernière erreur', async () => {
+    const original = new Error('root-cause')
+    const fn = vi.fn().mockRejectedValue(original)
+    const err = await automate('test-last-error', fn, { maxRetries: 0 }).catch((e: unknown) => e)
+    expect((err as WatchdogExhaustedError).lastError).toBe(original)
+  })
+
+  it('WatchdogExhaustedError.attemptLogs contient une entrée par tentative échouée', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('each-fail'))
+    const promise = automate('test-logs-arr', fn, { maxRetries: 2, backoffMs: 10 })
+    const expectation = expect(promise).rejects.toBeInstanceOf(WatchdogExhaustedError)
+    await vi.runAllTimersAsync()
+    const err = await promise.catch((e: unknown) => e) as WatchdogExhaustedError
+    await expectation
+
+    expect(err.attemptLogs).toHaveLength(3)
+    for (const log of err.attemptLogs) {
+      expect(log).toMatchObject<Partial<ExhaustLog>>({
+        attempt: expect.any(Number),
+        error: expect.any(String),
+        timestamp: expect.any(Number),
+      })
+    }
+    expect(err.attemptLogs.map(l => l.attempt)).toEqual([1, 2, 3])
+  })
+})
+
+describe('runAlias — WatchdogExhaustedError.alias', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    clearRegistry()
+    registerBuiltinAliases()
+  })
+  afterEach(() => {
+    clearRegistry()
+    vi.useRealTimers()
+  })
+
+  it('Watchdog exhaustion — alias, attempts, lastError, attemptLogs corrects', async () => {
+    // stripe-capture a maxRetries=3 → 4 tentatives totales.
+    const fn = vi.fn().mockRejectedValue(new Error('simulated-failure'))
+
+    const promise = runAlias('stripe-capture', fn, { idempotencyKey: 'capture:test-mission-id' })
+    const caught = promise.catch((e: unknown) => e)
+    await vi.runAllTimersAsync()
+    const err = await caught as WatchdogExhaustedError
+
+    expect(err).toBeInstanceOf(WatchdogExhaustedError)
+    expect(err.alias).toBe('stripe-capture')
+    expect(err.attempts).toBe(4)
+    expect((err.lastError as Error).message).toBe('simulated-failure')
+    expect(err.attemptLogs).toHaveLength(4)
+    for (const log of err.attemptLogs) {
+      expect(log).toMatchObject<Partial<ExhaustLog>>({
+        attempt: expect.any(Number),
+        error: expect.any(String),
+        timestamp: expect.any(Number),
+      })
+    }
+    expect(fn).toHaveBeenCalledTimes(4)
   })
 })

@@ -14,7 +14,7 @@ export {
   WatchdogTimeoutError,
   WatchdogExhaustedError,
 } from './watchdog'
-export type { WatchdogOptions, AttemptLog } from './watchdog'
+export type { WatchdogOptions, AttemptLog, ExhaustLog } from './watchdog'
 
 export {
   registerAlias,
