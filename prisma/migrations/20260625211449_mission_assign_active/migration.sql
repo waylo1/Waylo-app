@@ -1,3 +1,8 @@
+-- WARNING: ALTER TYPE ADD VALUE n'est pas transactionnel en PostgreSQL < 12 et ne peut pas
+-- être utilisé dans la même transaction que des INSERT/UPDATE référençant la valeur ajoutée.
+-- Ne jamais enchaîner ADD VALUE + INSERT/UPDATE utilisant cette valeur dans un même fichier
+-- de migration : séparer en deux migrations distinctes si un backfill est nécessaire.
+
 -- AlterEnum
 ALTER TYPE "MissionStatus" ADD VALUE 'ACTIVE';
 

@@ -47,6 +47,7 @@ Tu es son architecte senior et exécutant technique. Stack décidée, ne propose
 - TypeScript `strict: true`, zéro `any`. Enums TS = miroir exact des enums Prisma.
 - Routes protégées JWT sauf `/health`. Erreurs : `{ error: 'SNAKE_CASE_CODE' }`.
 - Images : sha256 obligatoire (reçus scellés uniquement).
+- Migrations enum : `ALTER TYPE ADD VALUE` ne peut jamais être suivi d'un `INSERT`/`UPDATE` utilisant la valeur dans le même fichier de migration — séparer en deux migrations distinctes si un backfill est nécessaire.
 
 ---
 

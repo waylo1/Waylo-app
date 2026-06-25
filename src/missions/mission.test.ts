@@ -113,6 +113,10 @@ describe('[MISSION-ASSIGN-01] POST /missions/:id/assign', () => {
   })
 
   it('concurrence : Promise.all → exactement 1×200 et 1×409', async () => {
+    // MOTEUR : PostgreSQL local (localhost:5433/waylo_test) — row-level lock réel.
+    // Le guard est le WHERE status='CREATED' de l'updateMany : sans cette clause,
+    // les deux requêtes obtiendraient count=1 et retourneraient 2×200 (vérifié
+    // manuellement : retirer le WHERE → 2×200, le remettre → 1×200+1×409).
     const mission = await makeMission()
     const [r1, r2] = await Promise.all([
       assign(mission.id, travelerToken),
@@ -120,6 +124,15 @@ describe('[MISSION-ASSIGN-01] POST /missions/:id/assign', () => {
     ])
     const codes = [r1.statusCode, r2.statusCode].sort((a, b) => a - b)
     expect(codes).toEqual([200, 409])
+
+    // Invariant post-race : une seule écriture a réussi — état DB cohérent.
+    const events = await prisma.processedAssignmentEvent.findMany({
+      where: { missionId: mission.id },
+    })
+    expect(events).toHaveLength(1)
+    const updated = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(updated.status).toBe(MissionStatus.ACTIVE)
+    expect(updated.travelerId).toBe(traveler.id)
   })
 
   it('404 : mission inexistante', async () => {

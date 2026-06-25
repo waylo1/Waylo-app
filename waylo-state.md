@@ -46,4 +46,13 @@ logging structuré avant propagation.
 - `src/missions/mission.test.ts` : +6 tests (succès, idempotent séquentiel, concurrence 1×200+1×409, 404, 403, autre voyageur → 409)
 - **Tests :** 377/377 ✅
 
+## MISSION-ASSIGN-01-LOCK ✓ — Race test on real Postgres + post-race invariant, enum migration guard
+
+- **Moteur test concurrence : PostgreSQL local (localhost:5433/waylo_test) — CAS A.**
+- Invariant post-race ajouté au test de concurrence : `processedAssignmentEvent.count===1`, `mission.status===ACTIVE`, `mission.travelerId===gagnant`.
+- [GATE-3] vérifié manuellement : retirer `WHERE status='CREATED'` → 2 tests cassés (2×200 au lieu de 1×200+1×409) ; WHERE remis → 377/377 ✅. Le lock Postgres est le seul garde-fou, pas Node.
+- `migration.sql` : commentaire `ADD VALUE` anti-backfill dans même fichier.
+- `CLAUDE.md` : règle enum migration ajoutée dans Conventions critiques.
+- **Tests :** 377/377 ✅
+
 ---
