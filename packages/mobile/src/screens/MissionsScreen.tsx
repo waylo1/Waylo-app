@@ -9,7 +9,7 @@
 //
 // Props piloté par le store — découplé de la logique de fetch.
 
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { MissionDTO } from '@waylo/shared';
 import { EmptyState } from '../components/states/EmptyState';
 import { ErrorState } from '../components/states/ErrorState';
@@ -26,8 +26,15 @@ export interface MissionsScreenProps {
   readonly error: string | null;
   /** Callback pour créer une mission (routes vers CreateMissionScreen). */
   readonly onCreatePress: () => void;
-  /** Callback pour réessayer le chargement. */
+  /** Callback pour réessayer le chargement (bouton Réessayer + pull-to-refresh). */
   readonly onRetry: () => void;
+  /**
+   * `true` pendant un pull-to-refresh (SÉPARÉ de `isLoadingInitial`).
+   * Affiche le spinner natif sur le ScrollView, jamais les skeletons.
+   */
+  readonly isRefreshing: boolean;
+  /** Handler fourni à `RefreshControl` — idempotent si déjà en cours. */
+  readonly onRefresh: () => void;
 }
 
 // -- Composant ---------------------------------------------------------------
@@ -38,25 +45,46 @@ export default function MissionsScreen({
   error,
   onCreatePress,
   onRetry,
+  isRefreshing,
+  onRefresh,
 }: MissionsScreenProps) {
-  // Loading initial : affiche les skeletons
+  // Loading initial : affiche les skeletons (jamais de spinner PTR ici).
   if (isLoadingInitial) {
     return <LoadingState count={4} />;
   }
 
-  // Erreur sans cache : affiche le message d'erreur + bouton réessayer
+  const refreshControl = (
+    <RefreshControl
+      refreshing={isRefreshing}
+      onRefresh={onRefresh}
+      tintColor="#007AFF"
+      colors={['#007AFF']}
+    />
+  );
+
+  // Erreur sans cache : affiche le message d'erreur + bouton réessayer.
+  // PTR disponible pour retenter sans passer par le bouton.
   if (error !== null && missions.length === 0) {
-    return <ErrorState errorMessage={error} onRetry={onRetry} />;
+    return (
+      <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
+        <ErrorState errorMessage={error} onRetry={onRetry} />
+      </ScrollView>
+    );
   }
 
-  // Vide (fetch réussi, 0 missions) : affiche le CTA
+  // Vide (fetch réussi, 0 missions) : affiche le CTA.
+  // PTR disponible pour vérifier s'il y a de nouvelles missions.
   if (missions.length === 0) {
-    return <EmptyState onCreatePress={onCreatePress} />;
+    return (
+      <ScrollView contentContainerStyle={styles.fillContainer} refreshControl={refreshControl}>
+        <EmptyState onCreatePress={onCreatePress} />
+      </ScrollView>
+    );
   }
 
-  // Données : affiche la liste
+  // Données : liste complète avec PTR (spinner natif, données actuelles visibles).
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView contentContainerStyle={styles.container} refreshControl={refreshControl}>
       {missions.map(mission => (
         <MissionCard key={mission.id} mission={mission} />
       ))}
@@ -89,6 +117,9 @@ function MissionCard({ mission }: { mission: MissionDTO }) {
 const styles = StyleSheet.create({
   container: {
     padding: 16,
+  },
+  fillContainer: {
+    flexGrow: 1,
   },
   card: {
     backgroundColor: '#fff',
