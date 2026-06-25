@@ -19,6 +19,13 @@ test("connexion → cookie HttpOnly persistant, jeton inaccessible au JS", async
   // Redirection post-auth vers le catalogue des missions.
   await page.waitForURL("**/missions");
 
+  // Attente explicite : le contenu de la page missions est rendu (loading terminé).
+  // Un nouvel utilisateur voit l'état vide ; les missions existantes affichent
+  // des cartes avec data-testid="mission-card".
+  await expect(
+    page.getByTestId("missions-empty").or(page.getByTestId("mission-card")),
+  ).toBeVisible();
+
   // Le cookie d'auth est posé : HttpOnly + SameSite=Strict.
   const auth = (await context.cookies()).find(c => c.name === "waylo_token");
   expect(auth, "cookie waylo_token présent").toBeTruthy();

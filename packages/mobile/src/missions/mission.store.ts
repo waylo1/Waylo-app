@@ -10,6 +10,7 @@
 // - cache présent → missions + lastSyncedAt, isLoadingInitial=false (affichage immédiat)
 // - cache absent → missions=[], lastSyncedAt=null, isLoadingInitial=false
 
+import { useEffect } from 'react';
 import { create } from 'zustand';
 import type { MissionStore } from './mission.store.types';
 import { readMissionsCache, writeMissionsCache } from './missions-secure-store';
@@ -48,3 +49,15 @@ export const useMissionStore = create<MissionStore>((set) => ({
   setLoadingInitial: (loading) => set({ isLoadingInitial: loading }),
   setError: (error) => set({ error }),
 }));
+
+/**
+ * Monte la lecture SecureStore dans le cycle React (useEffect) — garantit que
+ * l'I/O asynchrone n'est jamais déclenché hors du cycle de vie des composants.
+ * À appeler UNE FOIS dans App.tsx (ou le root navigator) après l'auth hydration.
+ */
+export function useMissionHydration(): void {
+  const hydrate = useMissionStore((s) => s.hydrate);
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+}

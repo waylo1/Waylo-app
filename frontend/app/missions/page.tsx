@@ -70,15 +70,15 @@ function FundedMissions() {
 
       {error && <p className="text-sm text-destructive">{error}</p>}
       {!missions ? (
-        <p className="text-sm text-muted-foreground">Chargement…</p>
+        <p className="text-sm text-muted-foreground" data-testid="missions-loading">Chargement…</p>
       ) : missions.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground" data-testid="missions-empty">
           Aucune mission ne correspond.
         </p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {missions.map(mission => (
-            <Card key={mission.id}>
+            <Card key={mission.id} data-testid="mission-card">
               <CardHeader>
                 <CardTitle className="truncate">
                   {mission.targetProduct}
