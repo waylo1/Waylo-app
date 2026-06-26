@@ -5,6 +5,7 @@ import { findMissionForParticipant } from '../mission-access'
 import { missionIdParamsSchema, availableQuerySchema } from '../mission-common'
 import { AppError } from '../../errors/app.error'
 import { triggerMissionCreatedNotification } from '../mission.service'
+import { mapToPublicMissionDTO, PublicMissionDTO } from './mission.dto'
 
 export const crudRoutes: FastifyPluginAsync = async app => {
   // POST /api/missions — l'utilisateur courant devient l'acheteur.
@@ -33,14 +34,15 @@ export const crudRoutes: FastifyPluginAsync = async app => {
     return reply.code(201).send(mission)
   })
 
-  // GET /api/missions — mes missions
+  // GET /api/missions — mes missions (sérialisation via whitelist DTO, privacy-first)
   app.get('/', async (req, reply) => {
     const userId = req.user.sub
     const missions = await prisma.mission.findMany({
       where: { OR: [{ buyerId: userId }, { travelerId: userId }] },
       orderBy: { createdAt: 'desc' },
     })
-    return reply.code(200).send(missions)
+    const body: PublicMissionDTO[] = missions.map(mapToPublicMissionDTO)
+    return reply.code(200).send(body)
   })
 
   // GET /api/missions/available — vitrine pour voyageur
