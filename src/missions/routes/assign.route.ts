@@ -3,6 +3,7 @@ import { MissionStatus } from '../../generated/prisma'
 import { prisma } from '../../db'
 import { missionIdParamsSchema } from '../mission-common'
 import { AppError } from '../../errors/app.error'
+import { notifyActor } from '../../notifications/notification.service'
 
 export const assignRoutes: FastifyPluginAsync = async app => {
   // POST /api/missions/:id/assign — voyageur s'assigne une mission CREATED → ACTIVE
@@ -36,6 +37,14 @@ export const assignRoutes: FastifyPluginAsync = async app => {
         data: { missionId, travelerId },
       })
     })
+
+    // Fire-and-forget post-commit — échec non bloquant, jamais dans la tx
+    notifyActor(
+      'notif:mission-matched',
+      missionId,
+      mission.buyerId,
+      { event: 'notif:mission-matched', missionId, targetProduct: mission.targetProduct, destination: mission.destination },
+    ).catch(err => console.error({ err, missionId }, '[notif] mission-matched failed'))
 
     return reply.code(200).send({ status: MissionStatus.ACTIVE })
   })
