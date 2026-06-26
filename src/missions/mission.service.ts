@@ -2,6 +2,78 @@ import { Prisma, MissionStatus } from '../generated/prisma'
 import { prisma } from '../db'
 import { runAlias, WatchdogExhaustedError } from '@waylo/shared/automation'
 
+export interface PublicMissionDTO {
+  id: string
+  status: MissionStatus
+  targetProduct: string
+  budgetCents: number
+  commissionCents: number
+  origin: string
+  destination: string
+  travelerId: string
+  trackingReference: string | null
+  expiresAt: Date
+  createdAt: Date
+  updatedAt: Date
+}
+
+type MissionRow = {
+  id: string
+  status: MissionStatus
+  targetProduct: string
+  budgetCents: number
+  commissionCents: number
+  origin: string
+  destination: string
+  travelerId: string | null
+  trackingReference: string | null
+  expiresAt: Date
+  createdAt: Date
+  updatedAt: Date
+}
+
+function toPublicMissionDTO(m: MissionRow): PublicMissionDTO {
+  if (!m.travelerId) throw new Error(`INVARIANT: travelerId null on traveler-scoped mission ${m.id}`)
+  return {
+    id: m.id,
+    status: m.status,
+    targetProduct: m.targetProduct,
+    budgetCents: m.budgetCents,
+    commissionCents: m.commissionCents,
+    origin: m.origin,
+    destination: m.destination,
+    travelerId: m.travelerId,
+    trackingReference: m.trackingReference,
+    expiresAt: m.expiresAt,
+    createdAt: m.createdAt,
+    updatedAt: m.updatedAt,
+  }
+}
+
+export async function findMissionsForTraveler(travelerId: string): Promise<PublicMissionDTO[]> {
+  const missions = await prisma.mission.findMany({
+    where: {
+      travelerId,
+      status: { in: [MissionStatus.ACTIVE, MissionStatus.COMPLETED_BY_BUYER] },
+    },
+    select: {
+      id: true,
+      status: true,
+      targetProduct: true,
+      budgetCents: true,
+      commissionCents: true,
+      origin: true,
+      destination: true,
+      travelerId: true,
+      trackingReference: true,
+      expiresAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  })
+  return missions.map(toPublicMissionDTO)
+}
+
 export type NotifyFn = (missionId: string) => Promise<void>
 
 export async function notifyMatchingTravelers(missionId: string): Promise<void> {

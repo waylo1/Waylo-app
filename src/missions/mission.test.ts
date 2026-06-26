@@ -162,6 +162,102 @@ describe('[MISSION-ASSIGN-01] POST /missions/:id/assign', () => {
 })
 
 // ---------------------------------------------------------------------------
+// [MISSION-02] GET /api/missions/my-missions — dashboard voyageur
+// ---------------------------------------------------------------------------
+
+describe('[MISSION-02] GET /missions/my-missions', () => {
+  let app: FastifyInstance
+  let prisma: PrismaClient
+  let buyer: User
+
+  const fakeStripe: PaymentIntentClient = {
+    paymentIntents: {
+      create: async () => ({ id: 'pi_fake', client_secret: 'secret' }),
+      capture: async (id) => ({ id }),
+    },
+  }
+
+  const makeToken = (userId: string) => app.jwt.sign({ sub: userId })
+
+  const createMission = async (travelerId: string, status: MissionStatus) =>
+    prisma.mission.create({
+      data: {
+        buyerId: buyer.id,
+        travelerId,
+        status,
+        targetProduct: 'Dashboard test product',
+        budgetCents: 5_000,
+        commissionCents: 500,
+        origin: 'Paris',
+        destination: 'Tokyo',
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      },
+    })
+
+  const getMyMissions = (token: string) =>
+    app.inject({
+      method: 'GET',
+      url: '/api/missions/my-missions',
+      headers: { authorization: `Bearer ${token}` },
+    })
+
+  beforeAll(async () => {
+    prisma = (await import('../db')).prisma
+    app = await (await import('../app')).buildApp({ stripe: fakeStripe })
+    await resetDb(prisma)
+    buyer = await prisma.user.create({ data: { email: 'dashboard-buyer@test.waylo' } })
+  })
+
+  afterAll(async () => {
+    await app.close()
+  })
+
+  it('succès : 2 missions retournées (1 ACTIVE + 1 COMPLETED_BY_BUYER)', async () => {
+    const traveler = await prisma.user.create({ data: { email: 'dash-success@test.waylo' } })
+    const m1 = await createMission(traveler.id, MissionStatus.ACTIVE)
+    const m2 = await createMission(traveler.id, MissionStatus.COMPLETED_BY_BUYER)
+
+    const res = await getMyMissions(makeToken(traveler.id))
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as Array<{ id: string; status: string }>
+    const ids = body.map(m => m.id)
+    expect(body).toHaveLength(2)
+    expect(ids).toContain(m1.id)
+    expect(ids).toContain(m2.id)
+  })
+
+  it('isolement : voyageur A ne voit aucune mission du voyageur B', async () => {
+    const travelerA = await prisma.user.create({ data: { email: 'dash-iso-a@test.waylo' } })
+    const travelerB = await prisma.user.create({ data: { email: 'dash-iso-b@test.waylo' } })
+    const mA = await createMission(travelerA.id, MissionStatus.ACTIVE)
+    const mB = await createMission(travelerB.id, MissionStatus.ACTIVE)
+
+    const res = await getMyMissions(makeToken(travelerA.id))
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as Array<{ id: string; travelerId: string }>
+    const ids = body.map(m => m.id)
+    expect(ids).toContain(mA.id)
+    expect(ids).not.toContain(mB.id)
+    for (const m of body) {
+      expect(m.travelerId).toBe(travelerA.id)
+    }
+  })
+
+  it('filtre statut : mission CREATED exclue des résultats', async () => {
+    const traveler = await prisma.user.create({ data: { email: 'dash-filter@test.waylo' } })
+    const mCreated = await createMission(traveler.id, MissionStatus.CREATED)
+    const mActive = await createMission(traveler.id, MissionStatus.ACTIVE)
+
+    const res = await getMyMissions(makeToken(traveler.id))
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as Array<{ id: string }>
+    const ids = body.map(m => m.id)
+    expect(ids).not.toContain(mCreated.id)
+    expect(ids).toContain(mActive.id)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // [MISSION-01] mission.service — notification lifecycle
 // ---------------------------------------------------------------------------
 
