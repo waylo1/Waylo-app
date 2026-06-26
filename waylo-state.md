@@ -55,4 +55,13 @@ logging structuré avant propagation.
 - `CLAUDE.md` : règle enum migration ajoutée dans Conventions critiques.
 - **Tests :** 377/377 ✅
 
+## MISSION-02 ✓ — Dashboard Voyageur (Lecture Sécurisée)
+
+- `src/missions/mission.service.ts` : `PublicMissionDTO` (whitelist explicite) + `toPublicMissionDTO` (guard `travelerId` non-null) + `findMissionsForTraveler` (filtre Prisma `WHERE travelerId + status IN [ACTIVE, COMPLETED_BY_BUYER]`, `select` défensif)
+- `src/missions/routes/list.route.ts` : `GET /my-missions` — travelerId = `req.user.sub`, retourne `PublicMissionDTO[]`, pas de filtre post-fetch
+- `src/missions/routes/index.ts` : enregistrement `listRoutes` (2 lignes strictement)
+- `src/missions/mission.test.ts` : +3 tests (succès 2 missions, isolement A≠B, filtre CREATED exclu)
+- **Décision DTO** : `COMPLETED` de la spec = `MissionStatus.COMPLETED_BY_BUYER` ; `select` Prisma = défense en profondeur contre fuite de champs internes
+- **Tests :** 380/380 ✅
+
 ---
