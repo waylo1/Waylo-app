@@ -2,6 +2,7 @@ import type { PrismaClient } from '../generated/prisma'
 import { MissionStatus } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { captureEscrowFunds, EscrowCaptureError } from '../services/escrowService'
+import { runAlias, WatchdogExhaustedError } from '@waylo/shared/automation'
 
 /**
  * Worker de PAYOUT ESCROW (S22) — consomme les OutboxEvent READY_FOR_PAYOUT
@@ -125,9 +126,29 @@ export async function runEscrowPayoutWorkerOnce(
     const startedAt = Date.now()
     try {
       // HORS transaction DB — règle « No Stripe in DB tx ».
-      // idempotencyKey `capture_<missionId>` par défaut dans captureEscrowFunds :
-      // un rejeu (crash entre claim et verdict) appelle le MÊME PI → aucun double débit.
-      const result = await captureEscrowFunds(claimed.missionId, stripe)
+      // runAlias 'stripe-capture' : retry exponentiel (3 essais max, backoff 500ms)
+      // pour les erreurs réseau transitoires. idempotencyKey = missionId → rejeu sûr.
+      const result = await runAlias(
+        'stripe-capture',
+        () => captureEscrowFunds(claimed.missionId, stripe),
+        {
+          idempotencyKey: claimed.missionId,
+          onLog: entry => {
+            if (entry.event === 'attempt_failure') {
+              log.error(
+                {
+                  kind: 'STRIPE_CAPTURE_RETRY',
+                  missionId: claimed.missionId,
+                  attempt: entry.attempt,
+                  maxRetries: entry.maxRetries,
+                  error: entry.error,
+                },
+                `escrow: tentative capture ${entry.attempt}/${entry.maxRetries} échouée — retry watchdog`,
+              )
+            }
+          },
+        },
+      )
       const captureDurationMs = Date.now() - startedAt
 
       // Verdict succès : transaction courte, aucun appel Stripe.
@@ -152,7 +173,9 @@ export async function runEscrowPayoutWorkerOnce(
       settled++
     } catch (err) {
       const captureDurationMs = Date.now() - startedAt
-      const message = err instanceof Error ? err.message : String(err)
+      // Déballer WatchdogExhaustedError pour exposer l'erreur racine dans les logs.
+      const underlying = err instanceof WatchdogExhaustedError ? err.cause : err
+      const message = underlying instanceof Error ? underlying.message : String(underlying)
       // Seuil max atteint → FAILED terminal (hors queue, intervention manuelle).
       // Sous le seuil → PENDING (retry au prochain tick, attempts déjà incrémenté).
       const isTerminal = claimed.attempts >= maxAttempts
@@ -172,7 +195,8 @@ export async function runEscrowPayoutWorkerOnce(
           missionId: claimed.missionId,
           attempt: claimed.attempts,
           maxAttempts,
-          isEscrowError: err instanceof EscrowCaptureError,
+          isEscrowError: underlying instanceof EscrowCaptureError,
+          isExhausted: err instanceof WatchdogExhaustedError,
           captureDurationMs,
           err: message,
         },

@@ -4,6 +4,7 @@ import { prisma } from '../../db'
 import { findMissionForParticipant } from '../mission-access'
 import { missionIdParamsSchema, availableQuerySchema } from '../mission-common'
 import { AppError } from '../../errors/app.error'
+import { triggerMissionCreatedNotification } from '../mission.service'
 
 export const crudRoutes: FastifyPluginAsync = async app => {
   // POST /api/missions — l'utilisateur courant devient l'acheteur.
@@ -25,6 +26,10 @@ export const crudRoutes: FastifyPluginAsync = async app => {
         substitutionAuthorized: body.substitutionAuthorized ?? false,
       },
     })
+    // Fire-and-forget APRÈS commit DB — un échec de notification ne rollback JAMAIS la mission.
+    triggerMissionCreatedNotification(mission.id).catch(err =>
+      req.log.error({ err }, '[mission-created] unexpected error in notification'),
+    )
     return reply.code(201).send(mission)
   })
 

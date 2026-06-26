@@ -25,6 +25,7 @@ enum KycStatus {
 
 enum MissionStatus {
   CREATED
+  ACTIVE  // voyageur assigné (CREATED → ACTIVE via POST /missions/:id/assign, sans escrow)
   FUNDED // escrow en place : PaymentIntent (capture différée) créé, EscrowTransaction HELD
   MATCHED
   IN_PROGRESS
@@ -43,6 +44,7 @@ enum MissionStatus {
   EXPIRED // « ghost mission » : CREATED jamais financée et expiresAt dépassé — clôturée par le worker mission-lifecycle (aucun escrow, aucun argent en jeu)
   AWAITING_CONFIRMATION // colis livré : en attente de la confirmation de réception de l'acheteur (preuve de livraison). Gèle la suppression de compte des parties (userService.deleteAccount).
   COMPLETED_BY_BUYER // acheteur a confirmé la réception (deliveryProof vérifié) : déclenche le paiement voyageur via OutboxEvent READY_FOR_PAYOUT (capture exécutée hors tx par le worker).
+  NOTIFICATION_FAILED // voyageur non notifié après épuisement Watchdog (mission-created) — état non bloquant, résolution async possible.
 }
 
 enum EscrowStatus {
@@ -193,6 +195,17 @@ model User {
   receiptExtractions ReceiptExtractionOutbox[] // reçus déposés par ce voyageur, en file d'extraction OCR (S21)
   disputesOpened     Dispute[] // litiges ouverts par cet utilisateur (DisputeService)
   penalties          Penalty[] // pénalités d'instruction (contestation abusive) facturées à cet utilisateur
+}
+
+model MagicLink {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  token     String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }
 
 model Mission {
@@ -635,4 +648,26 @@ model RateLimit {
   createdAt DateTime @default(now())
 
   @@index([expiresAt]) // balayage des fenêtres expirées (purge périodique)
+}
+
+// Ledger d'idempotence pour les notifications post-création de mission.
+// PAS de FK vers Mission : indépendance délibérée (testabilité, résistance aux suppressions).
+// Source de vérité permanente — runAlias.idempotencyKey est un label de traçage, pas une dédup.
+model ProcessedMissionEvent {
+  id          String   @id @default(cuid())
+  alias       String
+  missionId   String
+  processedAt DateTime @default(now())
+
+  @@unique([alias, missionId])
+}
+
+// Ledger d'idempotence pour l'assignation voyageur (POST /missions/:id/assign).
+// missionId UNIQUE : une seule assignation par mission, jamais réassignable.
+// Pas de FK : résistance aux suppressions, testabilité indépendante.
+model ProcessedAssignmentEvent {
+  id          String   @id @default(cuid())
+  missionId   String   @unique
+  travelerId  String
+  processedAt DateTime @default(now())
 }

@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  *  (6) claim perdu (FOR UPDATE SKIP LOCKED — concurrent) → loop s'arrête proprement.
  */
 
-const { mockPrisma, mockCapture, mockQueryRaw } = vi.hoisted(() => {
+const { mockPrisma, mockCapture, mockQueryRaw, mockRunAlias } = vi.hoisted(() => {
   const mockQueryRaw = vi.fn()
   const mockPrisma = {
     $transaction: vi.fn(),
@@ -20,7 +20,11 @@ const { mockPrisma, mockCapture, mockQueryRaw } = vi.hoisted(() => {
     mission: { findUnique: vi.fn() },
   }
   const mockCapture = vi.fn()
-  return { mockPrisma, mockCapture, mockQueryRaw }
+  // runAlias passthrough : appelle fn(undefined) sans retry, sans délai.
+  const mockRunAlias = vi.fn().mockImplementation(
+    async (_name: string, fn: () => Promise<unknown>) => fn(),
+  )
+  return { mockPrisma, mockCapture, mockQueryRaw, mockRunAlias }
 })
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
@@ -30,9 +34,34 @@ vi.mock('../services/escrowService', () => ({
     constructor(readonly code: string) { super(code); this.name = 'EscrowCaptureError' }
   },
 }))
+vi.mock('@waylo/shared/automation', () => ({
+  runAlias: mockRunAlias,
+  WatchdogExhaustedError: class WatchdogExhaustedError extends Error {
+    readonly cause: unknown
+    readonly lastError: unknown
+    readonly attempts: number
+    readonly attemptLogs: readonly unknown[]
+    alias: string
+    constructor(
+      msg: string,
+      attempts: number,
+      cause: unknown,
+      attemptLogs: readonly unknown[] = [],
+    ) {
+      super(msg)
+      this.cause = cause
+      this.lastError = cause
+      this.attempts = attempts
+      this.attemptLogs = attemptLogs
+      this.alias = ''
+      this.name = 'WatchdogExhaustedError'
+    }
+  },
+}))
 
 import { runEscrowPayoutWorkerOnce } from './escrowPayoutWorker'
 import { EscrowCaptureError } from '../services/escrowService'
+import { WatchdogExhaustedError } from '@waylo/shared/automation'
 
 const fakeStripe = {} as never
 
@@ -69,7 +98,13 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
 
     // Claim : transaction avec FOR UPDATE SKIP LOCKED + update attempts
     expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1)
-    // captureEscrowFunds appelé avec missionId + stripe (hors transaction)
+    // runAlias 'stripe-capture' utilisé avec idempotencyKey = missionId (traçabilité).
+    expect(mockRunAlias).toHaveBeenCalledWith(
+      'stripe-capture',
+      expect.any(Function),
+      expect.objectContaining({ idempotencyKey: 'm1' }),
+    )
+    // captureEscrowFunds appelé avec missionId + stripe via passthrough runAlias
     expect(mockCapture).toHaveBeenCalledWith('m1', fakeStripe)
     // Verdict SETTLED dans un update hors transaction
     expect(mockPrisma.outboxEvent.update).toHaveBeenCalledWith(
@@ -176,5 +211,55 @@ describe('runEscrowPayoutWorkerOnce — payout escrow worker', () => {
     })
     // Ni settled ni failed : un payout bloqué n'est pas un échec.
     expect(res).toEqual({ settled: 0, failed: 0 })
+  })
+})
+
+describe('Watchdog exhaustion — intégration worker', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockPrisma.$transaction.mockImplementation(
+      async (cb: (tx: { $queryRaw: typeof mockQueryRaw; outboxEvent: { update: typeof vi.fn } }) => unknown) =>
+        cb({ $queryRaw: mockQueryRaw, outboxEvent: mockPrisma.outboxEvent }),
+    )
+    mockQueryRaw.mockResolvedValue([{ id: 'evt_1' }])
+    mockPrisma.outboxEvent.update.mockResolvedValue({ id: 'evt_1', missionId: 'm1', attempts: 5 })
+    mockPrisma.mission.findUnique.mockResolvedValue({ status: 'COMPLETED_BY_BUYER' })
+  })
+
+  it('WatchdogExhaustedError → isExhausted logué, event FAILED (seuil max)', async () => {
+    // Simuler runAlias qui épuise ses 4 tentatives et lève WatchdogExhaustedError.
+    const rootCause = new Error('simulated-failure')
+    const exhausted = new WatchdogExhaustedError(
+      '[watchdog:stripe-capture:m1] exhausted after 4 attempt(s)',
+      4,
+      rootCause,
+      [
+        { attempt: 1, error: 'simulated-failure', timestamp: 0 },
+        { attempt: 2, error: 'simulated-failure', timestamp: 0 },
+        { attempt: 3, error: 'simulated-failure', timestamp: 0 },
+        { attempt: 4, error: 'simulated-failure', timestamp: 0 },
+      ],
+    )
+    exhausted.alias = 'stripe-capture'
+    mockRunAlias.mockRejectedValueOnce(exhausted)
+
+    const res = await runEscrowPayoutWorkerOnce(makeDeps({ maxAttempts: 5, batchLimit: 1 }))
+
+    // L'event est marqué FAILED (attempts = maxAttempts = 5 → terminal).
+    const verdictCall = mockPrisma.outboxEvent.update.mock.calls.find(
+      ([arg]) => arg.data?.status !== undefined,
+    )
+    expect(verdictCall?.[0].data).toMatchObject({ status: 'FAILED' })
+
+    // Log WORKER_ERROR avec isExhausted = true (WatchdogExhaustedError déballé).
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'WORKER_ERROR',
+        isExhausted: true,
+        err: 'simulated-failure',
+      }),
+      expect.stringContaining('ABANDONNÉE'),
+    )
+    expect(res).toEqual({ settled: 0, failed: 1 })
   })
 })
