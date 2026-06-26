@@ -77,3 +77,26 @@ logging structuré avant propagation.
 - **Tests :** 380/380 ✅
 
 ---
+
+## HOTFIX-AUDIT-01 ✓ — Suppression token magic-link des logs (PII)
+
+- `src/auth/auth.service.ts:12` : `noopTransport` — token OTP supprimé du `console.log`, paramètre renommé `_token` (TS strict)
+- **Tests :** 383/383 ✅ — commit `fbc82ba`
+
+## HOTFIX-AUDIT-02 ✓ — Re-vérification atomique escrow dans customs-approve (TOCTOU P1)
+
+- `src/missions/routes/admin.route.ts` : `/customs-approve` — garde 3a ajoutée dans `$transaction` post-capture : re-lit `escrow.status` après l'appel Stripe (hors tx), abort avec `ESCROW_INVARIANT_VIOLATED` (500 + `safeEmit`) si non-HELD ; escrow.status sera toujours HELD en pratique (invariant Stripe prouvé), garde = détecteur d'anomalie opérationnelle
+- `src/alerts.ts` : `ESCROW_INVARIANT_VIOLATED` ajouté au type `AlertCode` (severity `critical`) — requis par TS strict
+- `src/missions/customs-approve.test.ts` : test (F) garde 3a via mock Stripe injectant CANCELLED pendant capture → 500 + mission inchangée
+- **Décision Option B** : Stripe hors tx réelle (pas de FOR UPDATE pendant appel réseau), re-check en READ COMMITTED post-capture dans tx courte sans appel réseau
+- **Tests :** 384/384 ✅ — commit `a931779`
+
+## AUDIT-03 ✓ — Audit pré-beta adversarial — GO BETA ✓ (2026-06-26)
+
+- **Verdict :** GO BETA ✓ — P0 : 0 · P1 : 2 (tous corrigés) · P2 : 4 (dettes documentées)
+- **P1 corrigés :** magic-link PII log (HOTFIX-01) + customs-approve TOCTOU (HOTFIX-02)
+- **P2 documentés :** Math.round cents (arbitrage.route.ts:107) · TSA RFC3161 absent · Haversine/géolocalisation absente · GET /missions sans whitelist DTO
+- **Dimensions validées :** isolation données ✓ · atomicité TOCTOU ✓ · idempotence Stripe+notif ✓ · RBAC ressource-based ✓ · secrets/PII ✓ · QPP 2/4 preuves (TSA+géoloc = dette légale) · WIP propre ✓
+- **Tests :** 384/384 ✅
+
+---
