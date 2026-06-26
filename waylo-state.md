@@ -55,6 +55,10 @@ logging structuré avant propagation.
 - `CLAUDE.md` : règle enum migration ajoutée dans Conventions critiques.
 - **Tests :** 377/377 ✅
 
+## RBAC-02 — non requis
+
+- Modèle ressource-based actuel (Mission.buyerId / Mission.travelerId / User.isAdmin) couvre tous les cas d'autorisation des routes existantes. Aucun nouveau rôle introduit.
+
 ## NOTIF-01 ✓ — Notifications d'acteurs (idempotent)
 
 - `src/notifications/notification.service.ts` : `NotificationSink` (injectable), `NotificationPayload` (whitelist — pas de PII/sensible), `notifyActor` (idempotence via `ProcessedMissionEvent` namespace `notif:*`, no-op sur P2002)
