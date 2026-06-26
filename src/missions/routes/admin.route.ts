@@ -21,6 +21,7 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
     }
     const { id } = req.params as { id: string }
 
+    // Lecture initiale hors tx : fast-fail + récupération du stripePaymentIntentId.
     const escrow = await prisma.escrowTransaction.findUnique({
       where: { missionId: id },
       select: { stripePaymentIntentId: true, status: true },
@@ -29,6 +30,8 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       throw new AppError('ESCROW_NOT_HELD', 400)
     }
 
+    // Capture Stripe HORS transaction — règle « no Stripe in DB tx ».
+    // idempotencyKey déterministe : un retry ou un double appel admin ne crée pas deux débits.
     await opts.stripe.paymentIntents.capture(
       escrow.stripePaymentIntentId,
       {},
@@ -36,6 +39,24 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
     )
 
     await prisma.$transaction(async tx => {
+      // Garde 3a — re-vérification post-capture (aucun appel réseau dans la tx).
+      // Théoriquement inatteignable : Stripe ne peut envoyer payment_intent.payment_failed
+      // après une capture réussie (handlePaymentFailed WHERE capturedAmountCents=0).
+      // Si cette garde se déclenche, c'est une violation d'invariant Stripe — signal
+      // opérationnel fort, réconciliation manuelle requise.
+      const escrowFresh = await tx.escrowTransaction.findUnique({
+        where: { missionId: id },
+        select: { status: true },
+      })
+      if (!escrowFresh || escrowFresh.status !== EscrowStatus.HELD) {
+        safeEmit(opts.onAlert, {
+          code: 'ESCROW_INVARIANT_VIOLATED',
+          message: 'Escrow non-HELD après capture Stripe réussie — violation d\'invariant, réconciliation requise',
+          details: { missionId: id, escrowStatus: escrowFresh?.status ?? 'NOT_FOUND' },
+        })
+        throw new AppError('ESCROW_INVARIANT_VIOLATED', 500)
+      }
+
       const updated = await tx.mission.updateMany({
         where: { id, status: MissionStatus.PENDING_CUSTOMS_REVIEW },
         data: { status: MissionStatus.VALIDATED },

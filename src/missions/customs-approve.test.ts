@@ -154,6 +154,42 @@ describe('Approbation douanière admin — customs-approve / customs-reject', ()
     expect(res.json()).toEqual({ error: 'MISSION_NOT_CUSTOMS_REVIEW' })
   })
 
+  it('(F) garde 3a : escrow non-HELD pendant la tx → 500 ESCROW_INVARIANT_VIOLATED, mission inchangée', async () => {
+    const mission = await seedPending()
+
+    // Stripe mock qui simule un webhook concurrent changeant l'escrow pendant la capture.
+    const tamperedStripe: PaymentIntentClient = {
+      paymentIntents: {
+        create: async (params) => ({ id: `pi_tampered_${params.metadata?.['missionId']}`, client_secret: 's' }),
+        capture: async () => {
+          // Simule handlePaymentFailed ou webhook concurrent : escrow → CANCELLED
+          await prisma.escrowTransaction.updateMany({
+            where: { missionId: mission.id },
+            data: { status: 'CANCELLED' },
+          })
+          return { id: 'pi_tampered' }
+        },
+      },
+    }
+    const tamperedApp = await (await import('../app')).buildApp({ stripe: tamperedStripe })
+    const tamperedToken = tamperedApp.jwt.sign({ sub: admin.id })
+
+    const res = await tamperedApp.inject({
+      method: 'POST',
+      url: `/api/missions/${mission.id}/customs-approve`,
+      headers: { authorization: `Bearer ${tamperedToken}` },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toMatchObject({ error: 'ESCROW_INVARIANT_VIOLATED' })
+
+    // Mission doit rester PENDING_CUSTOMS_REVIEW — aucune écriture DB ne doit avoir eu lieu.
+    const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
+    expect(db.status).toBe('PENDING_CUSTOMS_REVIEW')
+
+    await tamperedApp.close()
+  })
+
   it('(E) non-admin → 403 ; non authentifié → 401 (approve et reject)', async () => {
     const mission = await seedPending()
 
