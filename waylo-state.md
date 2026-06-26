@@ -55,6 +55,14 @@ logging structuré avant propagation.
 - `CLAUDE.md` : règle enum migration ajoutée dans Conventions critiques.
 - **Tests :** 377/377 ✅
 
+## NOTIF-01 ✓ — Notifications d'acteurs (idempotent)
+
+- `src/notifications/notification.service.ts` : `NotificationSink` (injectable), `NotificationPayload` (whitelist — pas de PII/sensible), `notifyActor` (idempotence via `ProcessedMissionEvent` namespace `notif:*`, no-op sur P2002)
+- `src/missions/routes/assign.route.ts` : accroche fire-and-forget post-tx `notif:mission-matched` → `mission.buyerId` (seul point câblé — Option A)
+- `src/notifications/notification.test.ts` : 3 tests (émission correcte, idempotence double-trigger, anti-fuite payload)
+- **Accroches documentées (non câblées)** : `notif:capture-confirmed`, `notif:delivery-validated`, `notif:dispute-opened`, `notif:dispute-resolved` — stubs `// wire:` dans le service
+- **Tests :** 383/383 ✅
+
 ## MISSION-02 ✓ — Dashboard Voyageur (Lecture Sécurisée)
 
 - `src/missions/mission.service.ts` : `PublicMissionDTO` (whitelist explicite) + `toPublicMissionDTO` (guard `travelerId` non-null) + `findMissionsForTraveler` (filtre Prisma `WHERE travelerId + status IN [ACTIVE, COMPLETED_BY_BUYER]`, `select` défensif)
