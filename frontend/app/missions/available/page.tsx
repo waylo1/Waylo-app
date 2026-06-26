@@ -5,13 +5,13 @@ import { useRouter } from "next/navigation";
 import * as api from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/api-errors";
-import { centsToEur } from "@/lib/money";
 import type { Mission } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
 import { RequireAuth } from "@/components/require-auth";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { MissionList } from "@/components/mission-list";
 
 function AvailableList() {
+  const { user } = useAuth();
   const [missions, setMissions] = useState<Mission[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [matchingId, setMatchingId] = useState<string | null>(null);
@@ -31,11 +31,9 @@ function AvailableList() {
     setError(null);
     try {
       await api.matchMission(missionId);
-      // Redirection immédiate vers le tableau de bord voyageur de la mission.
       router.push(`/missions/${missionId}/dashboard`);
     } catch (err) {
       setError(apiErrorMessage(err, "Échec de l'acceptation de la mission."));
-      // Mission déjà prise : on la retire du catalogue affiché.
       if (err instanceof ApiError && err.code === "MISSION_ALREADY_MATCHED") {
         setMissions(prev => prev?.filter(m => m.id !== missionId) ?? null);
       }
@@ -43,42 +41,15 @@ function AvailableList() {
     }
   }
 
-  if (error && !missions)
-    return <p className="text-sm text-destructive">{error}</p>;
-  if (!missions)
-    return <p className="text-sm text-muted-foreground">Chargement…</p>;
-
   return (
-    <div className="space-y-3">
-      {error && <p className="text-sm text-destructive">{error}</p>}
-      {missions.length === 0 && (
-        <p className="text-sm text-muted-foreground">
-          Aucune mission disponible pour le moment.
-        </p>
-      )}
-      {missions.map(mission => (
-        <Card key={mission.id}>
-          <CardContent className="flex items-center justify-between gap-4 py-4">
-            <div className="min-w-0">
-              <p className="truncate font-medium">{mission.targetProduct}</p>
-              <p className="text-sm text-muted-foreground">
-                {mission.destination} · budget{" "}
-                {centsToEur(mission.budgetCents)} · Marge Voyageur{" "}
-                {centsToEur(mission.commissionCents)} · expire le{" "}
-                {new Date(mission.expiresAt).toLocaleDateString("fr-FR")}
-              </p>
-            </div>
-            <Button
-              className="shrink-0"
-              disabled={matchingId !== null}
-              onClick={() => handleMatch(mission.id)}
-            >
-              {matchingId === mission.id ? "…" : "Accepter la mission"}
-            </Button>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
+    <MissionList
+      missions={missions}
+      error={error}
+      emptyMessage="Aucune mission disponible pour le moment."
+      userId={user?.id}
+      onMatch={handleMatch}
+      matchingId={matchingId}
+    />
   );
 }
 

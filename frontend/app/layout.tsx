@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
 import { Navbar } from "@/components/navbar";
+import { MobileNav } from "@/components/mobile-nav";
 import { ErrorReportingInit } from "@/components/error-reporting-init";
 
 const geistSans = Geist({
@@ -34,9 +35,10 @@ export default function RootLayout({
         <ErrorReportingInit />
         <AuthProvider>
           <Navbar />
-          <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8">
+          <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8 pb-20 md:pb-8">
             {children}
           </main>
+          <MobileNav />
         </AuthProvider>
       </body>
     </html>
