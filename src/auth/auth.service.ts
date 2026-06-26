@@ -8,8 +8,8 @@ const MAX_ATTEMPTS = 5
 export type MagicLinkTransport = (email: string, token: string) => Promise<void>
 
 /** Transport no-op (MVP) — log console uniquement, aucune dépendance email. */
-export const noopTransport: MagicLinkTransport = async (email, token) => {
-  console.log(`[magic-link] to=${email} token=${token}`)
+export const noopTransport: MagicLinkTransport = async (email, _token) => {
+  console.log(`[magic-link] to=${email}`)
 }
 
 function generateToken(): string {

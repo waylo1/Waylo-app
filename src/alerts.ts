@@ -41,6 +41,7 @@ export type AlertCode =
   | 'DISPUTE_PENALTY_ACCOUNT_SUSPENDED'
   | 'DISPUTE_PENALTY_STUCK_PENDING'
   | 'RECEIPT_INTEGRITY_VIOLATION'
+  | 'ESCROW_INVARIANT_VIOLATED'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -90,6 +91,7 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   DISPUTE_PENALTY_ACCOUNT_SUSPENDED: 'critical', // pénalité d'instruction (contestation abusive) non prélevée après retries → compte suspendu automatiquement (blacklist) : revue ops requise
   DISPUTE_PENALTY_STUCK_PENDING: 'critical', // pénalité PENDING avec attempts≥max (crash entre attempts++ et verdict) : charge Stripe possible non commitée → vérifier PI via idempotencyKey avant toute action
   RECEIPT_INTEGRITY_VIOLATION: 'critical', // reçu falsifié / texte OCR adverse sur le chemin de libération : release bloqué + mission gelée (litige auto) → arbitrage humain requis
+  ESCROW_INVARIANT_VIOLATED: 'critical', // capture Stripe réussie mais escrow non-HELD en tx : violation d'invariant Stripe, réconciliation humaine requise
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {
