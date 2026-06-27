@@ -28,6 +28,9 @@ process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_async'
 process.env.STRIPE_ISSUING_WEBHOOK_SECRET = 'whsec_test_issuing'
 process.env.JWT_SECRET = 'jwt_test_secret_waylo'
 
+// Sceau par défaut utilisé par seedDeposited (sauf surcharge) et les helpers confirm().
+const QR_RAW_DEFAULT = 'WAYLO-COLLECT-DEFAULT-SEAL-XK9Z2F'
+
 describe('Confirmation de collecte acheteur — confirm-collection', () => {
   let app: FastifyInstance
   let prisma: PrismaClient
@@ -78,8 +81,14 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
   })
 
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
-  const confirm = (id: string, headers: Record<string, string> = bearer(buyerToken)) =>
-    app.inject({ method: 'POST', url: `/api/missions/${id}/confirm-collection`, headers })
+  // /confirm-collection exige désormais innerQrCode dans le body (sceau QR obligatoire).
+  const confirm = (id: string, innerQrCode: string = QR_RAW_DEFAULT, headers: Record<string, string> = bearer(buyerToken)) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/missions/${id}/confirm-collection`,
+      headers: { ...headers, 'content-type': 'application/json' },
+      payload: JSON.stringify({ innerQrCode }),
+    })
   const confirmWithQr = (id: string, innerQrCode: string, headers: Record<string, string> = bearer(buyerToken)) =>
     app.inject({
       method: 'POST',
@@ -103,7 +112,7 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
         destination: 'Lyon',
         dropoffReceiptUrl: 'https://proofs.waylo.app/d.pdf',
         dropoffAt: new Date(),
-        innerQrCodeHash: opts.innerQrCodeHash ?? null,
+        innerQrCodeHash: opts.innerQrCodeHash ?? hashQrCode(QR_RAW_DEFAULT),
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })
@@ -159,9 +168,9 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
     captureCalls.length = 0
     const mission = await seedDeposited()
 
-    expect((await confirm(mission.id, bearer(travelerToken))).statusCode).toBe(404)
-    expect((await confirm(mission.id, bearer(strangerToken))).statusCode).toBe(404)
-    expect((await confirm(mission.id, {})).statusCode).toBe(401)
+    expect((await confirm(mission.id, QR_RAW_DEFAULT, bearer(travelerToken))).statusCode).toBe(404)
+    expect((await confirm(mission.id, QR_RAW_DEFAULT, bearer(strangerToken))).statusCode).toBe(404)
+    expect((await confirm(mission.id, QR_RAW_DEFAULT, {})).statusCode).toBe(401)
     expect(captureCalls).toHaveLength(0)
 
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
@@ -195,7 +204,7 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
     expect(captureCalls).toEqual([{ id: `pi_cc_${mission.id}`, key: `capture_collection_${mission.id}` }])
   })
 
-  it('(G) sceau présent + QR faux OU absent → 400 INVALID_QR_PROOF, aucune capture, mission intacte', async () => {
+  it('(G) sceau présent + QR faux → 400 INVALID_QR_PROOF, aucune capture, mission intacte', async () => {
     captureCalls.length = 0
     const mission = await seedDeposited({ innerQrCodeHash: hashQrCode(QR_RAW) })
 
@@ -204,13 +213,21 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
     expect(wrong.statusCode).toBe(400)
     expect(wrong.json()).toEqual({ error: 'INVALID_QR_PROOF' })
 
-    // QR absent (corps vide) sur une mission scellée → même rejet.
-    const missing = await confirm(mission.id)
-    expect(missing.statusCode).toBe(400)
-    expect(missing.json()).toEqual({ error: 'INVALID_QR_PROOF' })
-
     expect(captureCalls).toHaveLength(0)
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     expect(db.status).toBe('DEPOSITED') // séquestre jamais libéré sur preuve invalide
+  })
+
+  it('(H) mission sans sceau (innerQrCodeHash null) → 400 NO_INNER_SEAL, aucune capture', async () => {
+    captureCalls.length = 0
+    // Seed explicitement sans sceau (simule chemin /start-travel sans /ship).
+    const mission = await seedDeposited({ innerQrCodeHash: null as unknown as string })
+    // Forcer null en DB car seedDeposited applique désormais le hash par défaut.
+    await prisma.mission.update({ where: { id: mission.id }, data: { innerQrCodeHash: null } })
+
+    const res = await confirmWithQr(mission.id, 'QUELQUE-CHOSE')
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'NO_INNER_SEAL' })
+    expect(captureCalls).toHaveLength(0)
   })
 })

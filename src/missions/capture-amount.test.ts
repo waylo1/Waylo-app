@@ -3,6 +3,10 @@ import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission-common'
 import { resetDb } from '../../tests/helpers/db-reset'
+import { hashQrCode } from './qr-proof'
+
+const QR_RAW = 'WAYLO-CAPTURE-SEAL-TEST-4F8B1'
+const QR_HASH = hashQrCode(QR_RAW)
 
 /**
  * Régression sécurité (Audit VULN #1/#2) — montant de capture EXPLICITE.
@@ -85,6 +89,7 @@ describe('Capture — amount_to_capture explicite (Audit VULN #1/#2)', () => {
         substitutionAuthorized: opts.substitutionAuthorized ?? false,
         dropoffReceiptUrl: opts.status === 'DEPOSITED' ? 'https://proofs.waylo.app/d.pdf' : null,
         dropoffAt: opts.status === 'DEPOSITED' ? new Date() : null,
+        innerQrCodeHash: opts.status === 'DEPOSITED' ? QR_HASH : null,
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })
@@ -124,7 +129,8 @@ describe('Capture — amount_to_capture explicite (Audit VULN #1/#2)', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/missions/${id}/confirm-collection`,
-      headers: bearer(),
+      headers: { ...bearer(), 'content-type': 'application/json' },
+      payload: JSON.stringify({ innerQrCode: QR_RAW }),
     })
 
     expect(res.statusCode).toBe(200)

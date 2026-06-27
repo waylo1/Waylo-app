@@ -22,6 +22,7 @@ import {
   submitReceiptBodySchema,
   dropOffBodySchema,
   reviewBodySchema,
+  innerQrBodySchema,
   rateLimit,
   substitutionCeilingCents,
   isUniqueViolation,
@@ -32,6 +33,7 @@ import {
   ShipBody,
   SubmitReceiptBody,
   ReviewBody,
+  InnerQrBody,
 } from '../mission-common'
 import { AppError } from '../../errors/app.error'
 
@@ -40,6 +42,17 @@ interface DropOffBody {
   dropOffCarrier: string
   dropOffTrackingId: string
   dropOffAccessCode?: string
+}
+
+/**
+ * Sceau QR interne anti-colis-vide — vérification en temps constant AVANT capture.
+ * Partagé par /receive et /confirm-collection : aucune divergence possible.
+ * Throws AppError('NO_INNER_SEAL', 400) si la mission n'a pas de sceau.
+ * Throws AppError('INVALID_QR_PROOF', 400) si le code soumis ne correspond pas.
+ */
+function verifyInnerSeal(innerQrCode: string, storedHash: string | null): void {
+  if (!storedHash) throw new AppError('NO_INNER_SEAL', 400)
+  if (!qrCodeMatches(innerQrCode, storedHash)) throw new AppError('INVALID_QR_PROOF', 400)
 }
 
 export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
@@ -233,7 +246,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
   // POST /api/missions/:id/receive — l'ACHETEUR confirme la réception (capture).
   app.post(
     '/:id/receive',
-    { schema: { params: missionIdParamsSchema }, preHandler: rateLimit('receive') },
+    { schema: { params: missionIdParamsSchema, body: innerQrBodySchema }, preHandler: rateLimit('receive') },
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
@@ -242,6 +255,9 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       if (mission.status !== MissionStatus.IN_PROGRESS) {
         throw new AppError('MISSION_NOT_IN_PROGRESS', 400)
       }
+
+      // Sceau QR interne : vérification en temps constant AVANT toute capture ou verrou.
+      verifyInnerSeal((req.body as InnerQrBody).innerQrCode, mission.innerQrCodeHash)
 
       // Contrôle douanier : verrou AVANT capture si valeur déclarée > seuil.
       if (mission.destinationCountry && !mission.customsReceiptUrl) {
@@ -371,7 +387,7 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
   // POST /api/missions/:id/confirm-collection — l'ACHETEUR confirme la collecte (capture + vérif QR).
   app.post(
     '/:id/confirm-collection',
-    { schema: { params: missionIdParamsSchema } },
+    { schema: { params: missionIdParamsSchema, body: innerQrBodySchema } },
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const mission = await findMissionForBuyer(prisma, id, req.user.sub)
@@ -381,18 +397,8 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
         throw new AppError('INVALID_MISSION_STATE', 400)
       }
 
-      // Preuve QR interne (anti « colis vide ») : vérif temps constant AVANT capture.
-      if (mission.innerQrCodeHash) {
-        const raw = (req.body as { innerQrCode?: unknown } | null)?.innerQrCode
-        if (
-          typeof raw !== 'string' ||
-          raw.length === 0 ||
-          raw.length > 512 ||
-          !qrCodeMatches(raw, mission.innerQrCodeHash)
-        ) {
-          throw new AppError('INVALID_QR_PROOF', 400)
-        }
-      }
+      // Sceau QR interne (anti « colis vide ») : vérification STRICTE en temps constant AVANT capture.
+      verifyInnerSeal((req.body as InnerQrBody).innerQrCode, mission.innerQrCodeHash)
 
       // Capture via le service (source unique) : pré-check escrow HELD + montant
       // `amount_to_capture` exact, clé dédiée au chemin collecte.

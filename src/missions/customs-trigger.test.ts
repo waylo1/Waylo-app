@@ -3,6 +3,10 @@ import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission-common'
 import { CUSTOMS_THRESHOLD_CENTS } from './customs'
+import { hashQrCode } from './qr-proof'
+
+const QR_RAW = 'WAYLO-CUSTOMS-SEAL-TEST-XK9Z2'
+const QR_HASH = hashQrCode(QR_RAW)
 
 /**
  * Trigger douanier — POST /api/missions/:id/receive :
@@ -71,7 +75,12 @@ describe('Trigger douanier — POST /api/missions/:id/receive', () => {
 
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
   const receive = (missionId: string) =>
-    app.inject({ method: 'POST', url: `/api/missions/${missionId}/receive`, headers: bearer(buyerToken) })
+    app.inject({
+      method: 'POST',
+      url: `/api/missions/${missionId}/receive`,
+      headers: { ...bearer(buyerToken), 'content-type': 'application/json' },
+      payload: JSON.stringify({ innerQrCode: QR_RAW }),
+    })
 
   async function seedInProgress(opts: {
     destinationCountry?: string
@@ -88,6 +97,7 @@ describe('Trigger douanier — POST /api/missions/:id/receive', () => {
         destination: 'Tokyo',
         destinationCountry: opts.destinationCountry ?? null,
         purchaseAmountCents: opts.purchaseAmountCents,
+        innerQrCodeHash: QR_HASH,
         expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
       },
     })

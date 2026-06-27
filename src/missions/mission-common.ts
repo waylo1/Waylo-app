@@ -318,6 +318,20 @@ export const reviewBodySchema = {
   },
 } as const
 
+export interface InnerQrBody {
+  innerQrCode: string
+}
+
+/** Schéma partagé par /receive et /confirm-collection : code QR brut du sceau intérieur. */
+export const innerQrBodySchema = {
+  type: 'object',
+  required: ['innerQrCode'],
+  additionalProperties: false,
+  properties: {
+    innerQrCode: { type: 'string', minLength: 1, maxLength: 512 },
+  },
+} as const
+
 // Error classes
 export class ValidationConflictError extends Error {}
 export class ConfirmReceiptConflictError extends Error {}
