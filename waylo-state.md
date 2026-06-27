@@ -95,8 +95,54 @@ logging structuré avant propagation.
 
 - **Verdict :** GO BETA ✓ — P0 : 0 · P1 : 2 (tous corrigés) · P2 : 4 (dettes documentées)
 - **P1 corrigés :** magic-link PII log (HOTFIX-01) + customs-approve TOCTOU (HOTFIX-02)
-- **P2 documentés :** Math.round cents (arbitrage.route.ts:107) · TSA RFC3161 absent · Haversine/géolocalisation absente · GET /missions sans whitelist DTO
-- **Dimensions validées :** isolation données ✓ · atomicité TOCTOU ✓ · idempotence Stripe+notif ✓ · RBAC ressource-based ✓ · secrets/PII ✓ · QPP 2/4 preuves (TSA+géoloc = dette légale) · WIP propre ✓
+- **P2 documentés :** Math.round cents (arbitrage.route.ts:107) · sceau QR bypassable sur /receive (corrigé SEAL-01) · GET /missions sans whitelist DTO
+- **Dimensions validées :** isolation données ✓ · atomicité TOCTOU ✓ · idempotence Stripe+notif ✓ · RBAC ressource-based ✓ · secrets/PII ✓ · WIP propre ✓
+- **Décision QPP (DECIDE-QPP 2026-06-27) :** GO B — réalignement doctrine sur la preuve réelle (sceau QR SHA-256). Les 4 preuves documentées antérieurement (OTP HMAC / Haversine / RFC3161 / photo SHA-256) n'existaient pas dans le code ; la doc était fictive. La doctrine effective est décrite dans SEAL-01.
 - **Tests :** 384/384 ✅
+
+---
+
+## SEAL-01 ✓ — Durcissement sceau QR interne (2026-06-27)
+
+### Doctrine effective de preuve de remise (Waylo beta)
+
+La libération du séquestre sur le **chemin de réception physique** exige :
+
+1. **Confirmation authentifiée de l'acheteur** — action portée par ressource (`findMissionForBuyer`) ; ni le voyageur ni un tiers ne peuvent confirmer.
+2. **Sceau QR interne SHA-256 OBLIGATOIRE** — code 256 bits généré aléatoirement par le voyageur (à `/ship` ou `/dropoff-receipt`), scellé à l'intérieur du colis ; seul le hash SHA-256 est persisté (`innerQrCodeHash`). À la réception, l'acheteur soumet le code brut : le serveur le hache et compare en **temps constant** (`timingSafeEqual`). Aucun sceau → `NO_INNER_SEAL` 400. Mauvais code → `INVALID_QR_PROOF` 400. La capture Stripe n'est **jamais** appelée si la vérification échoue.
+
+Routes porteuses du sceau (contrôle identique, helper `verifyInnerSeal` partagé) :
+- `POST /api/missions/:id/receive` (IN_PROGRESS → VALIDATED)
+- `POST /api/missions/:id/confirm-collection` (DEPOSITED → VALIDATED)
+
+### Chemins seal-exempt (dette documentée)
+
+| Chemin | Pourquoi exempt | Garde compensatoire |
+|--------|----------------|---------------------|
+| `/drop-off` (casier tiers) | Acheteur ne reçoit pas en main propre, scan impossible | Tracking transporteur + code d'accès casier |
+| `/validate`, `/confirm-receipt` | Validation d'achat (AWAITING_VALIDATION), pas de remise physique | Reçu scellé SHA-256 |
+| `/customs-approve` (admin) | Décision humaine post-preuve douanière | isAdmin + audit log + escrow re-check |
+| Admin résolution litige | Arbitrage humain + AdminAuditLog | isAdmin + Dispute model |
+
+### Dette de sécurité acceptée (non implémenté, décision assumée)
+
+| Preuve | Statut | Justification |
+|--------|--------|---------------|
+| Horodatage qualifié RFC3161 (TSA) | ❌ Absent | Complexité QTSP, pas de bénéfice légal sans contrat eIDAS ; preuve serveur suffit en beta |
+| Co-localisation Haversine (GPS) | ❌ Absent | Traitement systématique de données de localisation → DPIA Art. 35 RGPD probable ; hors scope beta |
+| OTP HMAC-SHA256 de consentement | ❌ Absent | Arbitrage humain (model `Dispute`) couvre le « jamais reçu » ; OTP = jalon ultérieur |
+| Photo de remise SHA-256 | ❌ Absent | Art. 9 RGPD (visages tiers) ; valeur ajoutée faible sans TSA |
+
+**Compensations structurelles** : carte de garantie voyageur + pénalité 200 % + arbitrage admin + JIT (voyageur n'avance rien).
+
+**Trajectoire** : montée en preuve phasée et déclenchée par la demande — OTP handoff → photo scellée → TSA qualifié → géo.
+
+### Changements
+
+- `src/missions/mission-common.ts` : `InnerQrBody` + `innerQrBodySchema` (partagés)
+- `src/missions/routes/logistics.route.ts` : `verifyInnerSeal()` local + body schema sur `/receive` et `/confirm-collection`
+- Tests : `receive-qr-seal.test.ts` (nouveau, 4 cas) + mise à jour `confirm-collection`, `customs-trigger`, `capture-amount`
+- Bypass `/start-travel → /receive` (sans sceau) bloqué : `NO_INNER_SEAL` 400
+- **Tests :** 395/395 ✅
 
 ---
