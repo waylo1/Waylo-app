@@ -36,6 +36,7 @@ import {
   InnerQrBody,
 } from '../mission-common'
 import { AppError } from '../../errors/app.error'
+import { notifyActor } from '../../notifications/notification.service'
 
 interface DropOffBody {
   dropOffType: DropOffType
@@ -84,6 +85,16 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     })
 
     const matched = await prisma.mission.findUniqueOrThrow({ where: { id } })
+
+    // Fire-and-forget post-commit (hook ré-câblé depuis l'ex-/assign supprimé) :
+    // notifie l'acheteur que sa mission est prise. Idempotent (ProcessedMissionEvent).
+    notifyActor(
+      'notif:mission-matched',
+      matched.id,
+      matched.buyerId,
+      { event: 'notif:mission-matched', missionId: matched.id, targetProduct: matched.targetProduct, destination: matched.destination },
+    ).catch(err => console.error({ err, missionId: matched.id }, '[notif] mission-matched failed'))
+
     return reply.code(200).send(matched)
   })
 
@@ -115,6 +126,16 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
     })
 
     const accepted = await prisma.mission.findUniqueOrThrow({ where: { id } })
+
+    // Fire-and-forget post-commit (hook ré-câblé depuis l'ex-/assign supprimé) :
+    // notifie l'acheteur que sa mission est prise. Idempotent (ProcessedMissionEvent).
+    notifyActor(
+      'notif:mission-matched',
+      accepted.id,
+      accepted.buyerId,
+      { event: 'notif:mission-matched', missionId: accepted.id, targetProduct: accepted.targetProduct, destination: accepted.destination },
+    ).catch(err => console.error({ err, missionId: accepted.id }, '[notif] mission-matched failed'))
+
     return reply.code(200).send(accepted)
   })
 

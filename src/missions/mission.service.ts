@@ -50,11 +50,25 @@ function toPublicMissionDTO(m: MissionRow): PublicMissionDTO {
   }
 }
 
+// Dashboard voyageur : statuts RÉELS du cycle de vie vivant (matchmaking /match·/accept),
+// remplace l'ancien couple mort [ACTIVE, COMPLETED_BY_BUYER] (flux /assign + confirmReception
+// supprimés, cf. DEADFLOWS). « En cours » (MATCHED → VALIDATED) + « terminé » (RELEASED).
+const TRAVELER_DASHBOARD_STATUSES: MissionStatus[] = [
+  MissionStatus.MATCHED,
+  MissionStatus.IN_PROGRESS,
+  MissionStatus.ESCROW_LOCKED_CUSTOMS,
+  MissionStatus.PENDING_CUSTOMS_REVIEW,
+  MissionStatus.AWAITING_VALIDATION,
+  MissionStatus.DEPOSITED,
+  MissionStatus.VALIDATED,
+  MissionStatus.RELEASED,
+]
+
 export async function findMissionsForTraveler(travelerId: string): Promise<PublicMissionDTO[]> {
   const missions = await prisma.mission.findMany({
     where: {
       travelerId,
-      status: { in: [MissionStatus.ACTIVE, MissionStatus.COMPLETED_BY_BUYER] },
+      status: { in: TRAVELER_DASHBOARD_STATUSES },
     },
     select: {
       id: true,

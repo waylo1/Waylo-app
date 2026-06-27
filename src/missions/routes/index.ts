@@ -7,7 +7,6 @@ import { logisticsRoutes } from './logistics.route'
 import { adminRoutes } from './admin.route'
 import { walletRoutes } from './wallet/wallet.route'
 import { disputeRoutes } from './dispute/dispute.route'
-import { assignRoutes } from './assign.route'
 import { listRoutes } from './list.route'
 
 const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
@@ -15,7 +14,6 @@ const missionRoute: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) 
 
   // Mount domain-specific sub-routers
   await app.register(crudRoutes)
-  await app.register(assignRoutes)
   await app.register(listRoutes)
   await app.register(fundingRoutes, { stripe: opts.stripe })
   await app.register(validationRoutes, { stripe: opts.stripe })

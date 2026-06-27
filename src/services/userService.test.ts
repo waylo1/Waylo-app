@@ -4,9 +4,11 @@ import { deleteAccount, AccountDeletionBlockedError } from './userService'
 
 /**
  * userService.deleteAccount — garde anti-suppression (DB réelle waylo_test).
- *  (1) acheteur d'une mission AWAITING_CONFIRMATION → suppression bloquée ;
- *  (2) voyageur d'une mission AWAITING_CONFIRMATION → suppression bloquée ;
- *  (3) utilisateur sans mission bloquante → suppression effectuée.
+ *  (1) acheteur d'une mission EN VOL (IN_PROGRESS) → suppression bloquée ;
+ *  (2) voyageur d'une mission EN VOL (IN_PROGRESS) → suppression bloquée ;
+ *  (3) utilisateur sans mission bloquante → suppression effectuée ;
+ *  (4) voyageur d'une mission TERMINÉE (RELEASED) → suppression autorisée
+ *      (la garde cible les états en vol, pas les missions soldées).
  */
 
 if (!process.env.DATABASE_URL?.includes('waylo_test')) {
@@ -30,12 +32,12 @@ describe('userService.deleteAccount — garde anti-suppression', () => {
     await prisma.$disconnect()
   })
 
-  async function seedAwaitingMission(buyerId: string, travelerId: string) {
+  async function seedMission(buyerId: string, travelerId: string, status: string) {
     return prisma.mission.create({
       data: {
         buyerId,
         travelerId,
-        status: 'AWAITING_CONFIRMATION',
+        status: status as never,
         targetProduct: 'Article',
         budgetCents: 50_000,
         commissionCents: 5_000,
@@ -45,25 +47,25 @@ describe('userService.deleteAccount — garde anti-suppression', () => {
     })
   }
 
-  it('(1) acheteur d’une mission AWAITING_CONFIRMATION → bloqué', async () => {
+  it('(1) acheteur d’une mission EN VOL (IN_PROGRESS) → bloqué', async () => {
     const buyer = await prisma.user.create({ data: { email: 'buyer-del@test.waylo' } })
     const traveler = await prisma.user.create({ data: { email: 'trav-del@test.waylo' } })
-    await seedAwaitingMission(buyer.id, traveler.id)
+    await seedMission(buyer.id, traveler.id, 'IN_PROGRESS')
 
     await expect(deleteAccount(buyer.id)).rejects.toSatisfy(
       (e: unknown) =>
-        e instanceof AccountDeletionBlockedError && e.code === 'MISSION_AWAITING_CONFIRMATION',
+        e instanceof AccountDeletionBlockedError && e.code === 'MISSION_IN_FLIGHT',
     )
     // Le compte n'est PAS supprimé.
     expect(await prisma.user.findUnique({ where: { id: buyer.id } })).not.toBeNull()
   })
 
-  it('(2) voyageur d’une mission AWAITING_CONFIRMATION → bloqué', async () => {
+  it('(2) voyageur d’une mission EN VOL (IN_PROGRESS) → bloqué', async () => {
     const traveler = await prisma.user.findFirstOrThrow({ where: { email: 'trav-del@test.waylo' } })
 
     await expect(deleteAccount(traveler.id)).rejects.toSatisfy(
       (e: unknown) =>
-        e instanceof AccountDeletionBlockedError && e.code === 'MISSION_AWAITING_CONFIRMATION',
+        e instanceof AccountDeletionBlockedError && e.code === 'MISSION_IN_FLIGHT',
     )
   })
 
@@ -73,5 +75,15 @@ describe('userService.deleteAccount — garde anti-suppression', () => {
     await deleteAccount(lone.id)
 
     expect(await prisma.user.findUnique({ where: { id: lone.id } })).toBeNull()
+  })
+
+  it('(4) voyageur d’une mission TERMINÉE (RELEASED) → supprimé (garde status-scoped)', async () => {
+    const buyer = await prisma.user.create({ data: { email: 'buyer-released@test.waylo' } })
+    const traveler = await prisma.user.create({ data: { email: 'trav-released@test.waylo' } })
+    await seedMission(buyer.id, traveler.id, 'RELEASED')
+
+    await deleteAccount(traveler.id)
+
+    expect(await prisma.user.findUnique({ where: { id: traveler.id } })).toBeNull()
   })
 })
