@@ -1,87 +1,107 @@
-import { prisma } from '../db'
+import type { PrismaClient } from '../generated/prisma'
 import { MissionStatus } from '../generated/prisma'
-import type { Mission } from '../generated/prisma'
+import { notifyActor } from '../notifications/notification.service'
 
 /**
- * DisputeService — litige AUTOMATISÉ (aucune intervention humaine).
+ * DisputeService — Watchdog auto-refund (aucune intervention humaine).
  *
  * Distinct du cycle structuré `dispute.service.ts` (model `Dispute`, statut mission
  * `DISPUTED`, arbitrage admin DRAFT→OPEN→ESCALATED→RESOLVED→CLOSED) : ICI tout est
- * porté par le statut mission `IN_DISPUTE` + l'échéance `disputeDeadline` (now + 72 h).
+ * porté par le statut mission `IN_DISPUTE` + l'échéance `disputeDeadline`.
  *
- *   openDispute(missionId, reason) — gèle la mission (IN_DISPUTE) et arme la deadline.
- *     • le payout voyageur est bloqué tant que IN_DISPUTE (garde escrowPayoutWorker) ;
- *     • à `disputeDeadline` dépassée, DisputeResolutionWorker déclenche un REFUND
- *       Stripe via l'outbox (OutboxEvent READY_FOR_REFUND) → mission REFUNDED.
+ * Flux :
+ *   1. `/ship` pose `autoRefundDeadline = now + 72 h` sur la mission.
+ *   2. `triggerAutoRefundWatchdog` (tick horaire, mission-lifecycle) : détecte les
+ *      missions IN_PROGRESS dont la deadline est dépassée et les gèle en IN_DISPUTE.
+ *   3. `DisputeResolutionWorker` ENQUEUE : détecte les IN_DISPUTE à `disputeDeadline`
+ *      dépassée et enfile un OutboxEvent READY_FOR_REFUND.
+ *   4. `DisputeResolutionWorker` CONSUME : annule le hold Stripe (HORS tx) → REFUNDED.
+ *
+ * GARDES FAIRNESS (anti-fraude acheteur) :
+ *   - `dropoffReceiptUrl IS NULL` : pas de preuve de dépôt voyageur.
+ *   - `dropOffTrackingId IS NULL` : pas de suivi de dépôt logistique.
+ *   Si l'une de ces preuves est présente, le watchdog ne gèle PAS — l'arbitrage humain
+ *   (/dispute) reste le seul chemin de résolution.
  *
  * SÛRETÉ :
- * - Anti-TOCTOU : transition conditionnelle atomique (`updateMany` filtré sur le
- *   statut source) dans une `prisma.$transaction` — `count !== 1` ⇒ état incompatible.
- * - Idempotence : un appel sur une mission déjà IN_DISPUTE est un no-op (la deadline
- *   N'EST PAS réarmée — le délai de 72 h court depuis la PREMIÈRE ouverture).
- * - États non litigeables : missions soldées (RELEASED/REFUNDED/CANCELLED/EXPIRED) ou
- *   déjà sous arbitrage humain (DISPUTED/DISPUTED_FRAUD) → MISSION_NOT_DISPUTABLE.
+ *   - Anti-TOCTOU : `updateMany WHERE { id, status: IN_PROGRESS, ... }` — un scan
+ *     concurrent ou une transition parallèle (/receive) n'est jamais double-traitée.
+ *   - Idempotence : `WHERE status = IN_PROGRESS` exclut les missions déjà IN_DISPUTE.
+ *   - Lot borné (batchSize, défaut 50) : pas de full scan illimité.
  */
 
 /** Fenêtre de résolution automatique : 72 h après l'ouverture du litige. */
 export const DISPUTE_WINDOW_MS = 72 * 60 * 60 * 1000
 
-/**
- * États depuis lesquels un litige automatisé est REFUSÉ : missions soldées (aucun
- * hold à rembourser) ou déjà prises en charge par l'arbitrage humain (model Dispute).
- */
-const NON_DISPUTABLE: readonly MissionStatus[] = [
-  MissionStatus.RELEASED,
-  MissionStatus.REFUNDED,
-  MissionStatus.CANCELLED,
-  MissionStatus.EXPIRED,
-  MissionStatus.DISPUTED,
-  MissionStatus.DISPUTED_FRAUD,
-]
-
-export class DisputeResolutionError extends Error {
-  constructor(readonly code: 'MISSION_NOT_FOUND' | 'MISSION_NOT_DISPUTABLE') {
-    super(code)
-    this.name = 'DisputeResolutionError'
-  }
+export interface WatchdogDeps {
+  prisma: PrismaClient
+  /** Horloge injectable (tests) — défaut : maintenant. */
+  now?: Date
+  /** Taille de lot (tests / tuning) — défaut 50. */
+  batchSize?: number
 }
 
 /**
- * Ouvre un litige automatisé : mission → IN_DISPUTE, `disputeOpenedAt` = now,
- * `disputeDeadline` = now + 72 h, `disputeReason` = reason. Idempotent.
+ * Gèle les missions IN_PROGRESS dont le délai de 72 h (autoRefundDeadline posé à
+ * /ship) est dépassé, sans preuve de livraison voyageur. Transition atomique par
+ * mission (anti-TOCTOU). Notification fire-and-forget vers le voyageur.
+ * Renvoie le nombre de missions effectivement gelées.
  */
-export async function openDispute(missionId: string, reason?: string | null): Promise<Mission> {
-  const now = new Date()
-  const deadline = new Date(now.getTime() + DISPUTE_WINDOW_MS)
+export async function triggerAutoRefundWatchdog(deps: WatchdogDeps): Promise<number> {
+  const now = deps.now ?? new Date()
+  const batchSize = deps.batchSize ?? 50
 
-  return prisma.$transaction(async tx => {
-    const mission = await tx.mission.findUnique({
-      where: { id: missionId },
-      select: { status: true },
-    })
-    if (!mission) throw new DisputeResolutionError('MISSION_NOT_FOUND')
+  // Sélection indexée (idx_auto_refund) : seules les missions IN_PROGRESS à deadline
+  // dépassée, scellées QR, sans preuve de livraison voyageur.
+  const eligible = await deps.prisma.mission.findMany({
+    where: {
+      status: MissionStatus.IN_PROGRESS,
+      autoRefundDeadline: { lte: now },
+      innerQrCodeHash: { not: null },
+      dropoffReceiptUrl: null,
+      dropOffTrackingId: null,
+    },
+    select: { id: true, travelerId: true, targetProduct: true, destination: true },
+    take: batchSize,
+  })
 
-    // Idempotence : déjà en litige → no-op, la deadline N'EST PAS réarmée.
-    if (mission.status === MissionStatus.IN_DISPUTE) {
-      return tx.mission.findUniqueOrThrow({ where: { id: missionId } })
-    }
-    if (NON_DISPUTABLE.includes(mission.status)) {
-      throw new DisputeResolutionError('MISSION_NOT_DISPUTABLE')
-    }
+  if (eligible.length === 0) return 0
 
-    // Transition conditionnelle anti-TOCTOU : le filtre sur le statut source garantit
-    // qu'une transition concurrente (autre worker/route) ne se superpose pas.
-    const updated = await tx.mission.updateMany({
-      where: { id: missionId, status: mission.status },
+  let count = 0
+  for (const { id, travelerId, targetProduct, destination } of eligible) {
+    // Transition atomique par mission : anti-TOCTOU (une transition concurrente /receive
+    // ou /drop-off qui poserait dropoffReceiptUrl/dropOffTrackingId entre le SELECT et
+    // l'UPDATE serait détectée par les gardes du WHERE → count 0 → no-op).
+    const updated = await deps.prisma.mission.updateMany({
+      where: {
+        id,
+        status: MissionStatus.IN_PROGRESS,
+        autoRefundDeadline: { lte: now },
+        dropoffReceiptUrl: null,
+        dropOffTrackingId: null,
+      },
       data: {
         status: MissionStatus.IN_DISPUTE,
         disputeOpenedAt: now,
-        disputeDeadline: deadline,
-        disputeReason: reason ?? null,
+        // disputeDeadline = now : immédiatement éligible à la phase ENQUEUE du
+        // DisputeResolutionWorker — le refund Stripe suit au prochain tick (~1 min).
+        disputeDeadline: now,
       },
     })
-    if (updated.count !== 1) throw new DisputeResolutionError('MISSION_NOT_DISPUTABLE')
+    if (updated.count === 1) {
+      count++
+      if (travelerId) {
+        notifyActor('notif:dispute-opened', id, travelerId, {
+          event: 'notif:dispute-opened',
+          missionId: id,
+          targetProduct,
+          destination,
+        }).catch(err =>
+          console.error({ err, missionId: id }, '[notif] dispute-opened failed'),
+        )
+      }
+    }
+  }
 
-    return tx.mission.findUniqueOrThrow({ where: { id: missionId } })
-  })
+  return count
 }

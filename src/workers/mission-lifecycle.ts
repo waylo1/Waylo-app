@@ -1,6 +1,7 @@
 import type { PrismaClient } from '../generated/prisma'
 import { MissionStatus } from '../generated/prisma'
 import { recordWorkerLoop } from '../monitoring/workerTiming'
+import { triggerAutoRefundWatchdog } from '../services/disputeResolution.service'
 
 /**
  * Cycle de vie des « ghost missions » (audit robustesse).
@@ -84,6 +85,7 @@ export function startMissionLifecycleLoop(
     // hrtime.bigint : durée du tick en nanosecondes, enregistrée pour /debug/performance.
     const start = process.hrtime.bigint()
     void expireGhostMissions({ prisma })
+      .then(() => triggerAutoRefundWatchdog({ prisma }))
       .catch(err => log.error({ err: String(err) }, 'mission-lifecycle tick failed'))
       .finally(() => {
         recordWorkerLoop('mission-lifecycle', Number(process.hrtime.bigint() - start) / 1e6)
