@@ -10,7 +10,6 @@ import { startRateLimitCleanupLoop } from './workers/rate-limit-cleanup'
 import { startMissionLifecycleLoop } from './workers/mission-lifecycle'
 import { startKeepAliveLoop } from './workers/keep-alive'
 import { startReceiptOutboxWorkerLoop } from './workers/receiptOutboxWorker'
-import { startEscrowPayoutWorkerLoop } from './workers/escrowPayoutWorker'
 import { startDisputeResolutionWorkerLoop } from './workers/disputeResolutionWorker'
 import { startDisputePenaltyWorkerLoop } from './workers/disputePenaltyWorker'
 import { startWorkerHealthLoop } from './monitoring/workerHealth'
@@ -217,9 +216,6 @@ async function main(): Promise<void> {
     receiptWorkerIntervalMs,
     log,
   )
-  // Worker de payout escrow (S22) : consomme les OutboxEvent READY_FOR_PAYOUT
-  // créés par confirmReception → capture Stripe HORS transaction DB.
-  const escrowPayoutTimer = startEscrowPayoutWorkerLoop({ prisma, stripe, log }, workerIntervalMs)
   // Worker de résolution de litige AUTOMATISÉ : enfile un refund (OutboxEvent
   // READY_FOR_REFUND) pour chaque mission IN_DISPUTE à `disputeDeadline` dépassée,
   // puis annule le hold Stripe HORS transaction DB → mission REFUNDED. Aucune
@@ -271,7 +267,6 @@ async function main(): Promise<void> {
     clearInterval(missionLifecycleTimer)
     clearInterval(keepAliveTimer)
     clearInterval(receiptWorkerTimer)
-    clearInterval(escrowPayoutTimer)
     clearInterval(disputeResolutionTimer)
     clearInterval(disputePenaltyTimer)
     clearInterval(workerHealthTimer)

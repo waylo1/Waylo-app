@@ -4,12 +4,14 @@ import { DeliveryProofStatus, EscrowStatus, MissionStatus } from '../generated/p
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { resetDb } from '../../tests/helpers/db-reset'
 import { runDisputeResolutionWorkerOnce, verifyAbuse } from './disputeResolutionWorker'
-import { runEscrowPayoutWorkerOnce } from './escrowPayoutWorker'
 
 /**
  * DisputeResolutionWorker (litige automatisé) — test d'INTÉGRATION (DB réelle
  * waylo_test, Stripe mocké) : enqueue + refund réel via outbox, idempotence,
- * retry sur échec Stripe. + garde IN_DISPUTE de escrowPayoutWorker en intégration.
+ * retry sur échec Stripe.
+ *
+ * NB : le bloc d'intégration « garde IN_DISPUTE de escrowPayoutWorker » a été
+ * retiré — escrowPayoutWorker supprimé (DEADFLOWS flux b).
  */
 
 if (!process.env.DATABASE_URL?.includes('waylo_test')) {
@@ -236,67 +238,6 @@ describe('DisputeResolutionWorker — refund automatisé via outbox', () => {
   })
 })
 
-describe('EscrowPayoutWorker — garde IN_DISPUTE (intégration)', () => {
-  let prisma: PrismaClient
-  let buyer: User
-  let traveler: User
-
-  beforeAll(async () => {
-    prisma = (await import('../db')).prisma
-  })
-
-  beforeEach(async () => {
-    vi.clearAllMocks()
-    await resetDb(prisma)
-    buyer = await prisma.user.create({ data: { email: 'buyer-payoutguard@test.waylo' } })
-    traveler = await prisma.user.create({ data: { email: 'traveler-payoutguard@test.waylo' } })
-  })
-
-  afterAll(async () => {
-    await resetDb(prisma)
-    await prisma.$disconnect()
-  })
-
-  it('mission IN_DISPUTE → READY_FOR_PAYOUT jamais réclamé, aucune capture', async () => {
-    const mission = await prisma.mission.create({
-      data: {
-        buyerId: buyer.id,
-        travelerId: traveler.id,
-        status: MissionStatus.IN_DISPUTE,
-        targetProduct: 'Article payout bloqué',
-        budgetCents: 50_000,
-        commissionCents: 5_000,
-        destination: 'Tokyo',
-        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
-        disputeOpenedAt: new Date(),
-        disputeDeadline: new Date(Date.now() + 72 * 3600 * 1000),
-      },
-    })
-    await prisma.escrowTransaction.create({
-      data: {
-        missionId: mission.id,
-        stripePaymentIntentId: `pi_guard_${mission.id}`,
-        spendingLimitCents: 50_000,
-        idempotencyKey: `escrow_fund_${mission.id}`,
-      },
-    })
-    // Event de payout en attente (acheteur avait confirmé) — mais litige ouvert depuis.
-    const event = await prisma.outboxEvent.create({
-      data: { missionId: mission.id, type: 'READY_FOR_PAYOUT' },
-    })
-
-    const capture = vi.fn()
-    const res = await runEscrowPayoutWorkerOnce({
-      prisma,
-      stripe: { paymentIntents: { capture } } as unknown as PaymentIntentClient,
-      log: mockLog,
-    })
-
-    // L'event n'est pas sélectionné (exclusion SQL) : aucune capture, attempts intact.
-    expect(capture).not.toHaveBeenCalled()
-    expect(res).toEqual({ settled: 0, failed: 0 })
-    const after = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: event.id } })
-    expect(after.status).toBe('PENDING')
-    expect(after.attempts).toBe(0)
-  })
-})
+// Bloc d'intégration « EscrowPayoutWorker — garde IN_DISPUTE » retiré : le worker
+// escrowPayoutWorker a été supprimé (DEADFLOWS flux b). Le gel du payout pendant
+// IN_DISPUTE n'a plus d'objet (plus aucun chemin READY_FOR_PAYOUT en prod).

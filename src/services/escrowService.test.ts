@@ -32,12 +32,7 @@ const { mockPrisma, mockTx } = vi.hoisted(() => {
 
 vi.mock('../db', () => ({ prisma: mockPrisma }))
 
-import {
-  sealReceipt,
-  confirmReception,
-  DeliveryProofError,
-  ReceptionConflictError,
-} from './escrowService'
+import { sealReceipt } from './escrowService'
 
 const job = (over: Partial<Record<string, unknown>> = {}) => ({
   status: 'COMPLETED',
@@ -149,110 +144,5 @@ describe('sealReceipt — validation métier + scellement OCR', () => {
   })
 })
 
-/**
- * confirmReception — confirmation de réception acheteur (transaction unique).
- * Test UNITAIRE : Prisma mocké (`../db`).
- *
- *  (1) preuve OK (sans code consigne) → COMPLETED_BY_BUYER + OutboxEvent READY_FOR_PAYOUT + audit ;
- *  (2) preuve OK matchant le code consigne → succès ;
- *  (3) preuve ≠ code consigne → DeliveryProofError INVALID, ROLLBACK (aucune écriture) ;
- *  (4) preuve vide → DeliveryProofError MISSING (avant transaction) ;
- *  (5) mission absente → ReceptionConflictError MISSION_NOT_FOUND ;
- *  (6) appelant non-acheteur → ReceptionConflictError NOT_MISSION_BUYER ;
- *  (7) mission hors AWAITING_CONFIRMATION → ReceptionConflictError.
- */
-const missionRow = (over: Partial<Record<string, unknown>> = {}) => ({
-  id: 'm1',
-  status: 'AWAITING_CONFIRMATION',
-  buyerId: 'buyer_1',
-  dropOffAccessCode: null,
-  ...over,
-})
-
-describe('confirmReception — confirmation de réception acheteur', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx))
-    mockTx.mission.findUnique.mockResolvedValue(missionRow())
-    mockTx.mission.updateMany.mockResolvedValue({ count: 1 })
-    mockTx.outboxEvent.create.mockResolvedValue({ id: 'evt_1' })
-    mockTx.adminAuditLog.create.mockResolvedValue({ id: 'audit_1' })
-  })
-
-  it('(1) preuve valide (sans code consigne) → COMPLETED_BY_BUYER + OutboxEvent + audit', async () => {
-    const res = await confirmReception('m1', 'buyer_1', 'PROOF-123')
-
-    // Transition conditionnelle anti-TOCTOU + scellement du hash de preuve.
-    const upd = mockTx.mission.updateMany.mock.calls[0][0]
-    expect(upd.where).toEqual({ id: 'm1', status: 'AWAITING_CONFIRMATION' })
-    expect(upd.data.status).toBe('COMPLETED_BY_BUYER')
-    expect(upd.data.deliveryProofHash).toMatch(/^[0-9a-f]{64}$/)
-    expect(upd.data.receptionConfirmedAt).toBeInstanceOf(Date)
-    // Handoff paiement : OutboxEvent READY_FOR_PAYOUT (PENDING par défaut DB).
-    expect(mockTx.outboxEvent.create).toHaveBeenCalledWith({
-      data: {
-        missionId: 'm1',
-        type: 'READY_FOR_PAYOUT',
-        payload: { deliveryProofHash: expect.stringMatching(/^[0-9a-f]{64}$/), confirmedBy: 'buyer_1' },
-      },
-      select: { id: true },
-    })
-    // Audit append-only.
-    expect(mockTx.adminAuditLog.create).toHaveBeenCalledWith({
-      data: { adminId: 'buyer_1', action: 'CONFIRM_RECEPTION', missionId: 'm1' },
-    })
-    expect(res).toEqual({ missionId: 'm1', status: 'COMPLETED_BY_BUYER', outboxEventId: 'evt_1' })
-  })
-
-  it('(2) preuve correspondant au code consigne → succès', async () => {
-    mockTx.mission.findUnique.mockResolvedValue(missionRow({ dropOffAccessCode: 'LOCKER-42' }))
-
-    const res = await confirmReception('m1', 'buyer_1', 'LOCKER-42')
-
-    expect(res.status).toBe('COMPLETED_BY_BUYER')
-    expect(mockTx.mission.updateMany).toHaveBeenCalledTimes(1)
-  })
-
-  it('(3) preuve ≠ code consigne → INVALID, rollback (aucune écriture)', async () => {
-    mockTx.mission.findUnique.mockResolvedValue(missionRow({ dropOffAccessCode: 'LOCKER-42' }))
-
-    await expect(confirmReception('m1', 'buyer_1', 'WRONG')).rejects.toSatisfy(
-      (e: unknown) => e instanceof DeliveryProofError && e.code === 'DELIVERY_PROOF_INVALID',
-    )
-    expect(mockTx.mission.updateMany).not.toHaveBeenCalled()
-    expect(mockTx.outboxEvent.create).not.toHaveBeenCalled()
-    expect(mockTx.adminAuditLog.create).not.toHaveBeenCalled()
-  })
-
-  it('(4) preuve vide → MISSING avant toute transaction', async () => {
-    await expect(confirmReception('m1', 'buyer_1', '   ')).rejects.toSatisfy(
-      (e: unknown) => e instanceof DeliveryProofError && e.code === 'DELIVERY_PROOF_MISSING',
-    )
-    expect(mockPrisma.$transaction).not.toHaveBeenCalled()
-  })
-
-  it('(5) mission absente → MISSION_NOT_FOUND', async () => {
-    mockTx.mission.findUnique.mockResolvedValue(null)
-
-    await expect(confirmReception('m1', 'buyer_1', 'PROOF')).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceptionConflictError && e.code === 'MISSION_NOT_FOUND',
-    )
-  })
-
-  it('(6) appelant non-acheteur → NOT_MISSION_BUYER (anti-IDOR)', async () => {
-    await expect(confirmReception('m1', 'someone_else', 'PROOF')).rejects.toSatisfy(
-      (e: unknown) => e instanceof ReceptionConflictError && e.code === 'NOT_MISSION_BUYER',
-    )
-    expect(mockTx.mission.updateMany).not.toHaveBeenCalled()
-  })
-
-  it('(7) mission hors AWAITING_CONFIRMATION → conflit', async () => {
-    mockTx.mission.findUnique.mockResolvedValue(missionRow({ status: 'IN_PROGRESS' }))
-
-    await expect(confirmReception('m1', 'buyer_1', 'PROOF')).rejects.toSatisfy(
-      (e: unknown) =>
-        e instanceof ReceptionConflictError && e.code === 'MISSION_NOT_AWAITING_CONFIRMATION',
-    )
-    expect(mockTx.outboxEvent.create).not.toHaveBeenCalled()
-  })
-})
+// NB : confirmReception (flux b « réception → payout ») a été supprimé (DEADFLOWS) —
+// le chemin de libération vivant est capture+transfer-worker. Tests retirés en conséquence.
