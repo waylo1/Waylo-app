@@ -186,6 +186,8 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
           trackingReference,
           purchaseAmountCents,
           innerQrCodeHash,
+          // Watchdog : deadline de réception auto-refund posée une seule fois à l'expédition.
+          autoRefundDeadline: new Date(Date.now() + 72 * 60 * 60 * 1000),
         },
       })
       if (updated.count !== 1) {

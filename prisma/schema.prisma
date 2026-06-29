@@ -234,8 +234,9 @@ model Mission {
   droppedAt            DateTime?    // horodatage serveur du dépôt logistique (jamais l'horloge du device)
   disputeReason        String?   // motif du litige acheteur (optionnel) ; null hors litige
   disputedAt           DateTime? // horodatage serveur d'ouverture du litige (/dispute) ; null hors litige
-  disputeOpenedAt      DateTime? // litige AUTOMATISÉ (IN_DISPUTE) : horodatage serveur d'ouverture (DisputeService.openDispute) ; null hors litige auto
+  disputeOpenedAt      DateTime? // litige AUTOMATISÉ (IN_DISPUTE) : horodatage serveur d'ouverture ; null hors litige auto
   disputeDeadline      DateTime? // litige AUTOMATISÉ : échéance (disputeOpenedAt + 72 h) ; passée, DisputeResolutionWorker déclenche le REFUND auto. null hors litige auto
+  autoRefundDeadline   DateTime? // Watchdog auto-refund : posé à /ship = now + 72 h. Si IN_PROGRESS ET cette échéance dépassée ET sceau QR non validé ET pas de preuve voyageur → triggerAutoRefundWatchdog gèle en IN_DISPUTE.
   isContestAbusive     Boolean   @default(false) // DÉPRÉCIÉ — remplacé par deliveryProofStatus ; conservé pour rétrocompatibilité mais plus lu par les workers.
   deliveryProofStatus  DeliveryProofStatus @default(PENDING) // source de vérité pour la pénalité d'instruction : VALIDATED = livraison prouvée → contestation potentiellement abusive ; PENDING = défaut = bonne foi (aucune pénalité). Posé par le protocole de preuve (ops/admin).
   innerQrCodeHash      String?   // sha256 (hex) du QR scellé À L'INTÉRIEUR du colis : preuve anti-« colis vide ». Waylo ne stocke QUE le hash ; l'acheteur scanne le code brut à la réception, /confirm-collection le vérifie (timingSafeEqual) avant de libérer le séquestre. null = mission sans sceau (chemin de collecte historique)
@@ -266,6 +267,9 @@ model Mission {
   // expiresAt < now) ET les filtres de statut seuls (catalogue FUNDED, customs-pending…)
   // via son préfixe gauche — un index simple [status] serait redondant.
   @@index([status, expiresAt])
+  // Watchdog auto-refund : scan de TOUTES les IN_PROGRESS à deadline dépassée.
+  // Préfixe gauche (status) élimine les 95%+ de lignes non éligibles avant le range-scan sur autoRefundDeadline.
+  @@index([status, autoRefundDeadline], name: "idx_auto_refund")
 }
 
 model EscrowTransaction {

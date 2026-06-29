@@ -1,5 +1,5 @@
 import type { PrismaClient } from '../generated/prisma'
-import { DeliveryProofStatus, EscrowStatus, MissionStatus, OutboxEventType, PenaltyReason } from '../generated/prisma'
+import { EscrowStatus, MissionStatus, OutboxEventType } from '../generated/prisma'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { claimOutboxBatch } from './outbox-claim'
 import type { OutboxWorkerLogger } from './outbox-claim'
@@ -43,19 +43,9 @@ export interface DisputeResolutionWorkerDeps {
 const DEFAULT_MAX_ATTEMPTS = 5
 const DEFAULT_BATCH_LIMIT = 50
 
-/**
- * Vérifie si la contestation de la mission est MANIFESTEMENT ABUSIVE.
- * Source de vérité : `Mission.deliveryProofStatus === VALIDATED` (preuve de livraison
- * acceptée). PENDING (défaut) et REJECTED → toujours false → JAMAIS de pénalité.
- * Exporté pour les tests unitaires.
- */
-export async function verifyAbuse(prisma: PrismaClient, missionId: string): Promise<boolean> {
-  const mission = await prisma.mission.findUnique({
-    where: { id: missionId },
-    select: { deliveryProofStatus: true },
-  })
-  return mission?.deliveryProofStatus === DeliveryProofStatus.VALIDATED
-}
+// [WATCHDOG] verifyAbuse et la branche pénalité d'instruction ont été retirés :
+// le timeout auto-refund (triggerAutoRefundWatchdog) n'est pas une contestation
+// initiée par l'acheteur — la sémantique ABUSIVE_CONTESTATION ne s'applique pas ici.
 
 interface ClaimedRefund {
   id: string
@@ -195,9 +185,6 @@ async function executeRefund(
     }
     const refundDurationMs = Date.now() - startedAt
 
-    // Pénalité enfilée ? Décidé DANS la tx (lecture fraîche) — tracé pour le log post-commit.
-    let penaltyCreated = false
-
     // Verdict : transaction courte, aucun appel Stripe.
     await prisma.$transaction(async tx => {
       await tx.outboxEvent.update({
@@ -205,49 +192,17 @@ async function executeRefund(
         data: { status: 'SETTLED', lastError: null },
       })
       // Anti-TOCTOU : la mission ne quitte IN_DISPUTE → REFUNDED qu'ICI, après refund
-      // confirmé — la garde escrowPayoutWorker a bloqué tout payout jusqu'à ce commit.
+      // confirmé.
       await tx.mission.updateMany({
         where: { id: claimed.missionId, status: MissionStatus.IN_DISPUTE },
         data: { status: MissionStatus.REFUNDED },
       })
-      // Hold non capturé annulé → escrow CANCELLED (filtré sur HELD : idempotent +
-      // accepté par la garde d'immutabilité escrow). Aucun escrow = rien à solder.
+      // Hold non capturé annulé → escrow CANCELLED (filtré sur HELD : idempotent).
       if (escrow) {
         await tx.escrowTransaction.updateMany({
           where: { id: escrow.id, status: EscrowStatus.HELD },
           data: { status: EscrowStatus.CANCELLED },
         })
-      }
-      // Pénalité d'instruction : créée ATOMIQUEMENT avec la résolution UNIQUEMENT si
-      // deliveryProofStatus === VALIDATED. Anti-TOCTOU : lecture FRAÎCHE du statut DANS la
-      // transaction (et non un booléen calculé hors tx) — un flip VALIDATED→REJECTED entre
-      // le claim et le commit ne peut plus créer une pénalité sur une lecture périmée.
-      // Frais FIXES (15000 c = 150 €, défaut du model). Outbox PENDING → disputePenaltyWorker
-      // exécute le prélèvement Stripe HORS tx. upsert = idempotent (missionId @unique).
-      // AdminAuditLog SYSTÈME (actor SYSTEM, adminId null) : isolation des logs d'instruction.
-      const fresh = await tx.mission.findUnique({
-        where: { id: claimed.missionId },
-        select: { deliveryProofStatus: true, buyerId: true },
-      })
-      if (fresh?.deliveryProofStatus === DeliveryProofStatus.VALIDATED) {
-        await tx.penalty.upsert({
-          where: { missionId: claimed.missionId },
-          create: {
-            missionId: claimed.missionId,
-            userId: fresh.buyerId,
-            reason: PenaltyReason.ABUSIVE_CONTESTATION,
-          },
-          update: {}, // déjà créée (rejeu) : no-op, jamais de doublon ni de réarmement
-        })
-        await tx.adminAuditLog.create({
-          data: {
-            actor: 'SYSTEM', // entrée automatisée (worker)
-            adminId: null,
-            action: 'INSTRUCTION_PENALTY_OPENED',
-            missionId: claimed.missionId,
-          },
-        })
-        penaltyCreated = true
       }
     })
 
@@ -257,8 +212,7 @@ async function executeRefund(
         missionId: claimed.missionId,
         stripePaymentIntentId: escrow?.stripePaymentIntentId ?? null,
         escrowStatusBefore: escrow?.status ?? null,
-        refundDurationMs, // métrique de latence Stripe par refund
-        penaltyCreated, // pénalité d'instruction enfilée (deliveryProofStatus === VALIDATED, lu en tx) ?
+        refundDurationMs,
       },
       'dispute: refund Stripe exécuté — mission remboursée',
     )
