@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../generated/prisma'
 import { MissionStatus } from '../generated/prisma'
+import { logger } from '../lib/logger'
 import { notifyActor } from '../notifications/notification.service'
 
 /**
@@ -97,7 +98,7 @@ export async function triggerAutoRefundWatchdog(deps: WatchdogDeps): Promise<num
           targetProduct,
           destination,
         }).catch(err =>
-          console.error({ err, missionId: id }, '[notif] dispute-opened failed'),
+          logger.error({ err, missionId: id }, '[notif] dispute-opened failed'),
         )
       }
     }

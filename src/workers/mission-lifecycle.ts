@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../generated/prisma'
 import { MissionStatus } from '../generated/prisma'
+import { logger } from '../lib/logger'
 import { recordWorkerLoop } from '../monitoring/workerTiming'
 import { triggerAutoRefundWatchdog } from '../services/disputeResolution.service'
 
@@ -76,7 +77,7 @@ export async function expireGhostMissions(deps: MissionLifecycleDeps): Promise<n
 export function startMissionLifecycleLoop(
   prisma: PrismaClient,
   intervalMs = 3_600_000, // 1 heure
-  log: { error(details: Record<string, unknown>, message?: string): void } = console,
+  log: { error(details: Record<string, unknown>, message?: string): void } = logger,
 ): NodeJS.Timeout {
   let inFlight = false
   return setInterval(() => {

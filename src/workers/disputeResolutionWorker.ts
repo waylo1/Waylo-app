@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../generated/prisma'
 import { EscrowStatus, MissionStatus, OutboxEventType } from '../generated/prisma'
+import { logger } from '../lib/logger'
 import type { PaymentIntentClient } from '../missions/mission-common'
 import { claimOutboxBatch } from './outbox-claim'
 import type { OutboxWorkerLogger } from './outbox-claim'
@@ -231,7 +232,7 @@ export async function runDisputeResolutionWorkerOnce(
   const { prisma, stripe } = deps
   const maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
   const batchLimit = deps.batchLimit ?? DEFAULT_BATCH_LIMIT
-  const log = deps.log ?? console
+  const log = deps.log ?? logger
   const now = deps.now ?? new Date()
 
   // Phase 1 — enfile les intentions de refund (échéances dépassées).
@@ -266,7 +267,7 @@ export function startDisputeResolutionWorkerLoop(
     if (inFlight) return // passage précédent encore en cours — tick sauté
     inFlight = true
     void runDisputeResolutionWorkerOnce(deps)
-      .catch(err => (deps.log ?? console).error({ err: String(err) }, 'dispute resolution worker tick failed'))
+      .catch(err => (deps.log ?? logger).error({ err: String(err) }, 'dispute resolution worker tick failed'))
       .finally(() => {
         inFlight = false
       })
