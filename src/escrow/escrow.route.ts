@@ -65,12 +65,25 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
         throw new AppError('CUSTOMS_LOCK_ACTIVE', 409)
       }
 
+      // Garde 3 — CAS atomique : AWAITING_VALIDATION → VALIDATED.
+      // updateMany WHERE status=AWAITING_VALIDATION est le seul point d'exclusion mutuelle.
+      // PostgreSQL garantit count=1 pour un seul gagnant ; les 49 autres voient count=0 → 409.
+      // L'appel Stripe (hors $transaction) ne suit que si count=1.
+      const cas = await prisma.mission.updateMany({
+        where: { id: missionId, status: MissionStatus.AWAITING_VALIDATION },
+        data: { status: MissionStatus.VALIDATED },
+      })
+      if (cas.count === 0) throw new AppError('MISSION_ALREADY_CAPTURED', 409)
+
       try {
         const result = await captureEscrowFunds(missionId, opts.stripe)
         return reply.code(200).send(result)
       } catch (err) {
-        // Mapping des erreurs de pré-check du service (statut escrow) vers HTTP ;
-        // toute autre erreur (ex. Stripe API) propage au gestionnaire global → 500.
+        // Rollback CAS si Stripe échoue — mission revient capturable.
+        await prisma.mission.update({
+          where: { id: missionId },
+          data: { status: MissionStatus.AWAITING_VALIDATION },
+        })
         if (err instanceof EscrowCaptureError) {
           if (err.code === 'ESCROW_NOT_FOUND') throw new AppError(err.code, 404)
           if (err.code === 'ESCROW_NOT_HELD') throw new AppError(err.code, 400)
