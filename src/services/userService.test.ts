@@ -23,6 +23,8 @@ describe('userService.deleteAccount — garde anti-suppression', () => {
     await prisma.outboxEvent.deleteMany()
     await prisma.receiptExtractionOutbox.deleteMany()
     await prisma.receipt.deleteMany()
+    await prisma.ledgerEntry.deleteMany()
+    await prisma.transferOutbox.deleteMany()
     await prisma.escrowTransaction.deleteMany()
     await prisma.mission.deleteMany()
     await prisma.user.deleteMany()

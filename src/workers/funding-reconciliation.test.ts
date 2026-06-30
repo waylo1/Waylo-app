@@ -38,6 +38,8 @@ describe('Réconciliation financements abandonnés', () => {
 
   beforeAll(async () => {
     prisma = (await import('../db')).prisma
+    await prisma.ledgerEntry.deleteMany()
+    await prisma.transferOutbox.deleteMany()
     await prisma.escrowTransaction.deleteMany()
     await prisma.mission.deleteMany()
     await prisma.adminAuditLog.deleteMany()
