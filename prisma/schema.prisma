@@ -270,6 +270,13 @@ model Mission {
   // Watchdog auto-refund : scan de TOUTES les IN_PROGRESS à deadline dépassée.
   // Préfixe gauche (status) élimine les 95%+ de lignes non éligibles avant le range-scan sur autoRefundDeadline.
   @@index([status, autoRefundDeadline], name: "idx_auto_refund")
+  // Catalogue de matching global « Net Gain » (matching.service.getAvailableMatches) :
+  // WHERE status = FUNDED ORDER BY commissionCents DESC, createdAt DESC.
+  // L'ORDER BY MÈNE sur commissionCents (récompense voyageur) — un index
+  // (status, createdAt) ne couvre donc PAS le tri (colonne de tête absente) et
+  // forcerait un tri en mémoire. Index aligné sur le tri réel : status borne
+  // l'ensemble, puis parcours déjà ordonné (commissionCents desc, createdAt desc).
+  @@index([status, commissionCents(sort: Desc), createdAt(sort: Desc)], name: "idx_net_gain_matching")
 }
 
 model EscrowTransaction {
