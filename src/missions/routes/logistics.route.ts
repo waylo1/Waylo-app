@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { FastifyPluginAsync } from 'fastify'
 import {
   DropOffType,
+  EscrowStatus,
   MissionStatus,
   SubstitutionStatus,
 } from '../../generated/prisma'
@@ -12,6 +13,7 @@ import {
   findMissionForParticipant,
 } from '../mission-access'
 import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
+import { decideDelivery } from '../../services/delivery/delivery.service'
 import { getCustomsThreshold } from '../customs'
 import { hashQrCode, qrCodeMatches } from '../qr-proof'
 import {
@@ -420,8 +422,37 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
         throw new AppError('INVALID_MISSION_STATE', 400)
       }
 
-      // Sceau QR interne (anti « colis vide ») : vérification STRICTE en temps constant AVANT capture.
-      verifyInnerSeal((req.body as InnerQrBody).innerQrCode, mission.innerQrCodeHash)
+      // Précondition fonds : lue ICI (avant le verdict PoD) — decideDelivery ne fait
+      // aucun I/O, ses faits doivent être déjà en main (cf. delivery.service.ts).
+      const escrow = await prisma.escrowTransaction.findUnique({
+        where: { missionId: mission.id },
+        select: { status: true },
+      })
+      if (!escrow || escrow.status !== EscrowStatus.HELD) {
+        throw new AppError('ESCROW_NOT_HELD', 400)
+      }
+
+      // Verdict PoD — source UNIQUE de la décision de remise (preuve cryptographique
+      // du sceau + cohérence temporelle). `shippedAt` = dropoffAt : seul horodatage
+      // garanti posé à l'entrée en DEPOSITED (unique writer de ce statut, cf. /dropoff-receipt).
+      const decision = decideDelivery(
+        {
+          missionId: mission.id,
+          scannedQrCode: (req.body as InnerQrBody).innerQrCode,
+          scannedAt: new Date(),
+          location: null,
+          signature: null,
+        },
+        {
+          missionStatus: mission.status,
+          escrowStatus: escrow.status,
+          innerQrSealHash: mission.innerQrCodeHash,
+          shippedAt: mission.dropoffAt,
+        },
+      )
+      if (!decision.readyToRelease) {
+        throw new AppError(decision.status, 400)
+      }
 
       // Capture via le service (source unique) : pré-check escrow HELD + montant
       // `amount_to_capture` exact, clé dédiée au chemin collecte.
