@@ -47,6 +47,7 @@ describe('Checkout — validation capacité acheteur (Sprint 19)', () => {
   async function wipe(): Promise<void> {
     await prisma.walletTransaction.deleteMany()
     await prisma.wallet.deleteMany()
+    await prisma.ledgerEntry.deleteMany()
     await prisma.escrowTransaction.deleteMany()
     await prisma.mission.deleteMany()
   }
