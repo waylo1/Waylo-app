@@ -10,6 +10,9 @@ RUN apt-get update -y \
 ENV NODE_ENV=production
 
 COPY package.json package-lock.json* ./
+# prisma/schema.prisma AVANT npm ci : le postinstall (`prisma generate`,
+# package.json) s'exécute pendant `npm ci` et échoue si le schéma est absent.
+COPY prisma ./prisma
 # tsx + prisma CLI sont en devDependencies mais REQUIS au runtime (start via tsx,
 # migrate deploy) → on force leur installation malgré NODE_ENV=production.
 RUN npm ci --include=dev || npm install --include=dev
