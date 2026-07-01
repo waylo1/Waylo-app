@@ -32,87 +32,89 @@ DOIT utiliser le GUC applicatif `current_setting('app.current_user_id')`, jamais
 
 ---
 
-## 1. RLS Enforcement via `waylo_app` role
+## 1. RLS Enforcement via le rôle runtime `waylo_user`
 
 ### Principe
 
 PostgreSQL Row Level Security (RLS) avec `FORCE ROW LEVEL SECURITY` n'est **pas suffisant** si
-la connexion de pool démarre en rôle `BYPASSRLS=true` (ex. `flipsync` / `postgres`).
-La parade : basculer le rôle de la **transaction** via `SET LOCAL ROLE waylo_app` (`NOBYPASSRLS`).
+la connexion de pool tourne avec un rôle `BYPASSRLS=true` (`postgres`, sur Supabase). La parade
+retenue : un rôle de **connexion** dédié, `waylo_user`, créé `NOBYPASSRLS`, utilisé comme rôle
+runtime (`url` Prisma) — par opposition à `postgres`, réservé aux migrations (`directUrl`).
 
-`SET LOCAL` est transaction-safe : le rôle revient automatiquement au rôle de connexion au
-`COMMIT` ou `ROLLBACK` — aucun risque de pollution inter-requêtes sur le pool.
+> **Abandonné** : basculer le rôle *par transaction* via `SET LOCAL ROLE waylo_app`. Nécessitait
+> `GRANT waylo_app TO postgres WITH SET TRUE`, qui **coupe la session** sur Supabase (blocage de
+> l'auto-modification du rôle réservé `postgres`) — reproductible via Prisma et via MCP direct.
+> Pas de contournement sans accès superuser. Voir [`README_SECURITY.md`](../README_SECURITY.md).
+
+Puisque le rôle ne peut plus être changé au niveau transaction, le bypass « par défaut » (modes
+`off`/`shadow`, et tous les chemins hors `withRlsContext`) est porté par une clause dans les
+policies elles-mêmes plutôt que par un attribut de rôle :
+
+```sql
+current_setting('app.bypass_rls', true) IS DISTINCT FROM 'off'
+```
+
+GUC absent (session hors `withRlsContext`) ou `'on'` (mode `off`/`shadow`) ⇒ bypass ; `'off'`
+(posé explicitement par `withRlsContext` en mode `enforce`) ⇒ policy pleinement évaluée.
 
 ### Implémentation
 
 Fichier : [`src/lib/rls-context.ts`](../src/lib/rls-context.ts)
 
 ```typescript
-export async function withRlsContext<T>(ctx: RlsContext, fn: (tx) => Promise<T>): Promise<T> {
+export async function withRlsContext<T>(
+  ctx: RlsContext,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  const mode = await FeatureGuard.mode(ctx.flagKey ?? 'rls.missions')
+  const bypass = mode !== 'enforce'
+
   return prisma.$transaction(async tx => {
-    if (!ctx.bypass) {
-      await tx.$executeRawUnsafe('SET LOCAL ROLE waylo_app')  // NOBYPASSRLS
-    }
-    await tx.$executeRaw`
-      SELECT
-        set_config('app.current_user_id', ${ctx.userId ?? ''}, true),
-        set_config('app.is_admin',        ${ctx.isAdmin  ? 'on' : 'off'}, true),
-        set_config('app.is_service',      ${ctx.isService ? 'on' : 'off'}, true),
-        set_config('app.bypass_rls',      ${ctx.bypass    ? 'on' : 'off'}, true)
-    `
+    // Le rôle de connexion `waylo_user` est déjà NOBYPASSRLS — pas de SET LOCAL ROLE.
+    // L'enforcement est piloté par le seul GUC `app.bypass_rls` (transaction-local).
+    await tx.$queryRaw`SELECT
+      set_config('app.current_user_id', ${ctx.userId ?? ''}, true),
+      set_config('app.is_certified',    ${ctx.isCertified ? 'on' : 'off'}, true),
+      set_config('app.is_admin',        ${ctx.isAdmin ? 'on' : 'off'}, true),
+      set_config('app.is_service',      ${ctx.isService ? 'on' : 'off'}, true),
+      set_config('app.bypass_rls',      ${bypass ? 'on' : 'off'}, true)`
     return fn(tx)
   })
 }
 ```
 
-| `bypass` | Rôle de transaction | Politiques RLS | Usage |
-|---|---|---|---|
-| `false` | `waylo_app` (NOBYPASSRLS) | **actives** | mode `enforce` |
-| `true` | rôle de connexion (BYPASSRLS) | inactives | mode `off` / `shadow` |
+| Mode `FeatureGuard` | `app.bypass_rls` | Rôle de connexion | Politiques RLS | Usage |
+|---|---|---|---|---|
+| `off` / `shadow` | `on` | `waylo_user` (NOBYPASSRLS) | inactives (clause bypass) | défaut, sans risque |
+| `enforce` | `off` | `waylo_user` (NOBYPASSRLS) | **actives** | isolation réelle |
+| *(hors `withRlsContext`)* | absent | `postgres` (BYPASSRLS) ou `waylo_user` | inactives | routes financières non câblées (§ tableau WIP) |
 
 ### Activation progressive (FeatureGuard)
 
 ```
 off     → shadow  → enforce
-         (logs)    (SET LOCAL ROLE actif)
+         (logs)    (app.bypass_rls='off' ⇒ policies actives)
 ```
 
-- `shadow` : les GUC sont posés, `bypass=true` → politiques inactives, mais métriques `rls_shadow_mismatch_total` accumulées.
-- `enforce` : `bypass=false` → `SET LOCAL ROLE waylo_app` actif à chaque transaction.
+- `shadow` : les GUC sont posés, `bypass=true` → policies inactives, mais métriques `rls_shadow_mismatch_total` accumulées.
+- `enforce` : `bypass=false` → clause de policy évaluée à chaque requête sur `waylo_user`.
 - Kill switch : `FeatureGuard.kill('rls.missions', adminId)` — propagation < 5 s.
 
 ### Prérequis de déploiement
 
-Chaque nouveau déploiement / migration Supabase doit exécuter :
+Deux migrations, déployées en prod :
 
-```sql
--- 1. Créer le rôle (idempotent)
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waylo_app') THEN
-    CREATE ROLE waylo_app NOLOGIN NOBYPASSRLS NOSUPERUSER INHERIT;
-  END IF;
-END $$;
-
--- 2. USAGE sur le schéma (OBLIGATOIRE — sans ça : "permission denied for schema public")
-GRANT USAGE ON SCHEMA public TO waylo_app;
-
--- 3. Grants tables + séquences
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA public TO waylo_app;
-GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA public TO waylo_app;
-
--- 4. Default privileges (futures tables Prisma)
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO waylo_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT USAGE, SELECT                  ON SEQUENCES TO waylo_app;
-```
-
-> Script complet : [`prisma/migrations/20260630160000_setup_waylo_app/migration.sql`](../prisma/migrations/20260630160000_setup_waylo_app/migration.sql)
-> Migration Prisma standard — appliquée via `prisma migrate deploy` comme les autres (vérifié sur `waylo_test`, pas encore sur prod).
+1. [`20260701140000_create_waylo_user`](../prisma/migrations/20260701140000_create_waylo_user/migration.sql) —
+   crée le rôle `waylo_user` (`LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`), grants
+   CRUD sur toutes les tables/séquences + default privileges pour les futures tables Prisma.
+   *(Le « bypass par défaut » n'y est **pas** posé via `ALTER ROLE ... SET` : cela nécessite un
+   accès superuser, absent sur Supabase — `42501: permission denied to set parameter`.)*
+2. [`20260701150000_rls_bypass_default`](../prisma/migrations/20260701150000_rls_bypass_default/migration.sql) —
+   réécrit les policies `mission_*`/`wallet_*` avec la clause `IS DISTINCT FROM 'off'`.
 
 ### Tests de régression
 
-Fichier : [`src/rls-security.test.ts`](../src/rls-security.test.ts)
+Fichier : [`src/security/rls-isolation.test.ts`](../src/security/rls-isolation.test.ts) (app-layer, 9/9)
 
 | Test | Ce qu'il vérifie |
 |---|---|
