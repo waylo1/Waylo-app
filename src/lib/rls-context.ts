@@ -44,6 +44,13 @@ import { FeatureGuard } from './feature-guard'
  * `rls.missions` / `rls.wallets`) — off/shadow ⇒ `app.bypass_rls='on'`,
  * enforce ⇒ `app.bypass_rls='off'`. Propagation < 5 s (TTL cache `FeatureGuard`),
  * `kill()` évince le cache immédiatement (cf. feature-guard.ts).
+ *
+ * SHADOW MODE (`ctx.readOnly=true` requis, appels actuels tous des lectures) :
+ * `fn` est rejoué sous `app.bypass_rls='off'` dans une SAVEPOINT annulée, pour
+ * comparer au résultat réel (bypass actif) sans rien persister. Un écart
+ * vide/non-vide est enregistré via `log_rls_shadow_mismatch` (migration
+ * `20260701160000_rls_shadow_observability`). `readOnly` défaut `false` : ne
+ * JAMAIS l'activer sur un bloc qui écrit (le rejeu doublerait l'effet de bord).
  * NON câblé : routes multi-étapes couplées Stripe (funding, logistics/capture)
  * — `withRlsContext` ouvre une `$transaction` Prisma ; y inclure un appel Stripe
  * violerait l'invariant verrouillé (docs/DECISIONS.md §1 : « Tout appel Stripe
@@ -69,6 +76,23 @@ export interface RlsContext {
    * fait alors filtrer les policies par identité).
    */
   flagKey?: string
+  /**
+   * `fn` n'a AUCUN effet de bord (lecture pure) — condition requise pour activer
+   * la double-exécution de comparaison en mode `shadow` (migration
+   * `20260701160000_rls_shadow_observability`). Défaut `false` : par sécurité,
+   * pas de rejeu implicite d'un bloc qui pourrait écrire (financier notamment).
+   */
+  readOnly?: boolean
+}
+
+/** Correspondance flagKey → table, pour l'enregistrement des écarts shadow. */
+const FLAG_TABLE: Record<string, string> = {
+  'rls.missions': 'Mission',
+  'rls.wallets': 'Wallet',
+}
+
+function isEmptyResult(value: unknown): boolean {
+  return value == null || (Array.isArray(value) && value.length === 0)
 }
 
 /**
@@ -82,34 +106,87 @@ export interface RlsContext {
  *     tx => tx.mission.findUnique({ where: { id } }),
  *   )
  */
+async function setRlsGuc(
+  tx: Prisma.TransactionClient,
+  ctx: RlsContext,
+  bypass: boolean,
+): Promise<void> {
+  // Identité effective : non vide dès qu'un userId authentifié est fourni.
+  // Sinon chaîne vide ⇒ les politiques `current_user_id <> '' AND owner = ...`
+  // échouent ⇒ rejet par défaut (principal anonyme).
+  const effectiveUserId = ctx.userId ?? ''
+
+  // GUC transaction-locaux. `${...}` = paramètres liés (texte, anti-injection) ;
+  // le 3ᵉ argument `true` (is_local) est un littéral. $queryRaw car SELECT.
+  await tx.$queryRaw`SELECT
+    set_config('app.current_user_id', ${effectiveUserId}, true),
+    set_config('app.is_certified',    ${ctx.isCertified ? 'on' : 'off'}, true),
+    set_config('app.is_admin',        ${ctx.isAdmin ? 'on' : 'off'}, true),
+    set_config('app.is_service',      ${ctx.isService ? 'on' : 'off'}, true),
+    set_config('app.bypass_rls',      ${bypass ? 'on' : 'off'}, true)`
+}
+
+/**
+ * Mode `shadow` + `ctx.readOnly` : rejoue `fn` une seconde fois sous
+ * `app.bypass_rls='off'` (dans une savepoint annulée ensuite — aucune écriture
+ * persistée) pour comparer au résultat réel servi à l'appelant (bypass actif).
+ * Écart de « vide vs non-vide » ⇒ enregistré via `log_rls_shadow_mismatch`
+ * (migration `20260701160000_rls_shadow_observability`). Best-effort : toute
+ * erreur du probe est avalée, elle ne doit jamais faire échouer la requête réelle.
+ */
+async function logShadowMismatch<T>(
+  tx: Prisma.TransactionClient,
+  ctx: RlsContext,
+  flagKey: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+  actual: T,
+): Promise<void> {
+  try {
+    await tx.$queryRaw`SAVEPOINT rls_shadow_probe`
+    await setRlsGuc(tx, ctx, false)
+
+    // Un `fn` d'accès à une ressource unique (ex. GET /:id) throw (404) plutôt que
+    // de renvoyer vide quand l'accès est refusé — c'est PRÉCISÉMENT l'écart à
+    // détecter, donc on le convertit en résultat vide plutôt que de le laisser
+    // remonter (le catch englobant ci-dessous est réservé aux pannes du probe lui-même).
+    const enforced: T | null = await fn(tx).catch(() => null)
+
+    await tx.$queryRaw`ROLLBACK TO SAVEPOINT rls_shadow_probe`
+    await setRlsGuc(tx, ctx, true)
+
+    const wouldEnforceAllow = !isEmptyResult(enforced)
+    const actualBypassAllow = !isEmptyResult(actual)
+    if (wouldEnforceAllow !== actualBypassAllow) {
+      await tx.$queryRaw`SELECT log_rls_shadow_mismatch(
+        ${flagKey}, ${FLAG_TABLE[flagKey] ?? 'unknown'}, 'READ',
+        ${ctx.userId ?? null}, ${wouldEnforceAllow}, ${actualBypassAllow})`
+    }
+  } catch {
+    // Le probe shadow est un aparté d'observabilité — jamais bloquant.
+  }
+}
+
 export async function withRlsContext<T>(
   ctx: RlsContext,
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
   // Kill-switch : off/shadow ⇒ bypass (app.bypass_rls='on') ; enforce ⇒ RLS filtre.
   // Fail-safe hérité de FeatureGuard.mode() : toute panne/valeur invalide → 'off' → bypass.
-  const mode = await FeatureGuard.mode(ctx.flagKey ?? 'rls.missions')
+  const flagKey = ctx.flagKey ?? 'rls.missions'
+  const mode = await FeatureGuard.mode(flagKey)
   const bypass = mode !== 'enforce'
 
   return prisma.$transaction(async tx => {
     // Plus de `SET LOCAL ROLE` : le rôle de connexion `waylo_user` est déjà
     // NOBYPASSRLS. L'enforcement est piloté par le seul GUC `app.bypass_rls`
     // ci-dessous (posé is_local ⇒ transaction-local).
+    await setRlsGuc(tx, ctx, bypass)
+    const result = await fn(tx)
 
-    // Identité effective : non vide dès qu'un userId authentifié est fourni.
-    // Sinon chaîne vide ⇒ les politiques `current_user_id <> '' AND owner = ...`
-    // échouent ⇒ rejet par défaut (principal anonyme).
-    const effectiveUserId = ctx.userId ?? ''
+    if (mode === 'shadow' && ctx.readOnly) {
+      await logShadowMismatch(tx, ctx, flagKey, fn, result)
+    }
 
-    // GUC transaction-locaux. `${...}` = paramètres liés (texte, anti-injection) ;
-    // le 3ᵉ argument `true` (is_local) est un littéral. $queryRaw car SELECT.
-    await tx.$queryRaw`SELECT
-      set_config('app.current_user_id', ${effectiveUserId}, true),
-      set_config('app.is_certified',    ${ctx.isCertified ? 'on' : 'off'}, true),
-      set_config('app.is_admin',        ${ctx.isAdmin ? 'on' : 'off'}, true),
-      set_config('app.is_service',      ${ctx.isService ? 'on' : 'off'}, true),
-      set_config('app.bypass_rls',      ${bypass ? 'on' : 'off'}, true)`
-
-    return fn(tx)
+    return result
   })
 }

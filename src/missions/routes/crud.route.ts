@@ -39,7 +39,7 @@ export const crudRoutes: FastifyPluginAsync = async app => {
   // RLS enforce : identité seule suffit (pas de gate KYC sur la lecture Mission).
   app.get('/', async (req, reply) => {
     const userId = req.user.sub
-    const missions = await withRlsContext({ userId }, tx =>
+    const missions = await withRlsContext({ userId, readOnly: true }, tx =>
       tx.mission.findMany({
         where: { OR: [{ buyerId: userId }, { travelerId: userId }] },
         orderBy: { createdAt: 'desc' },
@@ -61,7 +61,7 @@ export const crudRoutes: FastifyPluginAsync = async app => {
     }
     if (origin) where.origin = { contains: origin, mode: 'insensitive' }
     if (destination) where.destination = { contains: destination, mode: 'insensitive' }
-    const missions = await withRlsContext({ isService: true }, tx =>
+    const missions = await withRlsContext({ isService: true, readOnly: true }, tx =>
       tx.mission.findMany({ where, orderBy: { createdAt: 'desc' } }),
     )
     return reply.code(200).send(missions)
@@ -72,7 +72,7 @@ export const crudRoutes: FastifyPluginAsync = async app => {
   // s'exécutent dans LA MÊME transaction/rôle waylo_app — défense en profondeur réelle.
   app.get('/:id', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     const { id } = req.params as { id: string }
-    const mission = await withRlsContext({ userId: req.user.sub }, async tx => {
+    const mission = await withRlsContext({ userId: req.user.sub, readOnly: true }, async tx => {
       const access = await findMissionForParticipant(tx, id, req.user.sub)
       if (!access) throw new AppError('MISSION_NOT_FOUND', 404)
       return tx.mission.findUniqueOrThrow({

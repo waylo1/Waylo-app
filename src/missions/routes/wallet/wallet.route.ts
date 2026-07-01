@@ -44,7 +44,7 @@ export const walletRoutes: FastifyPluginAsync<MissionRouteOptions> = async app =
     if (!isCertified) throw new AppError('KYC_REQUIRED', 403)
 
     const body = await withRlsContext(
-      { userId: req.user.sub, isCertified, flagKey: 'rls.wallets' },
+      { userId: req.user.sub, isCertified, flagKey: 'rls.wallets', readOnly: true },
       async tx => {
         // Garde IDOR : 404 si la mission n'existe pas OU si l'appelant n'en est pas
         // l'acheteur (voyageur/tiers) — les deux cas indistinguables.

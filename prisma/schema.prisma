@@ -689,4 +689,20 @@ model FeatureFlag {
   createdAt   DateTime @default(now())
 }
 
+/// Écarts shadow-mode RLS — écrit uniquement via la fonction SQL
+/// `log_rls_shadow_mismatch()` (migration `20260701160000_rls_shadow_observability`),
+/// jamais via `.create()` Prisma. Modèle présent pour la lecture (tests, métriques).
+model RlsShadowMismatch {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Text
+  flagKey           String
+  tableName         String
+  operation         String
+  userId            String?
+  wouldEnforceAllow Boolean
+  actualBypassAllow Boolean
+  createdAt         DateTime @default(now())
+
+  @@index([flagKey, createdAt])
+}
+
 // (ProcessedAssignmentEvent supprimé — DEADFLOWS flux c : route /assign + statut ACTIVE retirés.)
