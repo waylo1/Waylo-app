@@ -11,5 +11,11 @@ export default function setupTestDatabase(): void {
   if (!process.env.DATABASE_URL?.includes('waylo_test')) {
     throw new Error('DATABASE_URL doit cibler la base waylo_test')
   }
-  execSync('npx prisma migrate deploy', { stdio: 'inherit', env: process.env })
+  // Le schéma déclare `directUrl = env("DIRECT_URL")` (séparation migrations/runtime
+  // en prod). En test il n'existe qu'une base `waylo_test` : on fait défaut
+  // DIRECT_URL → DATABASE_URL pour que `migrate deploy` (qui lit directUrl) tourne.
+  execSync('npx prisma migrate deploy', {
+    stdio: 'inherit',
+    env: { ...process.env, DIRECT_URL: process.env.DIRECT_URL ?? process.env.DATABASE_URL },
+  })
 }

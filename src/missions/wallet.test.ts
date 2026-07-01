@@ -48,10 +48,13 @@ describe('GET /api/missions/:id/wallet', () => {
 
     await resetDb(prisma)
 
-    buyer = await prisma.user.create({ data: { email: 'buyer-w@test.waylo' } })
-    buyerNoWallet = await prisma.user.create({ data: { email: 'buyer-now@test.waylo' } })
-    traveler = await prisma.user.create({ data: { email: 'traveler-w@test.waylo' } })
-    outsider = await prisma.user.create({ data: { email: 'outsider-w@test.waylo' } })
+    // KYC VERIFIED : la policy RLS wallet_select exige `app.is_certified` en
+    // plus de l'identité (niveau bancaire) — non-certifié ⇒ 403 KYC_REQUIRED,
+    // ce qui masquerait les 404 IDOR / 200 attendus par ces tests d'isolation.
+    buyer = await prisma.user.create({ data: { email: 'buyer-w@test.waylo', kycStatus: 'VERIFIED' } })
+    buyerNoWallet = await prisma.user.create({ data: { email: 'buyer-now@test.waylo', kycStatus: 'VERIFIED' } })
+    traveler = await prisma.user.create({ data: { email: 'traveler-w@test.waylo', kycStatus: 'VERIFIED' } })
+    outsider = await prisma.user.create({ data: { email: 'outsider-w@test.waylo', kycStatus: 'VERIFIED' } })
     buyerToken = app.jwt.sign({ sub: buyer.id })
     buyerNoWalletToken = app.jwt.sign({ sub: buyerNoWallet.id })
     travelerToken = app.jwt.sign({ sub: traveler.id })

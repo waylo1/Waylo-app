@@ -6,6 +6,7 @@ import { missionIdParamsSchema, availableQuerySchema } from '../mission-common'
 import { AppError } from '../../errors/app.error'
 import { triggerMissionCreatedNotification } from '../mission.service'
 import { mapToPublicMissionDTO, PublicMissionDTO } from './mission.dto'
+import { withRlsContext } from '../../lib/rls-context'
 
 export const crudRoutes: FastifyPluginAsync = async app => {
   // POST /api/missions — l'utilisateur courant devient l'acheteur.
@@ -35,17 +36,23 @@ export const crudRoutes: FastifyPluginAsync = async app => {
   })
 
   // GET /api/missions — mes missions (sérialisation via whitelist DTO, privacy-first)
+  // RLS enforce : identité seule suffit (pas de gate KYC sur la lecture Mission).
   app.get('/', async (req, reply) => {
     const userId = req.user.sub
-    const missions = await prisma.mission.findMany({
-      where: { OR: [{ buyerId: userId }, { travelerId: userId }] },
-      orderBy: { createdAt: 'desc' },
-    })
+    const missions = await withRlsContext({ userId }, tx =>
+      tx.mission.findMany({
+        where: { OR: [{ buyerId: userId }, { travelerId: userId }] },
+        orderBy: { createdAt: 'desc' },
+      }),
+    )
     const body: PublicMissionDTO[] = missions.map(mapToPublicMissionDTO)
     return reply.code(200).send(body)
   })
 
   // GET /api/missions/available — vitrine pour voyageur
+  // RLS enforce, CONTEXTE SERVICE : la policy mission_select n'a pas de carve-out
+  // public pour FUNDED — le catalogue est servi via `isService`, le filtrage
+  // (FUNDED, sans voyageur, hors mes missions) reste porté par le `where` Prisma.
   app.get('/available', { schema: { querystring: availableQuerySchema } }, async (req, reply) => {
     const { origin, destination } = req.query as { origin?: string; destination?: string }
     const where: Prisma.MissionWhereInput = {
@@ -54,18 +61,24 @@ export const crudRoutes: FastifyPluginAsync = async app => {
     }
     if (origin) where.origin = { contains: origin, mode: 'insensitive' }
     if (destination) where.destination = { contains: destination, mode: 'insensitive' }
-    const missions = await prisma.mission.findMany({ where, orderBy: { createdAt: 'desc' } })
+    const missions = await withRlsContext({ isService: true }, tx =>
+      tx.mission.findMany({ where, orderBy: { createdAt: 'desc' } }),
+    )
     return reply.code(200).send(missions)
   })
 
   // GET /api/missions/:id
+  // RLS enforce : garde applicative (findMissionForParticipant) ET garde RLS
+  // s'exécutent dans LA MÊME transaction/rôle waylo_app — défense en profondeur réelle.
   app.get('/:id', { schema: { params: missionIdParamsSchema } }, async (req, reply) => {
     const { id } = req.params as { id: string }
-    const access = await findMissionForParticipant(prisma, id, req.user.sub)
-    if (!access) throw new AppError('MISSION_NOT_FOUND', 404)
-    const mission = await prisma.mission.findUniqueOrThrow({
-      where: { id },
-      include: { receipt: { select: { totalTtcCents: true, receiptUrl: true, sealedAt: true } } },
+    const mission = await withRlsContext({ userId: req.user.sub }, async tx => {
+      const access = await findMissionForParticipant(tx, id, req.user.sub)
+      if (!access) throw new AppError('MISSION_NOT_FOUND', 404)
+      return tx.mission.findUniqueOrThrow({
+        where: { id },
+        include: { receipt: { select: { totalTtcCents: true, receiptUrl: true, sealedAt: true } } },
+      })
     })
     return reply.code(200).send(mission)
   })

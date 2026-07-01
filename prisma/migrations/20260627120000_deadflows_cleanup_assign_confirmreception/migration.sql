@@ -10,7 +10,9 @@ ALTER TABLE "Mission" DROP COLUMN "deliveryProofHash";
 ALTER TABLE "Mission" DROP COLUMN "receptionConfirmedAt";
 
 -- 3) Ledger d'idempotence d'assignation (flux c mort). Pas de FK → DROP direct.
-DROP TABLE "ProcessedAssignmentEvent";
+-- IF EXISTS : certains environnements (prod) ont déjà cette table absente
+-- (bootstrap partiel hors-ledger) — DROP TABLE nu y échouerait sans raison.
+DROP TABLE IF EXISTS "ProcessedAssignmentEvent";
 
 -- 4) Retrait de la valeur d'enum MissionStatus.ACTIVE. PostgreSQL ne sait pas DROP une
 --    valeur d'enum → swap de type complet (drop default → new type → cast → rename → re-default).

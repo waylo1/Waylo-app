@@ -14,7 +14,12 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Runtime (Prisma Client) : rôle applicatif `waylo_user` (NOBYPASSRLS) en prod.
+  url       = env("DATABASE_URL")
+  // Migrations / DDL (Prisma CLI uniquement) : rôle `postgres` (owner, CREATE ROLE).
+  // Sépare Maintenance/Migrations du Runtime. En local/CI, `test-global-setup.ts`
+  // fait défaut DIRECT_URL → DATABASE_URL (une seule base `waylo_test`).
+  directUrl = env("DIRECT_URL")
 }
 
 enum KycStatus {
@@ -668,6 +673,20 @@ model ProcessedMissionEvent {
   processedAt DateTime @default(now())
 
   @@unique([alias, missionId])
+}
+
+// Kill-switch du rollout RLS progressif (off → shadow → enforce), src/lib/feature-guard.ts.
+// `key` est la PK (pas de colonne `id` séparée) ; `mode` est un état à 3 valeurs,
+// pas un booléen `enabled` — la phase `shadow` (GUC posés, policies inertes,
+// métriques de mismatch) n'a pas d'équivalent binaire. Miroir exact de la table
+// déjà créée par la migration `20260630120000_add_feature_flags`.
+model FeatureFlag {
+  key         String   @id
+  mode        String   @default("off")
+  description String?
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
 }
 
 // (ProcessedAssignmentEvent supprimé — DEADFLOWS flux c : route /assign + statut ACTIVE retirés.)
