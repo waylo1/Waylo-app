@@ -43,14 +43,23 @@ mode `enforce`) ⇒ policies pleinement actives.
 
 ## Runbook — Bascule runtime `postgres` → `waylo_user`
 
-### État actuel (2026-07-01)
+### État actuel (2026-07-01, vérifié via `pg_stat_activity`)
 
 - ✅ Rôle `waylo_user` déployé en prod (migration `20260701140000_create_waylo_user`).
 - ✅ Policies avec clause de bypass par défaut déployées (migration `20260701150000_rls_bypass_default`).
 - ✅ `prisma/schema.prisma` sépare `url` (runtime) et `directUrl` (migrations).
-- 🟡 **Le runtime de production tourne toujours sur `postgres`.** Tant que `DATABASE_URL` n'a pas
-  été basculé vers `waylo_user`, la RLS reste inerte quel que soit l'état des flags — `postgres`
-  est `BYPASSRLS` et ignore toutes les policies inconditionnellement.
+- ✅ **Le runtime (`waylo-staging` sur Fly, pointé sur cette base) tourne déjà sur `waylo_user`**
+  (`DATABASE_URL` basculé lors du déploiement Fly ; confirmé par connexions actives en base).
+  Reste 1 connexion résiduelle `postgres` (migrations / requêtes admin ponctuelles), attendu.
+- 🟡 **Les flags `rls.missions` / `rls.wallets` sont à `off`.** Le rôle est prêt, mais la RLS
+  reste inerte tant que le flag reste `off` — c'est la clause de bypass posée par
+  `withRlsContext`, pas le rôle, qui détermine l'enforcement effectif.
+- 🔴 **Le mode `shadow` n'a aucune implémentation de mismatch-logging.** Les compteurs
+  `rls_shadow_mismatch_total` / `rls_enforce_reject_total` sont déclarés
+  ([`src/lib/metrics.ts`](../src/lib/metrics.ts)) mais **jamais incrémentés** dans le code —
+  passer un flag en `shadow` aujourd'hui est strictement équivalent à `off` (bypass actif, aucun
+  signal collecté). Le critère de passage `shadow` → `enforce` ("mismatch=0 pendant 24h") est
+  actuellement invérifiable.
 
 ### Prérequis avant bascule du `DATABASE_URL` de prod
 

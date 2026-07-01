@@ -18,7 +18,8 @@ vérifier la colonne Statut ci-dessous.
 | `src/lib/rls-context.ts` | ✅ Plus de `SET LOCAL ROLE` ; enforcement = rôle `waylo_user` NOBYPASSRLS + GUC `app.bypass_rls` (`is_local` : off=enforce / on=bypass) |
 | Kill-switch `FeatureGuard` **branché** | ✅ `withRlsContext` dérive le bypass de `FeatureGuard.mode(flagKey)` (`rls.missions`/`rls.wallets`) — off/shadow ⇒ `bypass_rls='on'`, enforce ⇒ `'off'`. Flags **`off`** en prod. `kill()` propage < 5 s |
 | Séparation Migrations/Runtime (`directUrl`) | ✅ `schema.prisma` : `url`=runtime (`waylo_user`), `directUrl`=migrations (`postgres`). Test-harness fait défaut `DIRECT_URL`→`DATABASE_URL` |
-| Bascule runtime → `waylo_user` (secrets GitHub) | 🟡 **En attente** : mot de passe `waylo_user` + rotation `DATABASE_URL`/`DIRECT_URL` + redéploiement + flags `shadow`→`enforce`. Tant que le runtime reste `postgres` (BYPASSRLS), la RLS est inerte quel que soit le flag |
+| Bascule runtime → `waylo_user` | ✅ **Effective** (vérifié `pg_stat_activity` 2026-07-01 : connexions actives en `waylo_user`, secrets Fly rotés). Flags `rls.missions`/`rls.wallets` restent **`off`** — RLS inerte tant qu'ils ne passent pas en `shadow`/`enforce` |
+| Mismatch-logging mode `shadow` | 🔴 **Non implémenté.** `rls_shadow_mismatch_total`/`rls_enforce_reject_total` déclarés (`src/lib/metrics.ts`) mais jamais incrémentés — `shadow` ≡ `off` en pratique aujourd'hui |
 | Câblage — **routes financières** (funding, capture/logistics, dispute, admin) | ❌ **Exclu intentionnellement.** Restent sur `prisma` nu (bypass par défaut via policy) — `withRlsContext` ouvre une `$transaction`, incompatible avec « aucun appel Stripe dans une `$transaction` » (§3) |
 | `src/rls-security.test.ts` | ❌ N'existe pas — le réel est [`src/security/rls-isolation.test.ts`](../src/security/rls-isolation.test.ts) (app-layer, 9/9) |
 
