@@ -183,21 +183,30 @@ describe('Capture — idempotence Stripe (AUDIT-00-IDEM)', () => {
     return mission.id
   }
 
-  it('2 appels concurrents même clé → le 2e reflète le rejet Stripe (dédup active), aucun impact DB', async () => {
+  it('2 appels concurrents même clé → un seul débit Stripe réel (alias stripe-capture + dédup), aucun impact DB', async () => {
     const id = await seedHeldMission()
-    const usedKeys = new Set<string>()
-    // Simule le comportement Stripe pour deux requêtes concurrentes partageant la
-    // même idempotencyKey : la 2e requête, tant que la 1re n'a pas terminé côté
-    // Stripe, est rejetée (Stripe : "a request is currently being processed").
+    let realCaptures = 0
+    const keyState = new Map<string, { id: string } | 'pending'>()
+    // Simule le comportement Stripe réel pour deux requêtes concurrentes partageant
+    // la même idempotencyKey : tant que la 1re requête est "en vol", Stripe rejette
+    // la 2e ("a request is currently being processed") — transitoire. L'alias
+    // 'stripe-capture' (retry + backoff) absorbe ce rejet : au retry suivant, la
+    // 1re requête a terminé et Stripe rejoue sa réponse mise en cache (idempotence
+    // par clé) — la 2e requête aboutit donc, SANS débit Stripe supplémentaire.
     const raceStripe: PaymentIntentClient = {
       paymentIntents: {
         create: async params => ({ id: `pi_${params.metadata['missionId']}`, client_secret: 'secret' }),
         capture: async (piId, _params, options) => {
-          if (usedKeys.has(options.idempotencyKey)) {
-            throw new Error('IDEMPOTENCY_KEY_IN_USE')
-          }
-          usedKeys.add(options.idempotencyKey)
-          return { id: piId }
+          const key = options.idempotencyKey
+          const state = keyState.get(key)
+          if (state === 'pending') throw new Error('IDEMPOTENCY_KEY_IN_USE')
+          if (state) return state
+          keyState.set(key, 'pending')
+          realCaptures += 1
+          await new Promise(resolve => setTimeout(resolve, 20))
+          const result = { id: piId }
+          keyState.set(key, result)
+          return result
         },
       },
     }
@@ -207,16 +216,16 @@ describe('Capture — idempotence Stripe (AUDIT-00-IDEM)', () => {
       captureEscrowFunds(id, raceStripe, 'validate'),
     ])
 
-    const outcomes = [first, second]
-    const fulfilled = outcomes.filter(r => r.status === 'fulfilled')
-    const rejected = outcomes.filter(r => r.status === 'rejected')
-    expect(fulfilled).toHaveLength(1)
-    expect(rejected).toHaveLength(1)
-    expect((rejected[0] as PromiseRejectedResult).reason.message).toBe('IDEMPOTENCY_KEY_IN_USE')
+    expect(first.status).toBe('fulfilled')
+    expect(second.status).toBe('fulfilled')
+    // Un seul débit Stripe réel malgré 2 appels concurrents : la clé d'idempotence
+    // partagée (même missionId + contexte) protège contre le double débit, même
+    // avec le retry de l'alias 'stripe-capture'.
+    expect(realCaptures).toBe(1)
 
     // Aucun impact DB : captureEscrowFunds n'écrit rien (source de vérité = webhook),
-    // l'escrow reste HELD que la capture ait réussi ou échoué côté Stripe.
+    // l'escrow reste HELD quel que soit le nombre d'appels Stripe.
     const escrow = await prisma.escrowTransaction.findUnique({ where: { missionId: id } })
     expect(escrow?.status).toBe('HELD')
-  })
+  }, 10_000)
 })
