@@ -1,3 +1,4 @@
+import { randomInt, timingSafeEqual } from 'node:crypto'
 import { prisma } from '../db'
 import { runAlias } from '@waylo/shared/automation'
 import { AppError } from '../errors/app.error'
@@ -13,7 +14,8 @@ export const noopTransport: MagicLinkTransport = async (email, _token) => {
 }
 
 function generateToken(): string {
-  return String(Math.floor(100_000 + Math.random() * 900_000))
+  // CSPRNG : 6 chiffres, plage inchangée (100000–999999).
+  return String(randomInt(100_000, 1_000_000))
 }
 
 /**
@@ -57,7 +59,11 @@ export async function verifyMagicLink(email: string, token: string): Promise<str
   if (link.attempts >= MAX_ATTEMPTS) throw new AppError('MAGIC_LINK_EXHAUSTED', 429)
   if (link.expiresAt < new Date()) throw new AppError('MAGIC_LINK_EXPIRED', 401)
 
-  if (link.token !== token) {
+  // Comparaison à temps constant (longueurs fixées à 6 par generateToken + le schéma de route).
+  const a = Buffer.from(link.token)
+  const b = Buffer.from(token)
+  const tokenMatches = a.length === b.length && timingSafeEqual(a, b)
+  if (!tokenMatches) {
     await prisma.magicLink.update({
       where: { email },
       data: { attempts: { increment: 1 } },

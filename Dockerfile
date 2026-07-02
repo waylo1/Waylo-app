@@ -20,6 +20,10 @@ RUN npm ci --include=dev || npm install --include=dev
 COPY . .
 RUN npx prisma generate
 
+# Exécution non privilégiée : l'utilisateur `node` existe dans l'image officielle.
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 3000
 # Applique les migrations versionnées puis démarre le serveur (cf. src/server.ts).
 # Les secrets (DATABASE_URL, STRIPE_*, JWT_SECRET) sont injectés par l'environnement.
