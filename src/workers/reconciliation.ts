@@ -7,6 +7,7 @@ import {
   TransferStatus,
 } from '../generated/prisma'
 import { AlertSink, OpsAlert, OpsAlertInput, safeEmit } from '../alerts'
+import { captureEscrowFunds } from '../services/escrow.service'
 
 /**
  * ═══════════ TIMELINE DU CYCLE DE VIE — source de vérité, ENFORCÉE ═══════════
@@ -394,11 +395,9 @@ export async function runReconciliation(
       if (!mission.escrow || mission.escrow.status !== EscrowStatus.HELD) continue
 
       try {
-        await deps.stripe.paymentIntents.capture(
-          mission.escrow.stripePaymentIntentId,
-          {},
-          { idempotencyKey: `timeout_collection_${mission.id}` },
-        )
+        // Capture via le service centralisé (source unique, AUDIT-00-IDEM) —
+        // contexte 'timeout' dédié à l'auto-libération.
+        await captureEscrowFunds(mission.id, deps.stripe, 'timeout')
       } catch (err) {
         // Échec technique (carte expirée, erreur Stripe) : la capture n'a pas eu
         // lieu, le voyageur n'est pas payé, l'autorisation vieillit → intervention

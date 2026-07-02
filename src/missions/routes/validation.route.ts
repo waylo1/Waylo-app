@@ -74,7 +74,7 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       assertVersion(mission, expectedVersion)
 
       try {
-        await captureEscrowFunds(mission.id, opts.stripe)
+        await captureEscrowFunds(mission.id, opts.stripe, 'validate')
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
@@ -137,10 +137,14 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       // Fail-fast avant Stripe : si la version est dépassée, inutile de capturer.
       assertVersion(mission, expectedVersion)
 
-      // Jumeau de /validate : capture via le service (clé partagée `capture_<id>` →
-      // un acheteur appelant /validate ET /confirm-receipt ne capture qu'une fois).
+      // Jumeau de /validate : capture via le service, contexte 'receipt' dédié —
+      // clé d'idempotence distincte de /validate (AUDIT-00-IDEM). La garde
+      // EscrowStatus.HELD (dans captureEscrowFunds) reste la protection contre un
+      // double débit si /validate et /confirm-receipt sont appelés l'un après
+      // l'autre sur la même mission : Stripe refuse toute 2e capture d'un PI déjà
+      // capturé, quelle que soit la clé fournie.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe)
+        await captureEscrowFunds(mission.id, opts.stripe, 'receipt')
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err

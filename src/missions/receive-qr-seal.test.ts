@@ -122,7 +122,7 @@ describe('Sceau QR interne — /receive durcissement obligatoire', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().status).toBe('VALIDATED')
     expect(captureCalls).toHaveLength(1)
-    expect(captureCalls[0]).toEqual({ id: `pi_rcv_${mission.id}`, key: `capture_${mission.id}` })
+    expect(captureCalls[0]).toEqual({ id: `pi_rcv_${mission.id}`, key: `waylo:${mission.id}:cap:receive:v1` })
   })
 
   it('(B) mauvais QR → 400 INVALID_QR_PROOF, aucune capture Stripe, mission intacte', async () => {

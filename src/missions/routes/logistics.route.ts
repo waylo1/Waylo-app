@@ -300,9 +300,9 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       }
 
       // Capture via le service (source unique) : pré-check escrow HELD + montant
-      // `amount_to_capture` exact, clé partagée `capture_<id>`.
+      // `amount_to_capture` exact, contexte 'receive'.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe)
+        await captureEscrowFunds(mission.id, opts.stripe, 'receive')
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
@@ -424,9 +424,9 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       verifyInnerSeal((req.body as InnerQrBody).innerQrCode, mission.innerQrCodeHash)
 
       // Capture via le service (source unique) : pré-check escrow HELD + montant
-      // `amount_to_capture` exact, clé dédiée au chemin collecte.
+      // `amount_to_capture` exact, contexte 'collection' dédié au chemin collecte.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe, `capture_collection_${mission.id}`)
+        await captureEscrowFunds(mission.id, opts.stripe, 'collection')
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err

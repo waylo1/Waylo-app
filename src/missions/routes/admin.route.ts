@@ -11,6 +11,7 @@ import {
   DisputeBody,
 } from '../mission-common'
 import { createDisputeInTx, openDisputeInTx } from '../../services/dispute.service'
+import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
 import { AppError } from '../../errors/app.error'
 
 export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
@@ -21,22 +22,14 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
     }
     const { id } = req.params as { id: string }
 
-    // Lecture initiale hors tx : fast-fail + récupération du stripePaymentIntentId.
-    const escrow = await prisma.escrowTransaction.findUnique({
-      where: { missionId: id },
-      select: { stripePaymentIntentId: true, status: true },
-    })
-    if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      throw new AppError('ESCROW_NOT_HELD', 400)
+    // Capture via le service centralisé (source unique, AUDIT-00-IDEM) — pré-check
+    // escrow HELD + montant explicite + clé d'idempotence dédiée au contexte 'customs'.
+    try {
+      await captureEscrowFunds(id, opts.stripe, 'customs')
+    } catch (err) {
+      if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
+      throw err
     }
-
-    // Capture Stripe HORS transaction — règle « no Stripe in DB tx ».
-    // idempotencyKey déterministe : un retry ou un double appel admin ne crée pas deux débits.
-    await opts.stripe.paymentIntents.capture(
-      escrow.stripePaymentIntentId,
-      {},
-      { idempotencyKey: `capture_customs_${id}` },
-    )
 
     await prisma.$transaction(async tx => {
       // Garde 3a — re-vérification post-capture (aucun appel réseau dans la tx).
@@ -224,19 +217,14 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       throw new AppError('MISSION_NOT_DISPUTED', 400)
     }
 
-    const escrow = await prisma.escrowTransaction.findUnique({
-      where: { missionId: id },
-      select: { stripePaymentIntentId: true, status: true },
-    })
-    if (!escrow || escrow.status !== EscrowStatus.HELD) {
-      throw new AppError('ESCROW_NOT_HELD', 400)
+    // Capture via le service centralisé (source unique, AUDIT-00-IDEM) — pré-check
+    // escrow HELD + montant explicite + clé d'idempotence dédiée au contexte 'payout'.
+    try {
+      await captureEscrowFunds(id, opts.stripe, 'payout')
+    } catch (err) {
+      if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
+      throw err
     }
-
-    await opts.stripe.paymentIntents.capture(
-      escrow.stripePaymentIntentId,
-      {},
-      { idempotencyKey: `admin_payout_${id}` },
-    )
 
     await prisma.$transaction(async tx => {
       const updated = await tx.mission.updateMany({

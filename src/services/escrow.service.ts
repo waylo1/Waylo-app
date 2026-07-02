@@ -1,10 +1,6 @@
 import { prisma } from '../db'
 import { EscrowStatus } from '../generated/prisma'
-import {
-  substitutionCeilingCents,
-  substitutionHardCapCents,
-  type PaymentIntentClient,
-} from '../missions/mission-common'
+import { substitutionCeilingCents, substitutionHardCapCents } from '../missions/mission-common'
 
 /**
  * Service escrow — capture du séquestre (T1) réutilisable hors route.
@@ -18,10 +14,48 @@ import {
  * SEUL déclencheur ; la cohérence DB suit l'événement, jamais en avance.
  *
  * Règle d'or projet respectée par construction : aucun appel Stripe dans une
- * transaction DB (il n'y a plus de transaction DB ici). idempotencyKey
- * `capture_<missionId>` partagée avec la route /validate → un seul débit Stripe
- * par mission, quel que soit le chemin appelant.
+ * transaction DB (il n'y a plus de transaction DB ici).
+ *
+ * IDEMPOTENCE (AUDIT-00-IDEM) — clé unique : `waylo:<missionId>:cap:<context>:v1`.
+ * `<context>` identifie le CHEMIN métier appelant (validate/receipt/receive/
+ * collection/customs/payout/timeout) : ce service est désormais le SEUL point
+ * d'appel Stripe capture du projet — les anciens appels directs (customs-approve,
+ * admin/resolve-payout, timeout collecte) sont centralisés ici. Un retry ou un
+ * double appel SUR LE MÊME chemin ne débite qu'une fois (même clé → Stripe
+ * dédoublonne). Deux chemins DIFFÉRENTS sur la même mission ont des clés
+ * distinctes (Stripe ne les dédoublonne PAS entre eux) : la garde
+ * `EscrowStatus.HELD` ci-dessous reste la protection inter-chemins — et Stripe
+ * refuse par construction toute capture sur un PaymentIntent déjà capturé,
+ * quelle que soit la clé fournie.
+ * `:v1` : à incrémenter si la formule de calcul du montant change, pour ne
+ * jamais rejouer une réponse Stripe mise en cache sous l'ancienne formule.
  */
+
+/** Chemins métier autorisés à déclencher une capture — un par route/worker appelant. */
+export type CaptureContext =
+  | 'validate'
+  | 'receipt'
+  | 'receive'
+  | 'collection'
+  | 'customs'
+  | 'payout'
+  | 'timeout'
+
+function buildCaptureIdempotencyKey(missionId: string, context: CaptureContext): string {
+  return `waylo:${missionId}:cap:${context}:v1`
+}
+
+/** Surface Stripe minimale requise par ce service — seul `paymentIntents.capture` est appelé. */
+export interface CaptureStripeClient {
+  paymentIntents: {
+    capture(
+      id: string,
+      params: { amount_to_capture?: number },
+      options: { idempotencyKey: string },
+    ): Promise<{ id: string }>
+  }
+}
+
 export class EscrowCaptureError extends Error {
   constructor(readonly code: string) {
     super(code)
@@ -39,14 +73,16 @@ export interface CaptureEscrowResult {
 /**
  * Capture les fonds séquestrés d'une mission côté Stripe — et rien d'autre.
  *
- * Le client Stripe est injecté (cf. PaymentIntentClient) — testable, miroir des
- * routes. Lecture seule en DB (préconditions) ; erreurs typées (code SNAKE_CASE) :
- * ESCROW_NOT_FOUND, ESCROW_NOT_HELD. La mise à jour DB est laissée au webhook.
+ * Le client Stripe est injecté (surface minimale CaptureStripeClient) —
+ * testable, miroir des routes. Lecture seule en DB (préconditions) ; erreurs
+ * typées (code SNAKE_CASE) : ESCROW_NOT_FOUND, ESCROW_NOT_HELD. La mise à jour
+ * DB est laissée au webhook. `context` identifie le chemin appelant pour la
+ * clé d'idempotence (cf. en-tête de fichier).
  */
 export async function captureEscrowFunds(
   missionId: string,
-  stripe: PaymentIntentClient,
-  idempotencyKey: string = `capture_${missionId}`,
+  stripe: CaptureStripeClient,
+  context: CaptureContext,
 ): Promise<CaptureEscrowResult> {
   // Lecture seule : récupère le PaymentIntent lié + vérifie l'état capturable.
   const escrow = await prisma.escrowTransaction.findUnique({
@@ -81,16 +117,13 @@ export async function captureEscrowFunds(
 
   const capturedAmountCents = heldBudgetCents + escrow.mission.commissionCents
 
-  // SEUL effet du service : la capture Stripe. idempotencyKey déterministe —
-  // un retry post-crash ou un double appel capture le MÊME PI une seule fois.
-  // `amount_to_capture` EXPLICITE : on capture le montant métier exact (= montant
-  // autorisé), jamais « ce que Stripe a sous la main » — source unique partagée par
-  // tous les chemins de capture (/validate, /confirm-receipt, /receive,
-  // /confirm-collection) → mêmes paramètres sous une même clé (anti-conflit d'idempotence).
+  // SEUL effet du service : la capture Stripe. `amount_to_capture` EXPLICITE :
+  // on capture le montant métier exact (= montant autorisé), jamais « ce que
+  // Stripe a sous la main » — source unique pour tous les chemins de capture.
   await stripe.paymentIntents.capture(
     escrow.stripePaymentIntentId,
     { amount_to_capture: capturedAmountCents },
-    { idempotencyKey },
+    { idempotencyKey: buildCaptureIdempotencyKey(missionId, context) },
   )
 
   return {

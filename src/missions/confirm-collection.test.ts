@@ -141,7 +141,7 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
 
     // Capture déléguée à Stripe, hors tx, clé déterministe propre au chemin collecte.
     expect(captureCalls).toHaveLength(1)
-    expect(captureCalls[0]).toEqual({ id: `pi_cc_${mission.id}`, key: `capture_collection_${mission.id}` })
+    expect(captureCalls[0]).toEqual({ id: `pi_cc_${mission.id}`, key: `waylo:${mission.id}:cap:collection:v1` })
   })
 
   it('(B) état non-DEPOSITED (MATCHED) → 400 INVALID_MISSION_STATE, aucune capture', async () => {
@@ -201,7 +201,7 @@ describe('Confirmation de collecte acheteur — confirm-collection', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().status).toBe('VALIDATED')
-    expect(captureCalls).toEqual([{ id: `pi_cc_${mission.id}`, key: `capture_collection_${mission.id}` }])
+    expect(captureCalls).toEqual([{ id: `pi_cc_${mission.id}`, key: `waylo:${mission.id}:cap:collection:v1` }])
   })
 
   it('(G) sceau présent + QR faux → 400 INVALID_QR_PROOF, aucune capture, mission intacte', async () => {

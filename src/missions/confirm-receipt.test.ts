@@ -119,7 +119,7 @@ describe('Confirmation réception acheteur — POST /api/missions/:id/confirm-re
 
     // Capture déclenchée, du bon PI, clé partagée capture_<missionId>.
     expect(captureCalls.length).toBe(before + 1)
-    expect(captureCalls.at(-1)).toEqual({ id: piId, idempotencyKey: `capture_${missionId}` })
+    expect(captureCalls.at(-1)).toEqual({ id: piId, idempotencyKey: `waylo:${missionId}:cap:receipt:v1` })
 
     // Frontière webhook : ledger vide, escrow toujours HELD. Le passage RELEASED
     // + PAYOUT/COMMISSION + TransferOutbox sont portés par payment_intent.succeeded.

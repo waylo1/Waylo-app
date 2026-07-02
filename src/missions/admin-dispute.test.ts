@@ -149,7 +149,7 @@ describe('Arbitrage admin litige — resolve-refund / resolve-payout', () => {
 
     expect(captureCalls).toContainEqual({
       id: `pi_dispute_${mission.id}`,
-      idempotencyKey: `admin_payout_${mission.id}`,
+      idempotencyKey: `waylo:${mission.id}:cap:payout:v1`,
     })
 
     const audit = await prisma.adminAuditLog.findMany({ where: { missionId: mission.id } })
