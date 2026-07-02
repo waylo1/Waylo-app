@@ -11,7 +11,8 @@ import {
   DisputeBody,
 } from '../mission-common'
 import { createDisputeInTx, openDisputeInTx } from '../../services/dispute.service'
-import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
+import { EscrowCaptureError } from '../../services/escrow.service'
+import { captureEscrowFundsGuarded } from '../../services/escrow-capture.guard'
 import { AppError } from '../../errors/app.error'
 
 export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, opts) => {
@@ -22,10 +23,14 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
     }
     const { id } = req.params as { id: string }
 
-    // Capture via le service centralisé (source unique, AUDIT-00-IDEM) — pré-check
+    // Capture via la garde centralisée (source unique, AUDIT-00-IDEM) — pré-check
     // escrow HELD + montant explicite + clé d'idempotence dédiée au contexte 'customs'.
+    // GUARD CLAUSE (ordre invariant) : la capture Stripe PRÉCÈDE toujours la
+    // transition de statut ci-dessous ; si elle échoue après épuisement des retries
+    // de l'alias stripe-capture → alerte CAPTURE_FAILED + 502, la mission ne passe
+    // JAMAIS de PENDING_CUSTOMS_REVIEW à VALIDATED.
     try {
-      await captureEscrowFunds(id, opts.stripe, 'customs')
+      await captureEscrowFundsGuarded(id, opts.stripe, 'customs', opts.onAlert)
     } catch (err) {
       if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
       throw err
@@ -217,10 +222,11 @@ export const adminRoutes: FastifyPluginAsync<MissionRouteOptions> = async (app, 
       throw new AppError('MISSION_NOT_DISPUTED', 400)
     }
 
-    // Capture via le service centralisé (source unique, AUDIT-00-IDEM) — pré-check
+    // Capture via la garde centralisée (source unique, AUDIT-00-IDEM) — pré-check
     // escrow HELD + montant explicite + clé d'idempotence dédiée au contexte 'payout'.
+    // GUARD CLAUSE : retries épuisés → alerte CAPTURE_FAILED + 502, statut inchangé.
     try {
-      await captureEscrowFunds(id, opts.stripe, 'payout')
+      await captureEscrowFundsGuarded(id, opts.stripe, 'payout', opts.onAlert)
     } catch (err) {
       if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
       throw err

@@ -11,6 +11,7 @@ import {
   SubstitutionStatus,
 } from '../generated/prisma'
 import { AlertSink, OpsAlertInput, safeEmit } from '../alerts'
+import { notifyActor, NotificationPayload } from '../notifications/notification.service'
 
 type Tx = Prisma.TransactionClient
 
@@ -24,10 +25,20 @@ class WebhookAbortError extends Error {}
 /** Émetteur d'alerte immédiat (la sévérité est dérivée du code par safeEmit). */
 type AlertEmitter = (input: OpsAlertInput) => void
 
-/** Résultat d'un effet métier : alertes différées émises APRÈS commit uniquement. */
+/** Notification acteur différée — émise APRÈS commit, fire-and-forget (notifyActor). */
+interface DeferredNotification {
+  alias: string
+  missionId: string
+  recipientId: string
+  payload: NotificationPayload
+}
+
+/** Résultat d'un effet métier : alertes/notifications différées émises APRÈS commit uniquement. */
 interface EffectOutcome {
   handled: boolean
   deferredAlerts: OpsAlertInput[]
+  /** Optionnel : seuls les effets qui notifient des acteurs le renseignent. */
+  deferredNotifications?: DeferredNotification[]
 }
 
 export interface StripeWebhookOptions {
@@ -117,6 +128,19 @@ const stripeWebhookRoute: FastifyPluginAsync<StripeWebhookOptions> = async (app,
     // Post-commit : alertes du chemin nominal. safeEmit garantit qu'aucun sink
     // défaillant ne produit un 500 après commit.
     for (const alert of outcome.deferredAlerts) safeEmit(opts.onAlert, alert)
+
+    // Post-commit : notifications acteurs (ex. ESCROW_RELEASED). Fire-and-forget,
+    // JAMAIS dans la transaction (règle notification.service) ; idempotentes via
+    // ProcessedMissionEvent — un rejeu committé ne renotifie pas. Un échec de
+    // notification ne remet jamais en cause le 200 (l'effet financier a committé).
+    for (const n of outcome.deferredNotifications ?? []) {
+      notifyActor(n.alias, n.missionId, n.recipientId, n.payload).catch(err =>
+        req.log.error(
+          { err, missionId: n.missionId, alias: n.alias },
+          '[notif] deferred notification failed',
+        ),
+      )
+    }
 
     return reply
       .code(200)
@@ -253,6 +277,9 @@ async function handleCapture(
       mission: {
         select: {
           buyerId: true,
+          travelerId: true,
+          targetProduct: true,
+          destination: true,
           commissionCents: true,
           substitutionAuthorized: true,
           purchaseAmountCents: true,
@@ -261,7 +288,28 @@ async function handleCapture(
       },
     },
   })
-  if (!escrow) return NO_EFFECT // PaymentIntent étranger à Waylo — acquitté sans effet
+  if (!escrow) {
+    // PI marqué Waylo (metadata.missionId posée à la création du PaymentIntent)
+    // mais AUCUN escrow en DB : de l'argent a été capturé côté Stripe sans trace
+    // financière chez nous — CRITIQUE. Acquitté (200, event marqué processé) pour
+    // ne pas boucler en rejeu 3 jours : c'est l'alerte critique (différée
+    // post-commit, émise UNE fois) qui porte la visibilité, pas le retry Stripe.
+    const orphanMissionId = intent.metadata?.['missionId']
+    if (orphanMissionId) {
+      return {
+        handled: false,
+        deferredAlerts: [
+          {
+            code: 'WEBHOOK_MISSION_NOT_FOUND',
+            message:
+              'payment_intent.succeeded avec metadata.missionId sans escrow correspondant — capture sans trace DB, réconciliation requise',
+            details: { missionId: orphanMissionId, intentId: intent.id },
+          },
+        ],
+      }
+    }
+    return NO_EFFECT // PaymentIntent étranger à Waylo (aucune metadata missionId) — acquitté sans effet
+  }
 
   // Verrou de ligne (anti-TOCTOU, modèle applyRefund) : sérialise dans cette
   // prisma.$transaction les traitements concurrents touchant cet escrow
@@ -269,6 +317,17 @@ async function handleCapture(
   // ProcessedStripeEvent : un rejeu du même event.id ressort en 200 sans effet
   // et SANS throw (pas de boucle de rejeu Stripe).
   await tx.$queryRaw`SELECT id FROM "EscrowTransaction" WHERE id = ${escrow.id} FOR UPDATE`
+
+  // Idempotence interne (post-verrou) : l'état est relu FRAIS sous verrou de
+  // ligne — la lecture initiale (hors verrou) peut être périmée si une
+  // transaction concurrente vient de committer. Escrow déjà RELEASED → event
+  // ignoré (acquit 200, aucun effet) : un doublon tardif sous un AUTRE event.id
+  // ne produit jamais de double libération ni d'abort parasite.
+  const fresh = await tx.escrowTransaction.findUniqueOrThrow({
+    where: { id: escrow.id },
+    select: { status: true, capturedAmountCents: true },
+  })
+  if (fresh.status === EscrowStatus.RELEASED) return NO_EFFECT
 
   const capturedCents = intent.amount_received
   if (capturedCents <= 0) {
@@ -286,7 +345,7 @@ async function handleCapture(
     data: { capturedAmountCents: capturedCents },
   })
   if (captured.count !== 1) {
-    if (escrow.capturedAmountCents === capturedCents) {
+    if (fresh.capturedAmountCents === capturedCents) {
       // Même capture déjà journalisée sous un autre event.id — acquit idempotent.
       return NO_EFFECT
     }
@@ -296,8 +355,8 @@ async function handleCapture(
       details: {
         cause: 'CAPTURE_STATE_CONFLICT',
         escrowId: escrow.id,
-        escrowStatus: escrow.status,
-        alreadyCapturedCents: escrow.capturedAmountCents,
+        escrowStatus: fresh.status,
+        alreadyCapturedCents: fresh.capturedAmountCents,
         incomingCapturedCents: capturedCents,
       },
     })
@@ -452,7 +511,42 @@ async function handleCapture(
     },
     data: { status: MissionStatus.RELEASED },
   })
-  return { handled: true, deferredAlerts: [] }
+
+  // ESCROW_RELEASED → acheteur + voyageur (différé post-commit, fire-and-forget).
+  // Un alias PAR destinataire : ProcessedMissionEvent est @@unique [alias, missionId],
+  // un alias partagé dédupliquerait le second destinataire. Émis UNIQUEMENT sur ce
+  // chemin (libération complète) — jamais sur AWAITING_TRAVELER_ACCOUNT ni sur abort.
+  const releasePayload: NotificationPayload = {
+    event: 'notif:escrow-released',
+    missionId: escrow.missionId,
+    targetProduct: escrow.mission.targetProduct,
+    destination: escrow.mission.destination,
+    amountCents: capturedCents,
+  }
+  return {
+    handled: true,
+    deferredAlerts: [],
+    deferredNotifications: [
+      {
+        alias: 'notif:escrow-released:buyer',
+        missionId: escrow.missionId,
+        recipientId: escrow.mission.buyerId,
+        payload: releasePayload,
+      },
+      // travelerId est structurellement non-null ici (ÉTAPE 2 exige un compte
+      // Connect vérifié) — la garde protège le typage, pas un cas réel.
+      ...(escrow.mission.travelerId
+        ? [
+            {
+              alias: 'notif:escrow-released:traveler',
+              missionId: escrow.missionId,
+              recipientId: escrow.mission.travelerId,
+              payload: releasePayload,
+            },
+          ]
+        : []),
+    ],
+  }
 }
 
 /**

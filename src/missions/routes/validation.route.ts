@@ -2,7 +2,8 @@ import { FastifyPluginAsync } from 'fastify'
 import { MissionStatus } from '../../generated/prisma'
 import { prisma } from '../../db'
 import { findMissionForBuyer } from '../mission-access'
-import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
+import { EscrowCaptureError } from '../../services/escrow.service'
+import { captureEscrowFundsGuarded } from '../../services/escrow-capture.guard'
 import {
   missionIdParamsSchema,
   MissionRouteOptions,
@@ -73,8 +74,10 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       // Fail-fast avant Stripe : si la version est dépassée, inutile de capturer.
       assertVersion(mission, expectedVersion)
 
+      // Garde de capture (fail-fast) : retries épuisés → alerte CAPTURE_FAILED +
+      // 502, la transition VALIDATED ci-dessous n'est JAMAIS atteinte.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe, 'validate')
+        await captureEscrowFundsGuarded(mission.id, opts.stripe, 'validate', opts.onAlert)
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
@@ -144,7 +147,7 @@ export const validationRoutes: FastifyPluginAsync<MissionRouteOptions> = async (
       // l'autre sur la même mission : Stripe refuse toute 2e capture d'un PI déjà
       // capturé, quelle que soit la clé fournie.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe, 'receipt')
+        await captureEscrowFundsGuarded(mission.id, opts.stripe, 'receipt', opts.onAlert)
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err

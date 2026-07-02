@@ -116,7 +116,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     stripe: paymentClient,
     onAlert: options.onAlert,
   })
-  await app.register(escrowRoute, { prefix: '/api/escrow', stripe: paymentClient })
+  await app.register(escrowRoute, {
+    prefix: '/api/escrow',
+    stripe: paymentClient,
+    onAlert: options.onAlert,
+  })
   // Upload de reçu (S21) : multipart → outbox d'extraction OCR (worker async).
   // Aucun client Stripe — la route ne fait que valider + mettre en file.
   await app.register(receiptsRoute, { prefix: '/api/receipts' })
