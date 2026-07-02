@@ -1,0 +1,18 @@
+-- Migration 20260701130000 — ABANDONNÉE / NEUTRALISÉE (no-op)
+--
+-- Contenu d'origine : `GRANT waylo_app TO CURRENT_USER WITH SET TRUE;`
+-- destiné à autoriser `SET LOCAL ROLE waylo_app` depuis le rôle de connexion.
+--
+-- POURQUOI ABANDONNÉE : sur Supabase, ce GRANT est une auto-modification de
+-- l'appartenance du rôle réservé `postgres` ⇒ Supabase COUPE la session
+-- (`P1017` côté Prisma, « connection terminated » côté MCP), le GRANT ne commit
+-- jamais. Vérifié sur `waylo-prod` le 2026-07-01. La migration avait alors été
+-- marquée `rolled_back` dans le ledger Prisma.
+--
+-- SUPERSÉDÉE PAR : `20260701140000_create_waylo_user`. La nouvelle architecture
+-- n'utilise plus `SET LOCAL ROLE` du tout — le runtime se connecte via un rôle
+-- `waylo_user` NOBYPASSRLS, l'enforcement RLS venant directement de ce rôle.
+-- Ce fichier reste présent (no-op) pour conserver la cohérence du ledger : un
+-- déploiement rejouerait sinon le GRANT d'origine et re-couperait la session.
+--
+-- Aucune instruction SQL : ne fait rien, réussit toujours, sur tout environnement.
