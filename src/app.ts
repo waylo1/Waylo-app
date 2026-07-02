@@ -52,7 +52,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     throw new Error('JWT_ENV_MISSING') // fail fast, même motif que les secrets Stripe
   }
 
-  const app = Fastify({ logger: true })
+  // Derrière le proxy Fly : req.ip doit refléter le client réel (X-Forwarded-For)
+  // pour que le rate-limit par IP (rate-limit.ts) soit effectif.
+  const app = Fastify({ logger: true, trustProxy: true })
 
   // Observabilité : logue (warn) toute requête dépassant 100 ms (hrtime ns).
   // Posé tôt : les hooks racine couvrent toutes les routes enregistrées ensuite.
