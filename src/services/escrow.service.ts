@@ -1,6 +1,12 @@
 import { prisma } from '../db'
 import { EscrowStatus } from '../generated/prisma'
 import { substitutionCeilingCents, substitutionHardCapCents } from '../missions/mission-common'
+import { runAlias, registerBuiltinAliases } from '@waylo/shared/automation'
+
+// Idempotent (ré-enregistre si déjà présent) — garantit que l'alias 'stripe-capture'
+// est disponible quel que soit l'appelant (route HTTP via server.ts, worker de
+// réconciliation, ou test import direct), sans dépendre de l'ordre de boot.
+registerBuiltinAliases()
 
 /**
  * Service escrow — capture du séquestre (T1) réutilisable hors route.
@@ -116,14 +122,23 @@ export async function captureEscrowFunds(
   }
 
   const capturedAmountCents = heldBudgetCents + escrow.mission.commissionCents
+  const idempotencyKey = buildCaptureIdempotencyKey(missionId, context)
 
   // SEUL effet du service : la capture Stripe. `amount_to_capture` EXPLICITE :
   // on capture le montant métier exact (= montant autorisé), jamais « ce que
   // Stripe a sous la main » — source unique pour tous les chemins de capture.
-  await stripe.paymentIntents.capture(
-    escrow.stripePaymentIntentId,
-    { amount_to_capture: capturedAmountCents },
-    { idempotencyKey: buildCaptureIdempotencyKey(missionId, context) },
+  // Alias 'stripe-capture' (retry + backoff exponentiel + timeout 15s, cf.
+  // packages/shared/src/automation/alias.ts) : la MÊME idempotencyKey est
+  // envoyée à chaque tentative — un retry post-timeout/échec réseau ne débite
+  // jamais deux fois (Stripe dédoublonne par clé).
+  await runAlias(
+    'stripe-capture',
+    () => stripe.paymentIntents.capture(
+      escrow.stripePaymentIntentId,
+      { amount_to_capture: capturedAmountCents },
+      { idempotencyKey },
+    ),
+    { idempotencyKey },
   )
 
   return {
