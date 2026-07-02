@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Waylo — Tableau de bord développement</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B1720;--bg2:#0E1E28;--panel:#122531;--panel-hi:#16303D;
+    --line:rgba(255,255,255,.07);--line-hi:rgba(255,255,255,.14);
+    --text:#E9EFF2;--muted:#7C93A0;--muted-dim:#586B77;
+    --green:#37C98B;--amber:#F2A93B;--blue:#54A9E2;--red:#EB5B60;--grey:#6B8091;
+    --disp:"Space Grotesk",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace;--body:"Inter",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{font-family:var(--body);background:radial-gradient(1200px 600px at 82% -8%,rgba(84,169,226,.10),transparent 60%),radial-gradient(900px 500px at 5% 105%,rgba(55,201,139,.07),transparent 55%),var(--bg);color:var(--text);line-height:1.5;padding:clamp(16px,3vw,40px);min-height:100vh}
+  .wrap{max-width:1500px;margin:0 auto}
+  .manifest{border:1px solid var(--line-hi);background:linear-gradient(180deg,var(--panel-hi),var(--panel));border-radius:14px;overflow:hidden;position:relative}
+  .manifest::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent,transparent 6px,rgba(255,255,255,.012) 6px,rgba(255,255,255,.012) 7px);pointer-events:none}
+  .manifest-top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:20px;padding:22px clamp(18px,2.5vw,30px) 18px;border-bottom:1px dashed var(--line-hi)}
+  .brand{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .brand h1{font-family:var(--disp);font-weight:700;font-size:clamp(26px,4vw,42px);letter-spacing:-.02em;line-height:1}
+  .brand .tag{font-family:var(--mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.22em;border:1px solid var(--line-hi);border-radius:6px;padding:5px 9px}
+  .brand .sub{font-family:var(--mono);font-size:12.5px;color:var(--muted);width:100%;letter-spacing:.02em;margin-top:6px}
+  .stamp{font-family:var(--mono);text-align:right;font-size:11px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;white-space:nowrap}
+  .stamp b{display:block;color:var(--green);font-size:16px;letter-spacing:.06em;margin-top:2px}
+  .stamp .code{color:var(--muted-dim);margin-top:6px;font-size:10.5px}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);font-family:var(--mono)}
+  .metric{padding:14px clamp(14px,2vw,22px);border-right:1px solid var(--line);position:relative}
+  .metric:last-child{border-right:none}
+  .metric .n{font-size:30px;font-weight:600;line-height:1;letter-spacing:-.02em}
+  .metric .l{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.16em;margin-top:8px}
+  .metric .bar{height:3px;border-radius:2px;margin-top:11px;background:var(--line-hi);overflow:hidden}
+  .metric .bar span{display:block;height:100%}
+  .metric.todo .n{color:var(--grey)}.metric.todo .bar span{background:var(--grey)}
+  .metric.wip .n{color:var(--amber)}.metric.wip .bar span{background:var(--amber)}
+  .metric.test .n{color:var(--blue)}.metric.test .bar span{background:var(--blue)}
+  .metric.prod .n{color:var(--green)}.metric.prod .bar span{background:var(--green)}
+  .zones{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:22px 0 12px}
+  .zone-h{display:flex;align-items:center;gap:10px;padding:11px 15px;border-radius:10px 10px 0 0;border:1px solid var(--line);border-bottom:none;background:var(--bg2);font-family:var(--mono)}
+  .zone-h .dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 10px currentColor}
+  .zone-h .name{font-size:12px;font-weight:600;letter-spacing:.16em;text-transform:uppercase}
+  .zone-h .arrow{margin-left:auto;color:var(--muted-dim);font-size:14px}
+  .z-todo .dot{color:var(--grey);background:var(--grey)}.z-todo .name{color:#9FB2BE}
+  .z-wip .dot{color:var(--amber);background:var(--amber)}.z-wip .name{color:var(--amber)}
+  .z-test .dot{color:var(--blue);background:var(--blue)}.z-test .name{color:var(--blue)}
+  .z-prod .dot{color:var(--green);background:var(--green)}.z-prod .name{color:var(--green)}
+  .lane{margin-bottom:14px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.015),transparent);overflow:hidden}
+  .lane-label{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--bg2)}
+  .lane-label .idx{font-family:var(--mono);font-size:11px;color:var(--muted-dim);letter-spacing:.1em}
+  .lane-label h2{font-family:var(--disp);font-weight:600;font-size:16px;letter-spacing:.01em}
+  .lane-label .cnt{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.08em}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:12px}
+  .col{display:flex;flex-direction:column;gap:9px;min-width:0}
+  .card{position:relative;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--grey);border-radius:8px;padding:11px 12px 11px 13px;transition:transform .16s ease,border-color .16s ease,background .16s ease}
+  .card:hover{transform:translateY(-2px);border-color:var(--line-hi);background:var(--panel-hi)}
+  .card .id{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted-dim);display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
+  .card .id .pip{font-size:9px;letter-spacing:.14em;text-transform:uppercase}
+  .card .t{font-size:13px;font-weight:500;letter-spacing:-.005em;color:var(--text)}
+  .card .m{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:5px;line-height:1.45}
+  .card.g{border-left-color:var(--green)}.card.g .pip{color:var(--green)}
+  .card.a{border-left-color:var(--amber)}.card.a .pip{color:var(--amber)}
+  .card.b{border-left-color:var(--blue)}.card.b .pip{color:var(--blue)}
+  .card.r{border-left-color:var(--red)}.card.r .pip{color:var(--red)}
+  .card.k{border-left-color:var(--grey)}.card.k .pip{color:var(--grey)}
+  .card.r{background:linear-gradient(180deg,rgba(235,91,96,.09),var(--panel))}
+  .card.r .t::before{content:"\26D4 ";font-size:11px}
+  .foot{display:flex;flex-wrap:wrap;align-items:center;gap:22px;margin-top:20px;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .leg{display:flex;align-items:center;gap:8px;letter-spacing:.04em}
+  .leg .sw{width:14px;height:14px;border-radius:4px;flex:none}
+  .foot .sync{margin-left:auto;letter-spacing:.1em;text-transform:uppercase;color:var(--muted-dim)}
+  .foot .sync b{color:var(--text)}
+  @media (max-width:900px){
+    .metrics{grid-template-columns:repeat(2,1fr)}
+    .metric:nth-child(2){border-right:none}
+    .metric:nth-child(-n+2){border-bottom:1px solid var(--line)}
+    .zones{display:none}
+    .grid{grid-template-columns:1fr;gap:14px}
+    .col{border:1px dashed var(--line);border-radius:8px;padding:10px}
+    .col::before{content:attr(data-zone);display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+    .col.z-todo::before{color:#9FB2BE}.col.z-wip::before{color:var(--amber)}.col.z-test::before{color:var(--blue)}.col.z-prod::before{color:var(--green)}
+    .foot .sync{margin-left:0;width:100%}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<noscript><p style="font-family:monospace;color:#7C93A0">Ce tableau requiert JavaScript pour se rendre depuis le bloc de données.</p></noscript>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   DÉBUT DONNÉES — Claude Code édite UNIQUEMENT ce bloc (const ROADMAP)
+   Schéma :
+     meta.status  : texte libre (ex "PRÉ-BÊTA")
+     meta.sync    : "YYYY-MM-DD"
+     lanes[].cards[] :
+        zone   ∈ "todo" | "wip" | "test" | "prod"   (colonne = position pipeline)
+        status ∈ "prod" | "wip" | "test" | "backlog" | "blocked"  (couleur liseré)
+     Règle : status "blocked" ⇒ zone "todo". Ne pas renommer les clés.
+   ═══════════════════════════════════════════════════════════════════════ */
+const ROADMAP = {
+  meta: { status: "PRÉ-BÊTA", ref: "WAYLO-DEV-BOARD", version: "v3", sync: "2026-07-02" },
+  lanes: [
+    {
+      id: "01", title: "Sécurité / Ops", note: "audit · escrow · infra",
+      cards: [
+        { id: "TSA-3161",   title: "Vendor TSA eIDAS",            meta: "RFC 3161 · FreeTSA banni",       zone: "todo", status: "blocked" },
+        { id: "REG-US",     title: "FinCEN MSB (US)",             meta: "Qualification money-services",   zone: "todo", status: "blocked" },
+        { id: "REG-FR",     title: "Licence escrow ACPR",         meta: "Cantonnement des fonds (FR)",    zone: "todo", status: "blocked" },
+        { id: "AUDIT-00",   title: "OTP RNG → crypto-secure",     meta: "crypto.randomInt + timingSafeEqual", zone: "prod", status: "prod" },
+        { id: "AUDIT-00-DTO",   title: "Whitelist DTO endpoints pub", meta: "Jamais de blacklist",            zone: "todo", status: "backlog" },
+        { id: "AUDIT-00-IDEM",  title: "Unifier clés d'idempotence",  meta: "Chemins de capture",             zone: "todo", status: "backlog" },
+        { id: "AUDIT-00",       title: "Doctrine vérif. preuves QPP", meta: "SEAL-01 + réalignement doctrine", zone: "prod", status: "prod" },
+        { id: "AUDIT-00-DOUANE",title: "Conversion seuil douane",     meta: "Bug unité de conversion",        zone: "todo", status: "backlog" },
+        { id: "AUDIT-00",   title: "Retrait route /assign",       meta: "Deadflows PR #47 — supprimée",   zone: "prod", status: "prod" },
+        { id: "INFRA-AUTO", title: "Alias capture Stripe Connect",meta: "Inngest-backed",                 zone: "wip",  status: "wip" },
+        { id: "INFRA-AUTO", title: "Résolution des litiges",      meta: "Dispute aliases",                zone: "wip",  status: "wip" },
+        { id: "INFRA-AUTO", title: "Retry webhooks",              meta: "runAlias webhook-retry câblé",   zone: "test", status: "test" },
+        { id: "INFRA-01/02",title: "Watchdog · Alias · Cleanup",  meta: "Infra d'automatisation",         zone: "prod", status: "prod" },
+        { id: "CI",         title: "Suite de tests backend",      meta: "376 verts",                      zone: "prod", status: "prod" },
+        { id: "RBAC",       title: "Auth par ressource",          meta: "buyerId / travelerId",           zone: "prod", status: "prod" },
+        { id: "ASSIGN-01",  title: "Transitions anti-TOCTOU",     meta: "updateMany conditionnel",        zone: "prod", status: "prod" },
+        { id: "INFRA",      title: "Idempotence transactionnelle",meta: "ProcessedStripe/MissionEvent",   zone: "prod", status: "prod" },
+        { id: "RBAC-02",    title: "Contrôle d'accès évalué",     meta: "findMissionForParticipant",      zone: "prod", status: "prod" },
+        { id: "ADMIN",      title: "AdminAuditLog",               meta: "Dans le même $transaction",      zone: "prod", status: "prod" },
+        { id: "HOTFIX",     title: "Garde-fous IDOR",             meta: "HOTFIX-AUDIT 01/02",             zone: "prod", status: "prod" }
+      ]
+    },
+    {
+      id: "02", title: "Features Métier", note: "missions · escrow · mobile",
+      cards: [
+        { id: "QPP",       title: "Câblage 4-preuves",       meta: "OTP HMAC · Haversine · SHA-256 · TSA", zone: "todo", status: "backlog" },
+        { id: "SUBST",     title: "ProductSubstitution",     meta: "Scoring de confiance IA",              zone: "todo", status: "backlog" },
+        { id: "ABUSE",     title: "MissionBan 48h",          meta: "Anti-abus annulation traveler",        zone: "todo", status: "backlog" },
+        { id: "UX-SUITE",  title: "Suite UX mobile",         meta: "409→SKEL→OPT→PTR→OFFLINE mergés",      zone: "prod", status: "prod" },
+        { id: "LIFECYCLE", title: "Flows lifecycle non câblés",meta: "Sort à trancher",                    zone: "todo", status: "backlog" },
+        { id: "ESCROW",    title: "Doctrine de capture",     meta: "paymentIntents.capture câblé",         zone: "test", status: "test" },
+        { id: "ESCROW",    title: "Transfert différé traveler",meta: "transfers.create + réconciliation",  zone: "test", status: "test" },
+        { id: "MOB-00→07", title: "Couche auth mobile",      meta: "SecureStore + Zustand",                zone: "prod", status: "prod" },
+        { id: "MOB",       title: "Monorepo @waylo/shared",  meta: "SSOT types ← enums Prisma",            zone: "prod", status: "prod" },
+        { id: "MOB",       title: "Interceptors Axios",      meta: "Hydratation optimiste · logout 401",   zone: "prod", status: "prod" },
+        { id: "MISSION-00/01", title: "Cycle de vie mission",meta: "Création · récupération · notif",       zone: "prod", status: "prod" },
+        { id: "MISSION-02",title: "Dashboard traveler",      meta: "Vue participant",                      zone: "prod", status: "prod" },
+        { id: "NOTIF-01",  title: "Notifications acteurs",   meta: "Idempotentes via Watchdog",            zone: "prod", status: "prod" },
+        { id: "ASSIGN-01", title: "Assignation atomique",    meta: "Orpheline — flux /assign supprimé PR #47",zone: "todo", status: "backlog" }
+      ]
+    }
+  ]
+};
+/* ═══════════════════════════ FIN DONNÉES ═══════════════════════════════ */
+
+const ZONE_ORDER = ["todo","wip","test","prod"];
+const ZONE_META = {
+  todo:{cls:"z-todo",label:"À faire",metricLabel:"À faire / bloqué"},
+  wip:{cls:"z-wip",label:"En cours · Stripe",metricLabel:"En cours · Stripe"},
+  test:{cls:"z-test",label:"En test",metricLabel:"En test"},
+  prod:{cls:"z-prod",label:"Production",metricLabel:"En production"}
+};
+const STATUS_CLS={prod:"g",wip:"a",test:"b",backlog:"k",blocked:"r"};
+const STATUS_LABEL={prod:"Prod",wip:"En cours",test:"En test",backlog:"Backlog",blocked:"Bloqué"};
+const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const pad=n=>String(n).padStart(2,"0");
+
+const counts={todo:0,wip:0,test:0,prod:0};
+ROADMAP.lanes.forEach(l=>l.cards.forEach(c=>{counts[c.zone]=(counts[c.zone]||0)+1;}));
+const maxc=Math.max(...Object.values(counts),1);
+
+const metricsHtml=ZONE_ORDER.map(z=>`<div class="metric ${z}"><div class="n">${pad(counts[z])}</div><div class="l">${ZONE_META[z].metricLabel}</div><div class="bar"><span style="width:${Math.round(counts[z]/maxc*100)}%"></span></div></div>`).join("");
+const zonesHtml=ZONE_ORDER.map((z,i)=>`<div class="zone-h ${ZONE_META[z].cls}"><span class="dot"></span><span class="name">${ZONE_META[z].label}</span>${i<3?'<span class="arrow">→</span>':""}</div>`).join("");
+const card=c=>`<div class="card ${STATUS_CLS[c.status]||"k"}"><div class="id"><span>${esc(c.id)}</span><span class="pip">${STATUS_LABEL[c.status]||c.status}</span></div><div class="t">${esc(c.title)}</div>${c.meta?`<div class="m">${esc(c.meta)}</div>`:""}</div>`;
+const lanesHtml=ROADMAP.lanes.map(l=>{
+  const cols=ZONE_ORDER.map(z=>`<div class="col ${ZONE_META[z].cls}" data-zone="${ZONE_META[z].label}">${l.cards.filter(c=>c.zone===z).map(card).join("")}</div>`).join("");
+  return `<section class="lane"><div class="lane-label"><span class="idx">${esc(l.id)}</span><h2>${esc(l.title)}</h2><span class="cnt">${esc(l.note||"")}</span></div><div class="grid">${cols}</div></section>`;
+}).join("");
+
+document.getElementById("app").innerHTML=`
+  <header class="manifest">
+    <div class="manifest-top">
+      <div class="brand"><h1>WAYLO</h1><span class="tag">Manifeste de développement</span>
+      <div class="sub">Escrow P2P cross-border · MC Automation · Fastify · Prisma · Stripe Connect · Expo</div></div>
+      <div class="stamp">Statut opérationnel<b>${esc(ROADMAP.meta.status)}</b><span class="code">REF · ${esc(ROADMAP.meta.ref)} · ${esc(ROADMAP.meta.version)}</span></div>
+    </div>
+    <div class="metrics">${metricsHtml}</div>
+  </header>
+  <div class="zones">${zonesHtml}</div>
+  ${lanesHtml}
+  <footer class="foot">
+    <div class="leg"><span class="sw" style="background:var(--green)"></span>Production</div>
+    <div class="leg"><span class="sw" style="background:var(--amber)"></span>En cours (Stripe)</div>
+    <div class="leg"><span class="sw" style="background:var(--blue)"></span>En test</div>
+    <div class="leg"><span class="sw" style="background:var(--grey)"></span>Backlog</div>
+    <div class="leg"><span class="sw" style="background:var(--red)"></span>Bloqué</div>
+    <div class="sync">Dernière synchro · <b>${esc(ROADMAP.meta.sync)}</b></div>
+  </footer>`;
+</script>
+</body>
+</html>
