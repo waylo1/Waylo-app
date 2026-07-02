@@ -6,10 +6,11 @@
  * sauté en CI (CI=true) pour garder la suite hermétique ; exécuté en local.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
+import { logger } from '../lib/logger'
 import { buildTimeStampReq, parseTimeStampResp, requestTimestamp, TsaError } from './tsa.client'
-import { DEFAULT_TSA_TIMEOUT_MS, getTsaProviders } from './tsa.config'
+import { DEFAULT_TSA_TIMEOUT_MS, ESTIMATED_COST_PER_TOKEN_CENTS, getTsaProviders } from './tsa.config'
 import type { TsaProvider } from './tsa.config'
 
 const SHA256_OID_DER = Buffer.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01])
@@ -33,8 +34,8 @@ function fakeFetch(handlers: Array<(body: Uint8Array) => Response>): typeof fetc
 }
 
 const PROVIDERS: readonly TsaProvider[] = [
-  { id: 'primary', url: 'https://tsa-primary.test', timeoutMs: 1_000 },
-  { id: 'secondary', url: 'https://tsa-secondary.test', timeoutMs: 1_000 },
+  { id: 'primary', url: 'https://tsa-primary.test', timeoutMs: 1_000, estimatedCostCents: 5 },
+  { id: 'secondary', url: 'https://tsa-secondary.test', timeoutMs: 1_000, estimatedCostCents: 7 },
 ]
 
 describe('tsa.config — chaîne de fournisseurs', () => {
@@ -43,6 +44,8 @@ describe('tsa.config — chaîne de fournisseurs', () => {
     expect(providers.map((p) => p.id)).toEqual(['sectigo', 'certum', 'digicert'])
     expect(providers.every((p) => p.timeoutMs === DEFAULT_TSA_TIMEOUT_MS)).toBe(true)
     expect(providers.some((p) => p.url.includes('freetsa'))).toBe(false)
+    // Endpoints publics : coût marginal nul (cf. docs/tsa-economics.md).
+    expect(providers.every((p) => p.estimatedCostCents === 0)).toBe(true)
   })
 
   it('TSA_ENDPOINTS surcharge la chaîne en conservant l’ordre de priorité', () => {
@@ -51,6 +54,8 @@ describe('tsa.config — chaîne de fournisseurs', () => {
     })
     expect(providers.map((p) => p.id)).toEqual(['tsa.example.eu', 'backup.example.com'])
     expect(providers[0].url).toBe('https://tsa.example.eu/rfc3161')
+    // Endpoint injecté par env = présumé QTSP sous contrat → provision de coût.
+    expect(providers.every((p) => p.estimatedCostCents === ESTIMATED_COST_PER_TOKEN_CENTS)).toBe(true)
   })
 
   it('rejette une surcharge invalide (URL malformée ou protocole non HTTP)', () => {
@@ -108,6 +113,25 @@ describe('tsa.client — failover', () => {
     expect(stamp.providerId).toBe('secondary')
     expect(stamp.responseDer.length).toBeGreaterThan(0)
     expect(stamp.messageImprintHex).toBe(createHash('sha256').update('preuve-qpp-failover').digest('hex'))
+    expect(stamp.estimatedCostCents).toBe(7)
+  })
+
+  it('logue le coût de l’opération avec le fournisseur utilisé', async () => {
+    const infoSpy = vi.spyOn(logger, 'info')
+    const fetchImpl = fakeFetch([(body) => new Response(craftResponse(0, Buffer.from(body)), { status: 200 })])
+
+    await requestTimestamp('preuve-qpp-cout', { providers: PROVIDERS, fetchImpl })
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'tsa.timestamp.granted',
+        providerId: 'primary',
+        estimatedCostCents: 5,
+        durationMs: expect.any(Number),
+      }),
+      'TSA timestamp granted',
+    )
+    infoSpy.mockRestore()
   })
 
   it('refuse un jeton dont l’empreinte ne correspond pas (pas de bascule aveugle)', async () => {
