@@ -3,7 +3,9 @@ import { prisma } from '../db'
 import { MissionStatus } from '../generated/prisma'
 import { findMissionForBuyer } from '../missions/mission-access'
 import type { PaymentIntentClient } from '../missions/mission-common'
-import { captureEscrowFunds, EscrowCaptureError } from '../services/escrow.service'
+import { EscrowCaptureError } from '../services/escrow.service'
+import { captureEscrowFundsGuarded } from '../services/escrow-capture.guard'
+import type { AlertSink } from '../alerts'
 import { AppError } from '../errors/app.error'
 
 /**
@@ -31,6 +33,8 @@ import { AppError } from '../errors/app.error'
  */
 export interface EscrowRouteOptions {
   stripe: PaymentIntentClient
+  /** Hook d'alertes opérationnelles (CAPTURE_FAILED) — cf. src/alerts.ts. */
+  onAlert?: AlertSink
 }
 
 const missionIdParamsSchema = {
@@ -68,7 +72,8 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
       try {
         // Chemin hors tunnel mais fonctionnellement jumeau de /validate (même
         // garde d'autorisation + verrou douanier) → même contexte d'idempotence.
-        const result = await captureEscrowFunds(missionId, opts.stripe, 'validate')
+        // GUARD CLAUSE : retries épuisés → alerte CAPTURE_FAILED + 502.
+        const result = await captureEscrowFundsGuarded(missionId, opts.stripe, 'validate', opts.onAlert)
         return reply.code(200).send(result)
       } catch (err) {
         // Mapping des erreurs de pré-check du service (statut escrow) vers HTTP ;

@@ -42,6 +42,8 @@ export type AlertCode =
   | 'DISPUTE_PENALTY_STUCK_PENDING'
   | 'RECEIPT_INTEGRITY_VIOLATION'
   | 'ESCROW_INVARIANT_VIOLATED'
+  | 'CAPTURE_FAILED'
+  | 'WEBHOOK_MISSION_NOT_FOUND'
 
 export type AlertSeverity = 'info' | 'warn' | 'ops' | 'critical'
 
@@ -92,6 +94,8 @@ const SEVERITY_BY_CODE: Record<AlertCode, AlertSeverity> = {
   DISPUTE_PENALTY_STUCK_PENDING: 'critical', // pénalité PENDING avec attempts≥max (crash entre attempts++ et verdict) : charge Stripe possible non commitée → vérifier PI via idempotencyKey avant toute action
   RECEIPT_INTEGRITY_VIOLATION: 'critical', // reçu falsifié / texte OCR adverse sur le chemin de libération : release bloqué + mission gelée (litige auto) → arbitrage humain requis
   ESCROW_INVARIANT_VIOLATED: 'critical', // capture Stripe réussie mais escrow non-HELD en tx : violation d'invariant Stripe, réconciliation humaine requise
+  CAPTURE_FAILED: 'critical', // capture Stripe échouée après épuisement des retries de l'alias stripe-capture : statut métier non modifié (fail-fast), voyageur impayé → intervention admin requise
+  WEBHOOK_MISSION_NOT_FOUND: 'critical', // payment_intent.succeeded portant metadata.missionId Waylo SANS escrow en DB : argent capturé sans trace financière → réconciliation humaine requise
 }
 
 export function toOpsAlert(input: OpsAlertInput): OpsAlert {

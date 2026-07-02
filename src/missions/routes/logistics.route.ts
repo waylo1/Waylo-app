@@ -11,7 +11,8 @@ import {
   findMissionForBuyer,
   findMissionForParticipant,
 } from '../mission-access'
-import { captureEscrowFunds, EscrowCaptureError } from '../../services/escrow.service'
+import { EscrowCaptureError } from '../../services/escrow.service'
+import { captureEscrowFundsGuarded } from '../../services/escrow-capture.guard'
 import { getCustomsThreshold } from '../customs'
 import { hashQrCode, qrCodeMatches } from '../qr-proof'
 import {
@@ -299,10 +300,12 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
         }
       }
 
-      // Capture via le service (source unique) : pré-check escrow HELD + montant
-      // `amount_to_capture` exact, contexte 'receive'.
+      // Capture via la garde (source unique) : pré-check escrow HELD + montant
+      // `amount_to_capture` exact, contexte 'receive'. GUARD CLAUSE : retries
+      // épuisés → alerte CAPTURE_FAILED + 502 — la transition VALIDATED
+      // ci-dessous n'est JAMAIS atteinte si la capture Stripe a échoué.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe, 'receive')
+        await captureEscrowFundsGuarded(mission.id, opts.stripe, 'receive', opts.onAlert)
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
@@ -423,10 +426,11 @@ export const logisticsRoutes: FastifyPluginAsync<MissionRouteOptions> = async (a
       // Sceau QR interne (anti « colis vide ») : vérification STRICTE en temps constant AVANT capture.
       verifyInnerSeal((req.body as InnerQrBody).innerQrCode, mission.innerQrCodeHash)
 
-      // Capture via le service (source unique) : pré-check escrow HELD + montant
+      // Capture via la garde (source unique) : pré-check escrow HELD + montant
       // `amount_to_capture` exact, contexte 'collection' dédié au chemin collecte.
+      // GUARD CLAUSE : retries épuisés → alerte CAPTURE_FAILED + 502, statut inchangé.
       try {
-        await captureEscrowFunds(mission.id, opts.stripe, 'collection')
+        await captureEscrowFundsGuarded(mission.id, opts.stripe, 'collection', opts.onAlert)
       } catch (err) {
         if (err instanceof EscrowCaptureError) throw new AppError('ESCROW_NOT_HELD', 400)
         throw err
