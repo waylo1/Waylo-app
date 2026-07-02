@@ -1,0 +1,26 @@
+-- Migration 20260702090000 — Lève le verrou d'incident sur `_prisma_migrations`.
+--
+-- CONSTAT : `_prisma_migrations` porte RLS activé + une policy `deny_all`
+-- résiduelle d'un verrou d'incident manuel (jamais posé par une migration —
+-- absent du dépôt), appliqué en marge du même incident qui a motivé le
+-- remplacement de `deny_all` par des policies granulaires sur Mission/Wallet
+-- (migration 20260630130000). `_prisma_migrations` n'a jamais reçu son
+-- remplacement : `waylo_user` (NOBYPASSRLS, rôle runtime — cf. 20260701140000)
+-- se voit refuser jusqu'au SELECT sur cette table, donc `prisma migrate deploy`
+-- au démarrage du conteneur croit la base vierge et tente de rejouer tout
+-- l'historique depuis `20260612130000_init`, dont l'INSERT de bookkeeping est
+-- bloqué par `deny_all` → crash-loop.
+--
+-- CORRECTIF : `_prisma_migrations` est une table de bookkeeping interne à
+-- Prisma, jamais lue par du code applicatif Waylo et jamais exposée via
+-- PostgREST (anon/authenticated n'ont de toute façon plus aucun privilège sur
+-- aucune table public, cf. 20260701170000). Aucune donnée utilisateur, aucun
+-- besoin métier de RLS ici — DISABLE suffit et restaure l'accès complet pour
+-- le owner (postgres, déjà BYPASSRLS) ET pour waylo_user (via ses GRANT
+-- SELECT/INSERT/UPDATE/DELETE existants, posés par 20260701140000).
+--
+-- Idempotent (DISABLE répétable sans erreur si déjà désactivé).
+-- Réversible : ALTER TABLE "_prisma_migrations" ENABLE ROW LEVEL SECURITY;
+--   (déconseillé — recrée le crash-loop tant qu'aucune policy adaptée n'existe).
+
+ALTER TABLE "_prisma_migrations" DISABLE ROW LEVEL SECURITY;
