@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
+import { logger } from '../lib/logger'
 import { getTsaProviders, type TsaProvider } from './tsa.config'
 
 export class TsaError extends Error {
@@ -32,6 +33,8 @@ export interface TsaTimestamp {
   responseDer: Buffer
   /** Empreinte SHA-256 (hex) du message horodaté. */
   messageImprintHex: string
+  /** Coût estimé du jeton en centimes (cf. docs/tsa-economics.md), pour le ledger. */
+  estimatedCostCents: number
 }
 
 // ── Encodage DER (sous-ensemble TimeStampReq) ──────────────────────────────
@@ -170,15 +173,36 @@ export async function requestTimestamp(
   const nonce = randomBytes(16)
   const request = buildTimeStampReq(digest, nonce)
 
+  const startedAt = Date.now()
   const attempts: string[] = []
   for (const provider of providers) {
     try {
       const responseDer = await postTimestampQuery(provider, request, fetchImpl)
       validateResponse(responseDer, digest, nonce)
-      return { providerId: provider.id, responseDer, messageImprintHex: digest.toString('hex') }
+      logger.info(
+        {
+          event: 'tsa.timestamp.granted',
+          providerId: provider.id,
+          estimatedCostCents: provider.estimatedCostCents,
+          messageImprintHex: digest.toString('hex'),
+          durationMs: Date.now() - startedAt,
+          failedAttempts: attempts,
+        },
+        'TSA timestamp granted',
+      )
+      return {
+        providerId: provider.id,
+        responseDer,
+        messageImprintHex: digest.toString('hex'),
+        estimatedCostCents: provider.estimatedCostCents,
+      }
     } catch (error) {
       attempts.push(`${provider.id}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+  logger.error(
+    { event: 'tsa.timestamp.failed', attempts, durationMs: Date.now() - startedAt },
+    'TSA timestamp failed on every provider',
+  )
   throw new TsaError(attempts)
 }

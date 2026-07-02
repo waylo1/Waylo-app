@@ -48,6 +48,9 @@ describe('Checkout — validation capacité acheteur (Sprint 19)', () => {
     await prisma.walletTransaction.deleteMany()
     await prisma.wallet.deleteMany()
     await prisma.ledgerEntry.deleteMany()
+    // Une suite précédente peut laisser des TransferOutbox référençant un escrow :
+    // purge d'abord, sinon FK TransferOutbox_escrowId_fkey (échec intermittent).
+    await prisma.transferOutbox.deleteMany()
     await prisma.escrowTransaction.deleteMany()
     await prisma.mission.deleteMany()
   }

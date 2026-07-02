@@ -24,14 +24,25 @@ export interface TsaProvider {
   url: string
   /** Délai maximal par tentative avant bascule sur le fournisseur suivant. */
   timeoutMs: number
+  /** Coût estimé par jeton délivré, en centimes (convention Waylo : jamais de Float). */
+  estimatedCostCents: number
 }
 
 export const DEFAULT_TSA_TIMEOUT_MS = 10_000
 
+/**
+ * Provision de coût par jeton pour un QTSP qualifié sous contrat, en centimes.
+ * Fondement (cf. docs/tsa-economics.md) : milieu de fourchette des offres
+ * qualifiées eIDAS en volume (~2–20 ¢/jeton ; Disig ~10–20 ¢, packs pro
+ * Certum/GlobalTrust ~2–10 ¢). Les endpoints publics par défaut coûtent 0 ¢ ;
+ * cette provision s'applique aux fournisseurs injectés via TSA_ENDPOINTS.
+ */
+export const ESTIMATED_COST_PER_TOKEN_CENTS = 5
+
 const DEFAULT_PROVIDERS: readonly TsaProvider[] = [
-  { id: 'sectigo', url: 'https://timestamp.sectigo.com', timeoutMs: DEFAULT_TSA_TIMEOUT_MS },
-  { id: 'certum', url: 'http://time.certum.pl', timeoutMs: DEFAULT_TSA_TIMEOUT_MS },
-  { id: 'digicert', url: 'http://timestamp.digicert.com', timeoutMs: DEFAULT_TSA_TIMEOUT_MS },
+  { id: 'sectigo', url: 'https://timestamp.sectigo.com', timeoutMs: DEFAULT_TSA_TIMEOUT_MS, estimatedCostCents: 0 },
+  { id: 'certum', url: 'http://time.certum.pl', timeoutMs: DEFAULT_TSA_TIMEOUT_MS, estimatedCostCents: 0 },
+  { id: 'digicert', url: 'http://timestamp.digicert.com', timeoutMs: DEFAULT_TSA_TIMEOUT_MS, estimatedCostCents: 0 },
 ]
 
 /**
@@ -54,6 +65,13 @@ export function getTsaProviders(env: NodeJS.ProcessEnv = process.env): readonly 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error(`TSA_ENDPOINTS_INVALID_URL: ${candidate}`)
     }
-    return { id: parsed.hostname, url: candidate, timeoutMs: DEFAULT_TSA_TIMEOUT_MS }
+    // Un endpoint injecté par env est présumé sous contrat QTSP : on lui
+    // applique la provision de coût plutôt que le 0 ¢ des endpoints publics.
+    return {
+      id: parsed.hostname,
+      url: candidate,
+      timeoutMs: DEFAULT_TSA_TIMEOUT_MS,
+      estimatedCostCents: ESTIMATED_COST_PER_TOKEN_CENTS,
+    }
   })
 }
