@@ -106,7 +106,7 @@ describe('Reconciliation — timeout collecte acheteur (DEPOSITED > 5 j)', () =>
     await runReconciliation({ prisma, stripe: fakeStripe, onAlert: () => {} })
 
     expect(captureCalls).toEqual([
-      { id: `pi_recon_${mission.id}`, key: `timeout_collection_${mission.id}` },
+      { id: `pi_recon_${mission.id}`, key: `waylo:${mission.id}:cap:timeout:v1` },
     ])
     const db = await prisma.mission.findUniqueOrThrow({ where: { id: mission.id } })
     expect(db.status).toBe('VALIDATED')

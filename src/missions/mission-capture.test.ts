@@ -112,7 +112,7 @@ describe('Validation acheteur T1 — POST /api/missions/:id/validate', () => {
 
     // Capture déclenchée, du bon PI, idempotencyKey capture_<missionId>.
     expect(captureCalls.length).toBe(before + 1)
-    expect(captureCalls.at(-1)).toEqual({ id: piId, idempotencyKey: `capture_${missionId}` })
+    expect(captureCalls.at(-1)).toEqual({ id: piId, idempotencyKey: `waylo:${missionId}:cap:validate:v1` })
 
     // AUCUNE écriture comptable ici : ledger vide, escrow toujours HELD (le webhook fera le reste).
     const escrow = await prisma.escrowTransaction.findUniqueOrThrow({ where: { missionId } })

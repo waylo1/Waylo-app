@@ -112,7 +112,7 @@ describe('[SHARED-409] Concurrence optimiste — version + 409 VERSION_CONFLICT'
 
       // Capture bien déclenchée avec la clé idempotente canonique.
       expect(captureCalls.length).toBe(callsBefore + 1)
-      expect(captureCalls.at(-1)).toMatchObject({ id: piId, idempotencyKey: `capture_${missionId}` })
+      expect(captureCalls.at(-1)).toMatchObject({ id: piId, idempotencyKey: `waylo:${missionId}:cap:validate:v1` })
     })
 
     it('(2) version dépassée → 409, mission intacte, aucune capture', async () => {

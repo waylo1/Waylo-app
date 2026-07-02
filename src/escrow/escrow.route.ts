@@ -66,7 +66,9 @@ const escrowRoute: FastifyPluginAsync<EscrowRouteOptions> = async (app, opts) =>
       }
 
       try {
-        const result = await captureEscrowFunds(missionId, opts.stripe)
+        // Chemin hors tunnel mais fonctionnellement jumeau de /validate (même
+        // garde d'autorisation + verrou douanier) → même contexte d'idempotence.
+        const result = await captureEscrowFunds(missionId, opts.stripe, 'validate')
         return reply.code(200).send(result)
       } catch (err) {
         // Mapping des erreurs de pré-check du service (statut escrow) vers HTTP ;

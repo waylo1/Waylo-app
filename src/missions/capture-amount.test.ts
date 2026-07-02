@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { PrismaClient, User } from '../generated/prisma'
 import type { PaymentIntentClient } from './mission-common'
+import { captureEscrowFunds } from '../services/escrow.service'
 import { resetDb } from '../../tests/helpers/db-reset'
 import { hashQrCode } from './qr-proof'
 
@@ -105,13 +106,15 @@ describe('Capture — amount_to_capture explicite (Audit VULN #1/#2)', () => {
     return mission.id
   }
 
-  it('/validate standard → capture budget + commission, clé capture_<id>', async () => {
+  it('/validate standard → capture budget + commission, clé waylo:<id>:cap:validate:v1', async () => {
     captures.length = 0
     const id = await seed({ status: 'AWAITING_VALIDATION' })
     const res = await app.inject({ method: 'POST', url: `/api/missions/${id}/validate`, headers: bearer() })
 
     expect(res.statusCode).toBe(200)
-    expect(captures).toEqual([{ id: `pi_${id}`, key: `capture_${id}`, amount: STANDARD_CAPTURE }])
+    expect(captures).toEqual([
+      { id: `pi_${id}`, key: `waylo:${id}:cap:validate:v1`, amount: STANDARD_CAPTURE },
+    ])
   })
 
   it('/validate substitution → capture floor(budget×1,2) + commission', async () => {
@@ -120,10 +123,12 @@ describe('Capture — amount_to_capture explicite (Audit VULN #1/#2)', () => {
     const res = await app.inject({ method: 'POST', url: `/api/missions/${id}/validate`, headers: bearer() })
 
     expect(res.statusCode).toBe(200)
-    expect(captures).toEqual([{ id: `pi_${id}`, key: `capture_${id}`, amount: SUBSTITUTION_CAPTURE }])
+    expect(captures).toEqual([
+      { id: `pi_${id}`, key: `waylo:${id}:cap:validate:v1`, amount: SUBSTITUTION_CAPTURE },
+    ])
   })
 
-  it('/confirm-collection substitution → capture 120%, clé capture_collection_<id>', async () => {
+  it('/confirm-collection substitution → capture 120%, clé waylo:<id>:cap:collection:v1', async () => {
     captures.length = 0
     const id = await seed({ status: 'DEPOSITED', substitutionAuthorized: true })
     const res = await app.inject({
@@ -135,7 +140,83 @@ describe('Capture — amount_to_capture explicite (Audit VULN #1/#2)', () => {
 
     expect(res.statusCode).toBe(200)
     expect(captures).toEqual([
-      { id: `pi_${id}`, key: `capture_collection_${id}`, amount: SUBSTITUTION_CAPTURE },
+      { id: `pi_${id}`, key: `waylo:${id}:cap:collection:v1`, amount: SUBSTITUTION_CAPTURE },
     ])
+  })
+})
+
+describe('Capture — idempotence Stripe (AUDIT-00-IDEM)', () => {
+  let prisma: PrismaClient
+  let buyer: User
+
+  beforeAll(async () => {
+    prisma = (await import('../db')).prisma
+    await resetDb(prisma)
+    buyer = await prisma.user.create({ data: { email: 'buyer-idempotence@test.waylo' } })
+  })
+
+  afterAll(async () => {
+    await prisma.$disconnect()
+  })
+
+  async function seedHeldMission(): Promise<string> {
+    const mission = await prisma.mission.create({
+      data: {
+        buyerId: buyer.id,
+        status: 'AWAITING_VALIDATION' as never,
+        targetProduct: 'Article',
+        budgetCents: BUDGET_CENTS,
+        commissionCents: COMMISSION_CENTS,
+        destination: 'Tokyo',
+        expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      },
+    })
+    await prisma.escrowTransaction.create({
+      data: {
+        missionId: mission.id,
+        stripePaymentIntentId: `pi_${mission.id}`,
+        status: 'HELD',
+        spendingLimitCents: BUDGET_CENTS,
+        idempotencyKey: `escrow_fund_${mission.id}`,
+      },
+    })
+    return mission.id
+  }
+
+  it('2 appels concurrents même clé → le 2e reflète le rejet Stripe (dédup active), aucun impact DB', async () => {
+    const id = await seedHeldMission()
+    const usedKeys = new Set<string>()
+    // Simule le comportement Stripe pour deux requêtes concurrentes partageant la
+    // même idempotencyKey : la 2e requête, tant que la 1re n'a pas terminé côté
+    // Stripe, est rejetée (Stripe : "a request is currently being processed").
+    const raceStripe: PaymentIntentClient = {
+      paymentIntents: {
+        create: async params => ({ id: `pi_${params.metadata['missionId']}`, client_secret: 'secret' }),
+        capture: async (piId, _params, options) => {
+          if (usedKeys.has(options.idempotencyKey)) {
+            throw new Error('IDEMPOTENCY_KEY_IN_USE')
+          }
+          usedKeys.add(options.idempotencyKey)
+          return { id: piId }
+        },
+      },
+    }
+
+    const [first, second] = await Promise.allSettled([
+      captureEscrowFunds(id, raceStripe, 'validate'),
+      captureEscrowFunds(id, raceStripe, 'validate'),
+    ])
+
+    const outcomes = [first, second]
+    const fulfilled = outcomes.filter(r => r.status === 'fulfilled')
+    const rejected = outcomes.filter(r => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toBe('IDEMPOTENCY_KEY_IN_USE')
+
+    // Aucun impact DB : captureEscrowFunds n'écrit rien (source de vérité = webhook),
+    // l'escrow reste HELD que la capture ait réussi ou échoué côté Stripe.
+    const escrow = await prisma.escrowTransaction.findUnique({ where: { missionId: id } })
+    expect(escrow?.status).toBe('HELD')
   })
 })
